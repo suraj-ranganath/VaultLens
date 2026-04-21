@@ -468,6 +468,29 @@ select:focus {
   line-height: 1.62;
 }
 
+.trace-body p,
+.trace-body ul,
+.trace-body ol,
+.trace-body h1,
+.trace-body h2,
+.trace-body h3 {
+  margin-top: 0;
+}
+
+.trace-body h1,
+.trace-body h2,
+.trace-body h3 {
+  font-family: "Fraunces", serif;
+  letter-spacing: -0.03em;
+}
+
+.trace-body code {
+  font-family: "IBM Plex Mono", monospace;
+  background: rgba(33, 24, 15, 0.08);
+  padding: 1px 5px;
+  border-radius: 8px;
+}
+
 .bullet-list {
   margin: 0;
   padding-left: 18px;

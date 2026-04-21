@@ -133,7 +133,7 @@ The web interface runs a local Codex-backed query route over the vault. It is de
 - answers return citations to vault files plus a live agent feed
 - the live feed shows reasoning summaries, plan updates, shell commands, web searches, MCP calls, and surfaced agent messages
 - useful answers can be filed back into `outputs/` directly from the UI
-- web search is optional and off by default so the query path stays vault-first
+- web search fallback is on by default, but the agent is still instructed to treat the vault as the source of truth first
 
 Environment knobs:
 

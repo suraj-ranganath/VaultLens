@@ -296,11 +296,12 @@ function formatFeedEntry(phase, item) {
     };
   }
   if (item.type === "agent_message") {
+    const body = extractAgentMessageBody(item.text);
     return {
       type: "agent_message",
       phase,
       title: "Agent message",
-      body: item.text,
+      body,
     };
   }
   if (item.type === "error") {
@@ -417,7 +418,7 @@ function renderTrace(trace) {
               <article class="trace-card">
                 <div class="trace-kind">reasoning summary • ${escapeHtml(item.phase || "")}</div>
                 <h3>${escapeHtml(item.title || "Reasoning summary")}</h3>
-                <div class="trace-body">${escapeHtml(item.body || "")}</div>
+                <div class="trace-body">${renderMarkdown(item.body || "")}</div>
               </article>
             `;
           }
@@ -426,7 +427,7 @@ function renderTrace(trace) {
               <article class="trace-card">
                 <div class="trace-kind">system • ${escapeHtml(item.phase || "")}</div>
                 <h3>${escapeHtml(item.title || "System event")}</h3>
-                <div class="trace-body">${escapeHtml(item.body || "")}</div>
+                <div class="trace-body">${renderMarkdown(item.body || "")}</div>
               </article>
             `;
           }
@@ -435,7 +436,7 @@ function renderTrace(trace) {
               <article class="trace-card">
                 <div class="trace-kind">agent message • ${escapeHtml(item.phase || "")}</div>
                 <h3>${escapeHtml(item.title || "Agent message")}</h3>
-                <div class="trace-body">${escapeHtml(item.body || "")}</div>
+                <div class="trace-body">${renderMarkdown(item.body || "")}</div>
               </article>
             `;
           }
@@ -443,7 +444,7 @@ function renderTrace(trace) {
             <article class="trace-card">
               <div class="trace-kind">${escapeHtml(item.type || "event")}${item.phase ? ` • ${escapeHtml(item.phase)}` : ""}</div>
               <h3>${escapeHtml(item.title || item.message || "Agent event")}</h3>
-              ${item.body ? `<div class="trace-body">${escapeHtml(item.body)}</div>` : ""}
+              ${item.body ? `<div class="trace-body">${renderMarkdown(item.body)}</div>` : ""}
             </article>
           `;
         })
@@ -567,6 +568,27 @@ function renderMarkdown(source) {
     html.push("</ul>");
   }
   return html.join("");
+}
+
+function extractAgentMessageBody(text) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    return "";
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      if (typeof parsed.answer_markdown === "string" && parsed.answer_markdown.trim()) {
+        return parsed.answer_markdown;
+      }
+      if (typeof parsed.concise_answer === "string" && parsed.concise_answer.trim()) {
+        return parsed.concise_answer;
+      }
+    }
+  } catch {
+    // fall through to raw text
+  }
+  return raw;
 }
 
 function renderInline(text) {
