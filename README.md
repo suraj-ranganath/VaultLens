@@ -118,6 +118,27 @@ The Telegram receiver stores raw updates locally, appends a normalized inbox str
 npm run vault:health
 ```
 
+### 6. Run the local web Q&A interface
+
+```bash
+npm run vault:web
+```
+
+Then open `http://localhost:4318`.
+
+The web interface runs a local Codex-backed query route over the vault. It is designed for retrieval-first answering:
+
+- local vault files are the primary source of truth
+- the agent starts from `hot.md`, dashboards, and canonical notes
+- answers return citations to vault files plus a visible tool trace
+- web search is optional and off by default so the query path stays vault-first
+
+Environment knobs:
+
+- `VAULT_QUERY_PORT`
+- `VAULT_QUERY_DEFAULT_MODEL`
+- `OPENAI_API_KEY`
+
 ## Knowledge Design Principles
 
 - explicit and inspectable over hidden memory

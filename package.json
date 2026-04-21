@@ -6,6 +6,7 @@
   "scripts": {
     "vault:setup": "bash bin/setup-vault.sh",
     "vault:health": "python3 tools/vault_health.py",
+    "vault:web": "node tools/vault_query_server.mjs",
     "rebuild:dashboards": "python3 tools/rebuild_dashboards.py",
     "enrich:browser:recent": "node tools/enrich_with_browser.mjs . 120 4 30",
     "telegram:sync": "python3 tools/telegram_inbox.py sync --vault-root .",
