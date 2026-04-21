@@ -118,6 +118,10 @@ const server = http.createServer(async (req, res) => {
       return handleGetChat(decodeURIComponent(url.pathname.replace(/^\/api\/chats\//, "")), res);
     }
 
+    if (req.method === "GET" && url.pathname.startsWith("/vault-raw/")) {
+      return serveVaultRawFile(decodeURIComponent(url.pathname.replace(/^\/vault-raw\//, "")), res);
+    }
+
     if (req.method === "GET" && url.pathname.startsWith("/vault/")) {
       return serveVaultFile(decodeURIComponent(url.pathname.replace(/^\/vault\//, "")), res);
     }
@@ -729,6 +733,25 @@ async function serveVaultFile(relativePath, res) {
   if (!resolved || !(await fileExists(resolved))) {
     return json(res, 404, { error: "Vault file not found." });
   }
+
+  const ext = path.extname(resolved).toLowerCase();
+  if (ext !== ".md") {
+    return serveVaultRawFile(relativePath, res);
+  }
+
+  const note = await readVaultNote(relativePath);
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(renderVaultNotePage(note));
+}
+
+async function serveVaultRawFile(relativePath, res) {
+  if (!isAllowedVaultPath(relativePath)) {
+    return json(res, 403, { error: "Path is not exposed by the vault web interface." });
+  }
+  const resolved = safeJoin(vaultRoot, relativePath);
+  if (!resolved || !(await fileExists(resolved))) {
+    return json(res, 404, { error: "Vault file not found." });
+  }
   const ext = path.extname(resolved).toLowerCase();
   const contentType =
     ext === ".md"
@@ -740,12 +763,509 @@ async function serveVaultFile(relativePath, res) {
   fs.createReadStream(resolved).pipe(res);
 }
 
+async function readVaultNote(relativePath) {
+  const safePath = safeJoin(vaultRoot, relativePath);
+  if (!safePath || !(await fileExists(safePath))) {
+    throw new Error("Vault note not found.");
+  }
+
+  const text = await fsp.readFile(safePath, "utf8");
+  const { frontmatter, body } = splitFrontmatter(text);
+  const meta = parseSimpleFrontmatter(frontmatter);
+  const title = String(meta.title || path.basename(relativePath, path.extname(relativePath))).trim();
+  const sourceUrl = String(meta.url || "").trim() || null;
+  const noteType = String(meta.type || "").trim() || "note";
+  const tags = Array.isArray(meta.tags) ? meta.tags : [];
+
+  return {
+    path: relativePath,
+    absolutePath: safePath,
+    title,
+    body,
+    noteType,
+    sourceUrl,
+    tags,
+    frontmatter: meta,
+  };
+}
+
+function renderVaultNotePage(note) {
+  const subtitleBits = [note.noteType, note.path];
+  const publishedOn = String(note.frontmatter.published_on || "").trim();
+  const discoveredOn = String(note.frontmatter.discovered_on || "").trim();
+  if (publishedOn) {
+    subtitleBits.push(`published ${publishedOn}`);
+  }
+  if (discoveredOn) {
+    subtitleBits.push(`saved ${discoveredOn}`);
+  }
+
+  const tagChips = note.tags.length
+    ? `
+        <div class="note-chip-row">
+          ${note.tags.map((tag) => `<span class="note-chip">${escapeHtml(String(tag))}</span>`).join("")}
+        </div>
+      `
+    : "";
+
+  const relatedLinks = [
+    `<a class="note-action secondary" href="/">Back to chat</a>`,
+    `<a class="note-action secondary" href="${escapeHtml(buildObsidianUrl(note.absolutePath))}">Open in Obsidian</a>`,
+    `<a class="note-action secondary" href="${escapeHtml(buildVaultRawUrl(note.path))}" target="_blank" rel="noreferrer">Raw markdown</a>`,
+    note.sourceUrl
+      ? `<a class="note-action primary" href="${escapeHtml(note.sourceUrl)}" target="_blank" rel="noreferrer">Primary source</a>`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("");
+
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(note.title)} • Vault Lens</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #212121;
+        --panel: rgba(255, 255, 255, 0.04);
+        --panel-strong: rgba(255, 255, 255, 0.06);
+        --line: rgba(255, 255, 255, 0.1);
+        --text: #ececec;
+        --muted: #a6a6a6;
+        --accent: #10a37f;
+        --shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        min-height: 100%;
+        background:
+          radial-gradient(circle at top left, rgba(16, 163, 127, 0.1), transparent 20%),
+          radial-gradient(circle at top right, rgba(255, 255, 255, 0.04), transparent 18%),
+          var(--bg);
+        color: var(--text);
+        font-family: "Instrument Sans", sans-serif;
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0.2;
+        background-image:
+          linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+        background-size: 26px 26px;
+        mask-image: linear-gradient(180deg, black, transparent 80%);
+      }
+      .note-shell {
+        position: relative;
+        width: min(1040px, calc(100% - 32px));
+        margin: 32px auto;
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+      .note-header {
+        padding: 28px 30px 22px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+      }
+      .note-kicker,
+      .note-subtitle,
+      .note-chip,
+      .note-action {
+        font-family: "IBM Plex Mono", monospace;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .note-kicker {
+        margin: 0 0 8px;
+        color: var(--muted);
+        font-size: 0.72rem;
+      }
+      .note-title {
+        margin: 0;
+        font-size: clamp(2rem, 4vw, 3rem);
+        line-height: 1.05;
+      }
+      .note-subtitle {
+        margin: 12px 0 0;
+        color: var(--muted);
+        font-size: 0.72rem;
+        line-height: 1.7;
+      }
+      .note-chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      .note-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+        color: var(--muted);
+        font-size: 0.68rem;
+      }
+      .note-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 18px;
+      }
+      .note-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        padding: 0 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        text-decoration: none;
+        font-size: 0.7rem;
+      }
+      .note-action.primary {
+        background: rgba(16, 163, 127, 0.16);
+        border-color: rgba(16, 163, 127, 0.32);
+        color: #d7fff5;
+      }
+      .note-action.secondary {
+        background: rgba(255, 255, 255, 0.03);
+        color: var(--text);
+      }
+      .note-content {
+        padding: 30px;
+      }
+      .note-body {
+        line-height: 1.75;
+        font-size: 1.02rem;
+      }
+      .note-body p,
+      .note-body ul,
+      .note-body ol,
+      .note-body h1,
+      .note-body h2,
+      .note-body h3,
+      .note-body pre {
+        margin-top: 0;
+      }
+      .note-body h1,
+      .note-body h2,
+      .note-body h3 {
+        margin: 26px 0 12px;
+        line-height: 1.15;
+      }
+      .note-body a {
+        color: #d7fff5;
+      }
+      .note-body code {
+        font-family: "IBM Plex Mono", monospace;
+        background: rgba(255, 255, 255, 0.06);
+        padding: 1px 6px;
+        border-radius: 8px;
+      }
+      .note-body pre {
+        padding: 16px;
+        border-radius: 18px;
+        background: rgba(0, 0, 0, 0.2);
+        border: 1px solid var(--line);
+        overflow: auto;
+      }
+      .note-body pre code {
+        background: transparent;
+        padding: 0;
+      }
+      @media (max-width: 720px) {
+        .note-shell {
+          width: min(100%, calc(100% - 16px));
+          margin: 8px auto;
+          border-radius: 20px;
+        }
+        .note-header,
+        .note-content {
+          padding: 20px 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <article class="note-shell">
+      <header class="note-header">
+        <p class="note-kicker">Vault note</p>
+        <h1 class="note-title">${escapeHtml(note.title)}</h1>
+        <p class="note-subtitle">${escapeHtml(subtitleBits.join(" • "))}</p>
+        ${tagChips}
+        <div class="note-actions">${relatedLinks}</div>
+      </header>
+      <section class="note-content">
+        <div class="note-body">${renderMarkdownDocument(stripDuplicateLeadingTitle(note.body, note.title))}</div>
+      </section>
+    </article>
+  </body>
+</html>`;
+}
+
+function splitFrontmatter(text) {
+  const source = String(text || "");
+  if (!source.startsWith("---\n")) {
+    return { frontmatter: "", body: source };
+  }
+  const end = source.indexOf("\n---\n", 4);
+  if (end === -1) {
+    return { frontmatter: "", body: source };
+  }
+  return {
+    frontmatter: source.slice(4, end),
+    body: source.slice(end + 5).trimStart(),
+  };
+}
+
+function parseSimpleFrontmatter(frontmatter) {
+  const result = {};
+  const lines = String(frontmatter || "").split(/\r?\n/);
+  let currentArrayKey = "";
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\t/g, "  ");
+    if (!line.trim()) {
+      continue;
+    }
+
+    const arrayItem = line.match(/^\s*-\s+(.*)$/);
+    if (arrayItem && currentArrayKey) {
+      if (!Array.isArray(result[currentArrayKey])) {
+        result[currentArrayKey] = [];
+      }
+      result[currentArrayKey].push(parseFrontmatterValue(arrayItem[1]));
+      continue;
+    }
+
+    const keyValue = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!keyValue) {
+      currentArrayKey = "";
+      continue;
+    }
+
+    const [, key, rawValue] = keyValue;
+    const value = rawValue.trim();
+    if (!value) {
+      result[key] = [];
+      currentArrayKey = key;
+      continue;
+    }
+
+    result[key] = parseFrontmatterValue(value);
+    currentArrayKey = "";
+  }
+
+  return result;
+}
+
+function parseFrontmatterValue(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (trimmed === "true") {
+    return true;
+  }
+  if (trimmed === "false") {
+    return false;
+  }
+  if (trimmed === "null") {
+    return null;
+  }
+  if ((trimmed.startsWith("\"") && trimmed.endsWith("\"")) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    return trimmed
+      .slice(1, -1)
+      .split(",")
+      .map((entry) => parseFrontmatterValue(entry))
+      .filter(Boolean);
+  }
+  return trimmed;
+}
+
+function renderMarkdownDocument(markdown) {
+  const lines = String(markdown || "").split("\n");
+  const html = [];
+  let listType = "";
+  let inCodeBlock = false;
+  let codeLines = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\r$/, "");
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith("```")) {
+      if (inCodeBlock) {
+        html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+        inCodeBlock = false;
+        codeLines = [];
+      } else {
+        if (listType) {
+          html.push(`</${listType}>`);
+          listType = "";
+        }
+        inCodeBlock = true;
+      }
+      continue;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      continue;
+    }
+
+    if (!trimmed) {
+      if (listType) {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      continue;
+    }
+
+    if (trimmed.startsWith("### ")) {
+      if (listType) {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      html.push(`<h3>${renderMarkdownInline(trimmed.slice(4))}</h3>`);
+      continue;
+    }
+    if (trimmed.startsWith("## ")) {
+      if (listType) {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      html.push(`<h2>${renderMarkdownInline(trimmed.slice(3))}</h2>`);
+      continue;
+    }
+    if (trimmed.startsWith("# ")) {
+      if (listType) {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      html.push(`<h1>${renderMarkdownInline(trimmed.slice(2))}</h1>`);
+      continue;
+    }
+
+    const bulletMatch = trimmed.match(/^- (.+)$/);
+    if (bulletMatch) {
+      if (listType && listType !== "ul") {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      if (!listType) {
+        html.push("<ul>");
+        listType = "ul";
+      }
+      html.push(`<li>${renderMarkdownInline(bulletMatch[1])}</li>`);
+      continue;
+    }
+
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (orderedMatch) {
+      if (listType && listType !== "ol") {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      if (!listType) {
+        html.push("<ol>");
+        listType = "ol";
+      }
+      html.push(`<li>${renderMarkdownInline(orderedMatch[1])}</li>`);
+      continue;
+    }
+
+    if (listType) {
+      html.push(`</${listType}>`);
+      listType = "";
+    }
+
+    html.push(`<p>${renderMarkdownInline(trimmed)}</p>`);
+  }
+
+  if (inCodeBlock) {
+    html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+  }
+  if (listType) {
+    html.push(`</${listType}>`);
+  }
+
+  return html.join("");
+}
+
+function stripDuplicateLeadingTitle(markdown, title) {
+  const source = String(markdown || "").trimStart();
+  const normalizedTitle = String(title || "").trim();
+  const titlePattern = new RegExp(`^#\\s+${escapeRegExp(normalizedTitle)}\\s*(\\n|$)`, "i");
+  return source.replace(titlePattern, "");
+}
+
+function renderMarkdownInline(text) {
+  let normalized = String(text || "");
+  normalized = normalized.replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, (_full, target, label) => `[${label}](${buildVaultUrl(target)})`);
+  normalized = normalized.replace(/\[\[([^\]]+)\]\]/g, (_full, target) => `[${target}](${buildVaultUrl(target)})`);
+
+  const tokenPattern = /`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)/g;
+  let html = "";
+  let lastIndex = 0;
+  let match;
+
+  while ((match = tokenPattern.exec(normalized))) {
+    html += formatRenderedText(normalized.slice(lastIndex, match.index));
+
+    if (match[1] != null) {
+      html += `<code>${escapeHtml(match[1])}</code>`;
+    } else {
+      const label = match[2];
+      const href = match[3];
+      const resolvedHref =
+        href.startsWith("http://") || href.startsWith("https://") || href.startsWith("/vault/") || href.startsWith("/vault-raw/")
+          ? href
+          : href.endsWith(".md")
+            ? buildVaultUrl(href)
+            : buildVaultRawUrl(href);
+      html += `<a href="${escapeHtml(resolvedHref)}" target="_blank" rel="noreferrer">${formatRenderedText(label)}</a>`;
+    }
+
+    lastIndex = tokenPattern.lastIndex;
+  }
+
+  html += formatRenderedText(normalized.slice(lastIndex));
+  return html;
+}
+
+function formatRenderedText(text) {
+  return escapeHtml(text)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+}
+
 function isAllowedVaultPath(relativePath) {
   const clean = relativePath.replace(/^\/+/, "");
   if (!clean || clean.includes("..")) {
     return false;
   }
   return [
+    "raw/",
     "items/",
     "topics/",
     "projects/",
@@ -991,6 +1511,27 @@ function rewriteAnswerMarkdownLinks(markdown, citations) {
 
 function buildVaultUrl(relativePath) {
   return `/vault/${encodeURI(String(relativePath || "").replace(/^\/+/, ""))}`;
+}
+
+function buildVaultRawUrl(relativePath) {
+  return `/vault-raw/${encodeURI(String(relativePath || "").replace(/^\/+/, ""))}`;
+}
+
+function buildObsidianUrl(absolutePath) {
+  return `obsidian://open?path=${encodeURIComponent(String(absolutePath || ""))}`;
+}
+
+function escapeRegExp(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function escapeHtml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function sanitizeChatId(value) {
