@@ -1,6 +1,8 @@
 const state = {
   threadId: localStorage.getItem("vaultThreadId") || "",
   health: null,
+  latestQuestion: "",
+  latestResult: null,
 };
 
 const els = {
@@ -24,6 +26,8 @@ const els = {
   healthStatus: document.querySelector("#health-status"),
   runState: document.querySelector("#run-state"),
   confidenceBadge: document.querySelector("#confidence-badge"),
+  saveAnswerButton: document.querySelector("#save-answer-button"),
+  saveStatus: document.querySelector("#save-status"),
   newThreadButton: document.querySelector("#new-thread-button"),
   presets: [...document.querySelectorAll(".preset")],
 };
@@ -38,11 +42,13 @@ async function boot() {
 
 function bindEvents() {
   els.form.addEventListener("submit", onSubmit);
+  els.saveAnswerButton.addEventListener("click", onSaveAnswer);
   els.newThreadButton.addEventListener("click", () => {
     state.threadId = "";
     localStorage.removeItem("vaultThreadId");
     hydrateThread();
     setRunState("idle", "Idle");
+    resetSaveState();
   });
 
   els.presets.forEach((button) => {
@@ -76,6 +82,9 @@ async function onSubmit(event) {
 
   setRunState("running", "Working");
   els.submit.disabled = true;
+  state.latestQuestion = question;
+  state.latestResult = null;
+  resetSaveState();
 
   try {
     const response = await fetch("/api/query", {
@@ -94,6 +103,7 @@ async function onSubmit(event) {
     }
 
     state.threadId = data.threadId || "";
+    state.latestResult = data;
     if (state.threadId) {
       localStorage.setItem("vaultThreadId", state.threadId);
     }
@@ -101,6 +111,7 @@ async function onSubmit(event) {
     renderAnswer(data.answer);
     renderCitations(data.answer.citations || []);
     renderTrace(data.trace || []);
+    showSaveButton();
     els.modelName.textContent = data.meta?.model || state.health?.model || "-";
     setRunState("done", `Done in ${formatDuration(data.meta?.durationMs || 0)}`);
   } catch (error) {
@@ -108,6 +119,38 @@ async function onSubmit(event) {
     renderFailure(error instanceof Error ? error.message : String(error));
   } finally {
     els.submit.disabled = false;
+  }
+}
+
+async function onSaveAnswer() {
+  if (!state.latestResult || !state.latestQuestion) {
+    return;
+  }
+
+  setSaveState("Saving...");
+  els.saveAnswerButton.disabled = true;
+
+  try {
+    const response = await fetch("/api/save-answer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question: state.latestQuestion,
+        answer: state.latestResult.answer,
+        trace: state.latestResult.trace || [],
+        meta: state.latestResult.meta || {},
+        threadId: state.threadId || null,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to save answer");
+    }
+    setSaveState(`Saved to ${data.path}`, data.url);
+  } catch (error) {
+    setSaveState(error instanceof Error ? error.message : String(error));
+  } finally {
+    els.saveAnswerButton.disabled = false;
   }
 }
 
@@ -221,6 +264,7 @@ function renderFailure(message) {
   els.gapsBlock.classList.add("hidden");
   els.followupsBlock.classList.add("hidden");
   els.confidenceBadge.classList.add("hidden");
+  resetSaveState();
 }
 
 function hydrateThread() {
@@ -230,6 +274,26 @@ function hydrateThread() {
 function setRunState(kind, label) {
   els.runState.className = `run-state ${kind}`;
   els.runState.textContent = label;
+}
+
+function showSaveButton() {
+  els.saveAnswerButton.classList.remove("hidden");
+}
+
+function resetSaveState() {
+  els.saveStatus.classList.add("hidden");
+  els.saveStatus.textContent = "";
+  els.saveStatus.innerHTML = "";
+  els.saveAnswerButton.classList.add("hidden");
+}
+
+function setSaveState(message, href = "") {
+  els.saveStatus.classList.remove("hidden");
+  if (href) {
+    els.saveStatus.innerHTML = `<a href="${href}" target="_blank" rel="noreferrer">${escapeHtml(message)}</a>`;
+  } else {
+    els.saveStatus.textContent = message;
+  }
 }
 
 function renderMarkdown(source) {

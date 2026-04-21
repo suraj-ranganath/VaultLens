@@ -2,6 +2,7 @@
 
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import crypto from "node:crypto";
 import http from "node:http";
 import path from "node:path";
 import process from "node:process";
@@ -78,8 +79,12 @@ const server = http.createServer(async (req, res) => {
       return handleQuery(req, res);
     }
 
+    if (req.method === "POST" && url.pathname === "/api/save-answer") {
+      return handleSaveAnswer(req, res);
+    }
+
     if (req.method === "GET" && url.pathname.startsWith("/vault/")) {
-      return serveVaultFile(url.pathname.replace(/^\/vault\//, ""), res);
+      return serveVaultFile(decodeURIComponent(url.pathname.replace(/^\/vault\//, "")), res);
     }
 
     if (req.method === "GET") {
@@ -141,6 +146,37 @@ async function handleQuery(req, res) {
       includeWebSearch,
       durationMs: Date.now() - startedAt,
     },
+  });
+}
+
+async function handleSaveAnswer(req, res) {
+  const body = await readJson(req);
+  const question = String(body.question || "").trim();
+  const answer = body.answer || {};
+  const trace = Array.isArray(body.trace) ? body.trace : [];
+  const meta = body.meta || {};
+  const threadId = String(body.threadId || "").trim();
+
+  if (!question) {
+    return json(res, 400, { error: "Missing `question`." });
+  }
+  if (!String(answer.answer_markdown || answer.concise_answer || "").trim()) {
+    return json(res, 400, { error: "Missing answer content to save." });
+  }
+
+  const written = await writeSavedAnswer({
+    question,
+    answer,
+    trace,
+    meta,
+    threadId,
+  });
+
+  return json(res, 200, {
+    ok: true,
+    path: written.relativePath,
+    title: written.title,
+    url: `/vault/${encodeURI(written.relativePath)}`,
   });
 }
 
@@ -233,6 +269,122 @@ function summarizeTrace(items) {
     .slice(0, 80);
 }
 
+async function writeSavedAnswer({ question, answer, trace, meta, threadId }) {
+  const title = buildOutputTitle(question);
+  const slug = slugify(title);
+  const day = new Date().toISOString().slice(0, 10);
+  const outputsDir = path.join(vaultRoot, "outputs");
+  await fsp.mkdir(outputsDir, { recursive: true });
+
+  let filename = `${day} ${slug}.md`;
+  let targetPath = path.join(outputsDir, filename);
+  let counter = 2;
+  while (await fileExists(targetPath)) {
+    filename = `${day} ${slug} ${counter}.md`;
+    targetPath = path.join(outputsDir, filename);
+    counter += 1;
+  }
+
+  const citations = Array.isArray(answer.citations) ? answer.citations : [];
+  const frontmatter = {
+    title,
+    status: "active",
+    priority: "medium",
+    created_on: new Date().toISOString(),
+    question,
+    thread_id: threadId || null,
+    model: String(meta.model || DEFAULT_MODEL),
+    reasoning_effort: String(meta.reasoningEffort || "medium"),
+    web_search_enabled: Boolean(meta.includeWebSearch),
+    confidence: String(answer.confidence || "unknown"),
+    tags: ["vault-answer", "agentic-query"],
+    topics: [],
+    linked_items: citations.map((citation) => citation.path).filter(Boolean),
+  };
+
+  const lines = [
+    "---",
+    yamlDump(frontmatter),
+    "---",
+    "",
+    `# ${title}`,
+    "",
+    "## Question",
+    "",
+    question,
+    "",
+    "## Answer",
+    "",
+    String(answer.answer_markdown || answer.concise_answer || "").trim(),
+    "",
+  ];
+
+  if (answer.concise_answer && answer.concise_answer !== answer.answer_markdown) {
+    lines.push("## Concise Answer", "", String(answer.concise_answer).trim(), "");
+  }
+
+  if (citations.length) {
+    lines.push("## Citations", "");
+    for (const citation of citations) {
+      lines.push(
+        `- [[${citation.path}|${citation.title || citation.path}]] (${citation.note_type || "note"}): ${citation.relevance || ""}`.trim(),
+      );
+    }
+    lines.push("");
+  }
+
+  if (Array.isArray(answer.gaps) && answer.gaps.length) {
+    lines.push("## Gaps", "");
+    for (const gap of answer.gaps) {
+      lines.push(`- ${gap}`);
+    }
+    lines.push("");
+  }
+
+  if (Array.isArray(answer.follow_up_questions) && answer.follow_up_questions.length) {
+    lines.push("## Follow-up Questions", "");
+    for (const followUp of answer.follow_up_questions) {
+      lines.push(`- ${followUp}`);
+    }
+    lines.push("");
+  }
+
+  const traceSnapshot = trace.slice(0, 12);
+  if (traceSnapshot.length) {
+    lines.push("## Trace Snapshot", "");
+    for (const item of traceSnapshot) {
+      if (item.type === "command_execution") {
+        lines.push(`- command: \`${item.command}\` (exit ${item.exit_code ?? "?"})`);
+      } else if (item.type === "web_search") {
+        lines.push(`- web search: ${item.query}`);
+      } else if (item.type === "mcp_tool_call") {
+        lines.push(`- mcp tool: \`${item.server}.${item.tool}\` (${item.status})`);
+      } else if (item.type === "todo_list") {
+        lines.push(`- todo list: ${item.items.length} items`);
+      } else if (item.type === "error") {
+        lines.push(`- error: ${item.message}`);
+      }
+    }
+    lines.push("");
+  }
+
+  lines.push("## Query Metadata", "");
+  lines.push(`- Saved at: ${new Date().toISOString()}`);
+  lines.push(`- Model: ${String(meta.model || DEFAULT_MODEL)}`);
+  lines.push(`- Reasoning effort: ${String(meta.reasoningEffort || "medium")}`);
+  lines.push(`- Web search enabled: ${Boolean(meta.includeWebSearch)}`);
+  if (threadId) {
+    lines.push(`- Thread ID: \`${threadId}\``);
+  }
+  lines.push("");
+
+  await fsp.writeFile(targetPath, lines.join("\n"), "utf8");
+  return {
+    title,
+    relativePath: path.relative(vaultRoot, targetPath).replaceAll(path.sep, "/"),
+  };
+}
+
 async function serveStatic(requestPath, res) {
   const normalized = requestPath === "/" ? "/index.html" : requestPath;
   const resolved = safeJoin(webRoot, normalized);
@@ -322,6 +474,48 @@ function loadEnvFile(filePath) {
       process.env[key] = value;
     }
   }
+}
+
+function buildOutputTitle(question) {
+  const text = question.replace(/\s+/g, " ").trim();
+  if (!text) {
+    return "Vault answer";
+  }
+  const clipped = text.length > 96 ? `${text.slice(0, 93).trim()}...` : text;
+  return clipped.endsWith("?") ? clipped.slice(0, -1) : clipped;
+}
+
+function slugify(text) {
+  const base = String(text || "")
+    .normalize("NFKD")
+    .replace(/[^\w\s-]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return base || crypto.randomBytes(4).toString("hex");
+}
+
+function yamlDump(data) {
+  return Object.entries(data)
+    .map(([key, value]) => `${key}: ${yamlValue(value)}`)
+    .join("\n");
+}
+
+function yamlValue(value) {
+  if (value === null || value === undefined) {
+    return "null";
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.length ? `[${value.map((entry) => yamlValue(entry)).join(", ")}]` : "[]";
+  }
+  return JSON.stringify(String(value));
 }
 
 async function readJson(req) {

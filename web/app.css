@@ -359,6 +359,19 @@ select:focus {
   margin-bottom: 16px;
 }
 
+.answer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.answer-actions .secondary-button {
+  width: auto;
+  padding: 10px 14px;
+}
+
 .empty-state {
   color: var(--muted);
   line-height: 1.65;

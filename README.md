@@ -131,6 +131,7 @@ The web interface runs a local Codex-backed query route over the vault. It is de
 - local vault files are the primary source of truth
 - the agent starts from `hot.md`, dashboards, and canonical notes
 - answers return citations to vault files plus a visible tool trace
+- useful answers can be filed back into `outputs/` directly from the UI
 - web search is optional and off by default so the query path stays vault-first
 
 Environment knobs:
