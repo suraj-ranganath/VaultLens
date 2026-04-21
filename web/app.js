@@ -6,7 +6,8 @@ const state = {
   feed: [],
   chats: [],
   currentChat: null,
-  selectedTurnId: "",
+  pendingTurn: null,
+  isStreaming: false,
 };
 
 const els = {
@@ -15,39 +16,32 @@ const els = {
   reasoning: document.querySelector("#reasoning-select"),
   webSearch: document.querySelector("#web-search-toggle"),
   submit: document.querySelector("#submit-button"),
-  answerEmpty: document.querySelector("#answer-empty"),
-  answerBody: document.querySelector("#answer-body"),
-  answerMeta: document.querySelector("#answer-meta"),
-  gapsBlock: document.querySelector("#gaps-block"),
-  gapsList: document.querySelector("#gaps-list"),
-  followupsBlock: document.querySelector("#followups-block"),
-  followupsList: document.querySelector("#followups-list"),
-  citationsList: document.querySelector("#citations-list"),
-  citationCount: document.querySelector("#citation-count"),
-  traceList: document.querySelector("#trace-list"),
-  traceCount: document.querySelector("#trace-count"),
-  threadId: document.querySelector("#thread-id"),
-  modelName: document.querySelector("#model-name"),
-  healthStatus: document.querySelector("#health-status"),
   runState: document.querySelector("#run-state"),
-  confidenceBadge: document.querySelector("#confidence-badge"),
+  healthStatus: document.querySelector("#health-status"),
+  modelName: document.querySelector("#model-name"),
+  threadId: document.querySelector("#thread-id"),
+  chatTitle: document.querySelector("#chat-title"),
+  chatSubtitle: document.querySelector("#chat-subtitle"),
   saveAnswerButton: document.querySelector("#save-answer-button"),
   saveStatus: document.querySelector("#save-status"),
   newThreadButton: document.querySelector("#new-thread-button"),
   chatCount: document.querySelector("#chat-count"),
   chatList: document.querySelector("#chat-list"),
-  turnCount: document.querySelector("#turn-count"),
-  turnList: document.querySelector("#turn-list"),
+  conversationViewport: document.querySelector("#conversation-viewport"),
+  conversation: document.querySelector("#conversation"),
+  conversationEmpty: document.querySelector("#conversation-empty"),
   presets: [...document.querySelectorAll(".preset")],
 };
 
 boot();
 
 async function boot() {
-  hydrateThread();
   bindEvents();
+  hydrateThread();
+  renderHeader();
   await refreshHealth();
   await refreshChats();
+  renderConversation({ scroll: true });
 }
 
 function bindEvents() {
@@ -63,6 +57,15 @@ function bindEvents() {
       els.question.focus();
     });
   });
+
+  els.conversation.addEventListener("click", (event) => {
+    const followup = event.target.closest("[data-followup-question]");
+    if (!followup) {
+      return;
+    }
+    els.question.value = followup.dataset.followupQuestion || "";
+    els.question.focus();
+  });
 }
 
 async function refreshHealth() {
@@ -76,6 +79,7 @@ async function refreshHealth() {
     els.healthStatus.textContent = "Offline";
     els.modelName.textContent = "-";
   }
+  renderHeader();
 }
 
 async function refreshChats() {
@@ -84,13 +88,15 @@ async function refreshChats() {
     const data = await response.json();
     state.chats = data.chats || [];
     renderChatList();
-    if (!state.currentChat && state.chats.length) {
+    if (!state.currentChat && !state.pendingTurn && state.chats.length) {
       await loadChat(state.chats[0].id);
+      return;
     }
   } catch {
     state.chats = [];
     renderChatList();
   }
+  renderHeader();
 }
 
 async function onSubmit(event) {
@@ -101,15 +107,33 @@ async function onSubmit(event) {
     return;
   }
 
-  setRunState("running", "Working");
-  els.submit.disabled = true;
   state.latestQuestion = question;
   state.latestResult = null;
   state.feed = [];
+  state.isStreaming = true;
+  state.pendingTurn = {
+    id: `pending-${Date.now()}`,
+    question,
+    answer: null,
+    trace: [],
+    feed: [],
+    usage: null,
+    cost: null,
+    meta: {
+      model: state.health?.model || els.modelName.textContent || "-",
+      reasoningEffort: els.reasoning.value,
+      includeWebSearch: els.webSearch.checked,
+    },
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    live: true,
+  };
+
+  setRunState("running", "Working");
   resetSaveState();
-  renderTrace([]);
-  renderCitations([]);
-  clearAnswerShell();
+  renderHeader();
+  renderConversation({ scroll: true });
+  els.submit.disabled = true;
 
   try {
     const response = await fetch("/api/query-stream", {
@@ -132,7 +156,8 @@ async function onSubmit(event) {
     }
     await refreshChats();
   } catch (error) {
-    setRunState("idle", "Error");
+    state.isStreaming = false;
+    setRunState("error", "Error");
     renderFailure(error instanceof Error ? error.message : String(error));
   } finally {
     els.submit.disabled = false;
@@ -213,6 +238,7 @@ function handleStreamEvent(event) {
       title: "Thread started",
       body: state.threadId,
     });
+    renderHeader();
     return;
   }
 
@@ -233,6 +259,9 @@ function handleStreamEvent(event) {
       title: "Turn completed",
       body: `usage: ${formatUsage(event.usage)}`,
     });
+    if (state.pendingTurn) {
+      state.pendingTurn.usage = event.usage;
+    }
     return;
   }
 
@@ -264,15 +293,26 @@ function handleStreamEvent(event) {
   if (event.type === "result") {
     state.threadId = event.threadId || state.threadId;
     state.latestResult = event;
+    state.isStreaming = false;
     hydrateThread();
-    renderAnswer(event.answer);
-    renderCitations(event.answer.citations || []);
+
+    if (state.pendingTurn) {
+      state.pendingTurn.answer = event.answer;
+      state.pendingTurn.usage = event.usage;
+      state.pendingTurn.cost = event.cost;
+      state.pendingTurn.meta = event.meta;
+      state.pendingTurn.completedAt = new Date().toISOString();
+      state.pendingTurn.feed = state.feed.slice();
+    }
+
     showSaveButton();
     els.modelName.textContent = event.meta?.model || state.health?.model || "-";
     setRunState("done", `Done in ${formatDuration(event.meta?.durationMs || 0)}`);
-    renderAnswerMeta(event.usage, event.cost, event.meta);
+    renderHeader();
+    renderConversation({ scroll: true });
+
     if (event.chat?.id) {
-      loadChat(event.chat.id);
+      void loadChat(event.chat.id, { preserveSaveState: true });
     }
   }
 }
@@ -321,12 +361,11 @@ function formatFeedEntry(phase, item) {
     };
   }
   if (item.type === "agent_message") {
-    const body = extractAgentMessageBody(item.text);
     return {
       type: "agent_message",
       phase,
       title: "Agent message",
-      body,
+      body: extractAgentMessageBody(item.text),
     };
   }
   if (item.type === "error") {
@@ -346,174 +385,39 @@ function formatFeedEntry(phase, item) {
 }
 
 function appendFeed(entry) {
-  state.feed.unshift(entry);
-  state.feed = state.feed.slice(0, 120);
-  renderTrace(state.feed);
-}
-
-function renderAnswer(answer) {
-  els.answerEmpty.classList.add("hidden");
-  els.answerBody.classList.remove("hidden");
-  els.answerBody.innerHTML = renderMarkdown(answer.answer_markdown || answer.concise_answer || "");
-
-  const confidence = String(answer.confidence || "").trim();
-  els.confidenceBadge.className = `confidence-badge ${confidence || ""}`;
-  els.confidenceBadge.textContent = confidence ? `${confidence} confidence` : "";
-  els.confidenceBadge.classList.toggle("hidden", !confidence);
-
-  const gaps = answer.gaps || [];
-  els.gapsList.innerHTML = gaps.map((gap) => `<li>${escapeHtml(gap)}</li>`).join("");
-  els.gapsBlock.classList.toggle("hidden", gaps.length === 0);
-
-  const followUps = answer.follow_up_questions || [];
-  els.followupsList.innerHTML = followUps
-    .map((question) => `<button class="chip" type="button">${escapeHtml(question)}</button>`)
-    .join("");
-  els.followupsBlock.classList.toggle("hidden", followUps.length === 0);
-  [...els.followupsList.querySelectorAll(".chip")].forEach((chip) => {
-    chip.addEventListener("click", () => {
-      els.question.value = chip.textContent || "";
-      els.question.focus();
-    });
-  });
-}
-
-function renderAnswerMeta(usage, cost, meta) {
-  const pills = [];
-  if (usage) {
-    pills.push(`<div class="meta-pill">${escapeHtml(formatUsage(usage))}</div>`);
+  state.feed.push(entry);
+  state.feed = state.feed.slice(-120);
+  if (state.pendingTurn) {
+    state.pendingTurn.feed = state.feed.slice();
   }
-  if (cost?.totalUsd != null) {
-    pills.push(`<div class="meta-pill">$${escapeHtml(cost.totalUsd.toFixed(4))}</div>`);
-  }
-  if (meta?.model) {
-    pills.push(`<div class="meta-pill">${escapeHtml(meta.model)}</div>`);
-  }
-  if (cost?.source) {
-    pills.push(
-      `<a class="meta-pill" href="${escapeHtml(cost.source)}" target="_blank" rel="noreferrer">pricing source</a>`,
-    );
-  }
-  els.answerMeta.innerHTML = pills.join("");
-  els.answerMeta.classList.toggle("hidden", pills.length === 0);
+  renderConversation({ scroll: true });
 }
 
-function renderCitations(citations) {
-  els.citationCount.textContent = String(citations.length);
-  els.citationsList.innerHTML = citations.length
-    ? citations
-        .map(
-          (citation) => `
-            <article class="citation-card">
-              <div class="citation-kind">${escapeHtml(citation.note_type || "note")}</div>
-              <h3><a href="${escapeHtml(citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">${escapeHtml(citation.title || citation.path)}</a></h3>
-              <div class="muted">${escapeHtml(citation.path)}</div>
-              <p>${escapeHtml(citation.relevance || "")}</p>
-              <p class="citation-links">
-                <a href="${escapeHtml(citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">Vault note</a>
-                ${citation.source_url ? `<a href="${escapeHtml(citation.source_url)}" target="_blank" rel="noreferrer">Primary source</a>` : ""}
-              </p>
-            </article>
-          `,
-        )
-        .join("")
-    : `<div class="empty-state">No citations returned yet.</div>`;
-}
+function renderHeader() {
+  const titleSource =
+    state.currentChat?.title ||
+    state.pendingTurn?.question ||
+    state.currentChat?.turns?.at(-1)?.question ||
+    "New chat";
 
-function renderTrace(trace) {
-  els.traceCount.textContent = String(trace.length);
-  els.traceList.innerHTML = trace.length
-    ? trace
-        .map((item) => {
-          if (item.type === "command_execution") {
-            return `
-              <article class="trace-card">
-                <div class="trace-kind">command • ${escapeHtml(item.phase || "")}</div>
-                <h3>${escapeHtml(item.title || item.command || "")}</h3>
-                <div class="muted">${escapeHtml(item.meta || (item.exit_code === null ? "" : `exit ${item.exit_code}`))}</div>
-                <div class="trace-command">${escapeHtml(item.body || item.output_preview || "")}</div>
-              </article>
-            `;
-          }
-          if (item.type === "web_search") {
-            return `
-              <article class="trace-card">
-                <div class="trace-kind">web search • ${escapeHtml(item.phase || "")}</div>
-                <h3>${escapeHtml(item.query || item.title || "")}</h3>
-              </article>
-            `;
-          }
-          if (item.type === "mcp_tool_call") {
-            return `
-              <article class="trace-card">
-                <div class="trace-kind">mcp tool • ${escapeHtml(item.phase || "")}</div>
-                <h3>${escapeHtml(item.title || `${item.server}.${item.tool}`)}</h3>
-                <div class="muted">${escapeHtml(item.meta || item.status || "")}</div>
-                ${item.body ? `<div class="trace-command">${escapeHtml(item.body)}</div>` : ""}
-              </article>
-            `;
-          }
-          if (item.type === "todo_list") {
-            return `
-              <article class="trace-card">
-                <div class="trace-kind">plan • ${escapeHtml(item.phase || "")}</div>
-                <h3>${escapeHtml(item.title || "Agent todo list")}</h3>
-                <div class="trace-command">${escapeHtml(item.body || "")}</div>
-              </article>
-            `;
-          }
-          if (item.type === "reasoning") {
-            return `
-              <article class="trace-card">
-                <div class="trace-kind">reasoning summary • ${escapeHtml(item.phase || "")}</div>
-                <h3>${escapeHtml(item.title || "Reasoning summary")}</h3>
-                <div class="trace-body">${renderMarkdown(item.body || "")}</div>
-              </article>
-            `;
-          }
-          if (item.type === "system") {
-            return `
-              <article class="trace-card">
-                <div class="trace-kind">system • ${escapeHtml(item.phase || "")}</div>
-                <h3>${escapeHtml(item.title || "System event")}</h3>
-                <div class="trace-body">${renderMarkdown(item.body || "")}</div>
-              </article>
-            `;
-          }
-          if (item.type === "agent_message") {
-            return `
-              <article class="trace-card">
-                <div class="trace-kind">agent message • ${escapeHtml(item.phase || "")}</div>
-                <h3>${escapeHtml(item.title || "Agent message")}</h3>
-                <div class="trace-body">${renderMarkdown(item.body || "")}</div>
-              </article>
-            `;
-          }
-          return `
-            <article class="trace-card">
-              <div class="trace-kind">${escapeHtml(item.type || "event")}${item.phase ? ` • ${escapeHtml(item.phase)}` : ""}</div>
-              <h3>${escapeHtml(item.title || item.message || "Agent event")}</h3>
-              ${item.body ? `<div class="trace-body">${renderMarkdown(item.body)}</div>` : ""}
-            </article>
-          `;
-        })
-        .join("")
-    : `<div class="empty-state">The live feed will show reasoning summaries, plan updates, commands, searches, tool calls, and surfaced agent messages here.</div>`;
-}
+  const turnCount = state.currentChat?.turns?.length || 0;
+  const subtitleBits = [];
+  if (turnCount) {
+    subtitleBits.push(`${turnCount} saved turns`);
+  } else if (state.pendingTurn) {
+    subtitleBits.push("New thread");
+  } else {
+    subtitleBits.push("Search your vault, recent links, jobs, ideas, and decisions.");
+  }
 
-function renderFailure(message) {
-  els.answerEmpty.classList.add("hidden");
-  els.answerBody.classList.remove("hidden");
-  els.answerBody.innerHTML = `<p>${escapeHtml(message)}</p>`;
-  els.citationsList.innerHTML = `<div class="empty-state">No citations.</div>`;
-  els.traceList.innerHTML = `<div class="empty-state">No trace.</div>`;
-  els.citationCount.textContent = "0";
-  els.traceCount.textContent = "0";
-  els.gapsBlock.classList.add("hidden");
-  els.followupsBlock.classList.add("hidden");
-  els.confidenceBadge.classList.add("hidden");
-  els.answerMeta.classList.add("hidden");
-  resetSaveState();
+  if (state.health?.model || els.modelName.textContent !== "-") {
+    subtitleBits.push(els.modelName.textContent || state.health?.model || "-");
+  }
+  subtitleBits.push(els.webSearch.checked ? "web search on" : "web search off");
+  subtitleBits.push(state.threadId ? `thread ${state.threadId.slice(0, 8)}…` : "no thread yet");
+
+  els.chatTitle.textContent = truncate(titleSource, 96);
+  els.chatSubtitle.textContent = subtitleBits.join(" • ");
 }
 
 function hydrateThread() {
@@ -523,16 +427,6 @@ function hydrateThread() {
 function setRunState(kind, label) {
   els.runState.className = `run-state ${kind}`;
   els.runState.textContent = label;
-}
-
-function clearAnswerShell() {
-  els.answerEmpty.classList.remove("hidden");
-  els.answerBody.classList.add("hidden");
-  els.answerBody.innerHTML = "";
-  els.answerMeta.classList.add("hidden");
-  els.gapsBlock.classList.add("hidden");
-  els.followupsBlock.classList.add("hidden");
-  els.confidenceBadge.classList.add("hidden");
 }
 
 function showSaveButton() {
@@ -549,18 +443,19 @@ function resetSaveState() {
 function setSaveState(message, href = "") {
   els.saveStatus.classList.remove("hidden");
   if (href) {
-    els.saveStatus.innerHTML = `<a href="${href}" target="_blank" rel="noreferrer">${escapeHtml(message)}</a>`;
+    els.saveStatus.innerHTML = `<a href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${escapeHtml(message)}</a>`;
   } else {
     els.saveStatus.textContent = message;
   }
 }
 
-function formatUsage(usage) {
-  if (!usage) {
-    return "usage unavailable";
+function renderFailure(message) {
+  if (state.pendingTurn) {
+    state.pendingTurn.error = message;
+    state.pendingTurn.completedAt = new Date().toISOString();
+    state.pendingTurn.feed = state.feed.slice();
   }
-  const cached = usage.cached_input_tokens || 0;
-  return `${usage.input_tokens || 0} in • ${cached} cached • ${usage.output_tokens || 0} out`;
+  renderConversation({ scroll: true });
 }
 
 function renderChatList() {
@@ -580,7 +475,7 @@ function renderChatList() {
               ${group
                 .map((chat) => {
                   const title = chat.title || chat.lastQuestion || "Untitled chat";
-                  const preview = chat.lastQuestion && chat.lastQuestion !== title ? chat.lastQuestion : "Open this trace";
+                  const preview = summarizeText(chat.lastAnswer || chat.lastQuestion || "Open this chat", 120);
                   return `
                     <button
                       class="chat-button ${chat.id === state.currentChat?.id ? "active" : ""}"
@@ -588,11 +483,11 @@ function renderChatList() {
                       data-chat-id="${escapeHtml(chat.id)}"
                       title="${escapeHtml(title)}"
                     >
-                      <div class="chat-meta-row">
+                      <div class="chat-date-row">
                         <span class="chat-date-pill">${escapeHtml(formatChatTimestamp(chat.updatedAt || chat.createdAt))}</span>
                       </div>
-                      <div class="turn-question">${escapeHtml(title)}</div>
-                      <div class="turn-summary">${escapeHtml(preview)}</div>
+                      <div class="chat-title">${escapeHtml(title)}</div>
+                      <div class="chat-preview">${escapeHtml(preview)}</div>
                     </button>
                   `;
                 })
@@ -604,11 +499,13 @@ function renderChatList() {
     : `<div class="empty-state">No saved chats yet.</div>`;
 
   [...els.chatList.querySelectorAll(".chat-button")].forEach((button) => {
-    button.addEventListener("click", () => loadChat(button.dataset.chatId || ""));
+    button.addEventListener("click", () => {
+      void loadChat(button.dataset.chatId || "");
+    });
   });
 }
 
-async function loadChat(chatId) {
+async function loadChat(chatId, options = {}) {
   if (!chatId) {
     return;
   }
@@ -617,60 +514,354 @@ async function loadChat(chatId) {
   if (!response.ok) {
     return;
   }
+
   state.currentChat = data.chat;
-  state.selectedTurnId = data.chat.turns?.at(-1)?.id || "";
+  state.pendingTurn = null;
+  state.feed = [];
   state.threadId = data.chat.threadId || state.threadId;
+  state.isStreaming = false;
+
   if (state.threadId) {
     localStorage.setItem("vaultThreadId", state.threadId);
   }
+
   hydrateThread();
   renderChatList();
-  renderTurnList();
-  hydrateSelectedTurn();
+  renderHeader();
+  renderConversation({ scroll: true });
+  setRunState("idle", "Loaded");
+
+  if (!options.preserveSaveState) {
+    resetSaveState();
+  }
 }
 
-function renderTurnList() {
-  const turns = state.currentChat?.turns || [];
-  els.turnCount.textContent = String(turns.length);
-  els.turnList.innerHTML = turns.length
-    ? turns
-        .map(
-          (turn) => `
-            <article class="turn-card ${turn.id === state.selectedTurnId ? "active" : ""}" data-turn-id="${escapeHtml(turn.id)}">
-              <div class="card-label">${escapeHtml(formatDate(turn.completedAt))}</div>
-              <div class="turn-question">${escapeHtml(turn.question)}</div>
-              <div class="turn-summary">${escapeHtml(turn.answer?.concise_answer || "")}</div>
-              <div class="citation-links">
-                <span>${escapeHtml(formatUsage(turn.usage || {}))}</span>
-                ${turn.cost?.totalUsd != null ? `<span>$${escapeHtml(turn.cost.totalUsd.toFixed(4))}</span>` : ""}
-              </div>
-            </article>
-          `,
-        )
-        .join("")
-    : `<div class="empty-state">No turns saved yet.</div>`;
+function resetComposerState() {
+  state.threadId = "";
+  state.latestQuestion = "";
+  state.latestResult = null;
+  state.feed = [];
+  state.currentChat = null;
+  state.pendingTurn = null;
+  state.isStreaming = false;
 
-  [...els.turnList.querySelectorAll(".turn-card")].forEach((card) => {
-    card.addEventListener("click", () => {
-      state.selectedTurnId = card.dataset.turnId || "";
-      renderTurnList();
-      hydrateSelectedTurn();
-    });
-  });
+  localStorage.removeItem("vaultThreadId");
+  hydrateThread();
+  renderHeader();
+  setRunState("idle", "Idle");
+  resetSaveState();
+  renderChatList();
+  renderConversation();
+  els.question.focus();
 }
 
-function hydrateSelectedTurn() {
-  const turns = state.currentChat?.turns || [];
-  const turn = turns.find((entry) => entry.id === state.selectedTurnId) || turns.at(-1);
-  if (!turn) {
+function renderConversation({ scroll = false } = {}) {
+  const turns = [];
+  if (state.currentChat?.turns?.length) {
+    turns.push(
+      ...state.currentChat.turns.map((turn) => ({
+        ...turn,
+        live: false,
+      })),
+    );
+  }
+  if (state.pendingTurn) {
+    turns.push(state.pendingTurn);
+  }
+
+  const hasConversation = turns.length > 0;
+  els.conversationEmpty.classList.toggle("hidden", hasConversation);
+  els.conversation.classList.toggle("hidden", !hasConversation);
+
+  if (!hasConversation) {
+    els.conversation.innerHTML = "";
     return;
   }
-  state.feed = normalizeSavedFeed(turn.feed || turn.trace || []);
-  renderAnswer(turn.answer || {});
-  renderAnswerMeta(turn.usage, turn.cost, turn.meta);
-  renderCitations(turn.answer?.citations || []);
-  renderTrace(state.feed.length ? state.feed : normalizeSavedFeed(turn.trace || []));
-  setRunState("idle", "Loaded");
+
+  els.conversation.innerHTML = turns.map((turn, index) => renderTurnBlock(turn, index === turns.length - 1)).join("");
+  renderHeader();
+
+  if (scroll) {
+    requestAnimationFrame(() => {
+      els.conversationViewport.scrollTop = els.conversationViewport.scrollHeight;
+    });
+  }
+}
+
+function renderTurnBlock(turn, isLast) {
+  return `
+    <section class="turn-block">
+      ${renderUserMessage(turn)}
+      ${renderAssistantMessage(turn, isLast)}
+    </section>
+  `;
+}
+
+function renderUserMessage(turn) {
+  return `
+    <article class="message user-message">
+      <div class="message-body">
+        <div class="message-header">
+          <div class="message-role">You</div>
+          <time class="message-time">${escapeHtml(formatMessageTime(turn.startedAt || turn.completedAt))}</time>
+        </div>
+        <div class="message-bubble user-bubble">
+          <div class="assistant-copy">${renderMarkdown(turn.question || "")}</div>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderAssistantMessage(turn, isLast) {
+  const answer = turn.answer || {};
+  const citations = normalizeCitations(answer.citations || []);
+  const citationLookup = buildCitationLookup(citations);
+  const trace = turn.live ? turn.feed || [] : normalizeSavedFeed(turn.feed || turn.trace || []);
+  const body =
+    turn.error
+      ? `<p>${escapeHtml(turn.error)}</p>`
+      : answer.answer_markdown || answer.concise_answer
+        ? renderMarkdown(answer.answer_markdown || answer.concise_answer || "", { citationLookup })
+        : renderThinkingState();
+
+  const meta = renderAssistantMeta(turn, answer);
+  const gaps = renderGaps(answer.gaps || []);
+  const followups = renderFollowups(answer.follow_up_questions || []);
+  const sourcesDetail = citations.length ? renderSourcesDetail(citations) : "";
+  const traceDetail = trace.length || turn.live ? renderTraceDetail(trace, Boolean(turn.live && state.isStreaming)) : "";
+
+  return `
+    <article class="message assistant-message">
+      <div class="message-avatar">V</div>
+      <div class="message-body">
+        <div class="message-header">
+          <div class="message-role">Vault</div>
+          <time class="message-time">${escapeHtml(formatMessageTime(turn.completedAt || turn.startedAt))}</time>
+        </div>
+
+        <div class="message-bubble assistant-bubble">
+          <div class="assistant-copy">${body}</div>
+          ${meta}
+          <div class="message-extras">
+            ${gaps}
+            ${followups}
+            ${sourcesDetail}
+            ${traceDetail}
+          </div>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderAssistantMeta(turn, answer) {
+  const pills = [];
+  if (answer.confidence) {
+    pills.push(
+      `<div class="meta-pill confidence-${escapeHtml(answer.confidence)}">${escapeHtml(answer.confidence)} confidence</div>`,
+    );
+  }
+  if (turn.usage) {
+    pills.push(`<div class="meta-pill">${escapeHtml(formatUsage(turn.usage))}</div>`);
+  }
+  if (turn.cost?.totalUsd != null) {
+    pills.push(`<div class="meta-pill">$${escapeHtml(turn.cost.totalUsd.toFixed(4))}</div>`);
+  }
+  if (turn.meta?.model) {
+    pills.push(`<div class="meta-pill">${escapeHtml(turn.meta.model)}</div>`);
+  }
+  return pills.length ? `<div class="assistant-meta">${pills.join("")}</div>` : "";
+}
+
+function renderGaps(gaps) {
+  if (!gaps.length) {
+    return "";
+  }
+  return `
+    <section class="gap-box">
+      <h4>Known gaps</h4>
+      <ul>${gaps.map((gap) => `<li>${escapeHtml(gap)}</li>`).join("")}</ul>
+    </section>
+  `;
+}
+
+function renderFollowups(followUps) {
+  if (!followUps.length) {
+    return "";
+  }
+  return `
+    <div class="followup-row">
+      ${followUps
+        .map(
+          (question) =>
+            `<button class="followup-chip" type="button" data-followup-question="${escapeHtml(question)}">${escapeHtml(question)}</button>`,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderSourcesDetail(citations) {
+  return `
+    <details class="message-detail">
+      <summary class="detail-summary">
+        <span>Sources</span>
+        <span>${citations.length}</span>
+      </summary>
+      <div class="detail-panel">
+        <div class="sources-grid">
+          ${citations
+            .map(
+              (citation) => `
+                <article class="source-card">
+                  <div class="source-topline">
+                    <span class="source-number">${citation.number}</span>
+                    <span class="source-kind">${escapeHtml(citation.note_type || "note")}</span>
+                  </div>
+                  <div class="source-title">
+                    <a href="${escapeHtml(citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">
+                      ${escapeHtml(citation.title || citation.path)}
+                    </a>
+                  </div>
+                  <p class="source-relevance">${escapeHtml(citation.relevance || "")}</p>
+                  <div class="source-links">
+                    <a href="${escapeHtml(citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">Vault note</a>
+                    ${citation.source_url ? `<a href="${escapeHtml(citation.source_url)}" target="_blank" rel="noreferrer">Primary article</a>` : ""}
+                  </div>
+                </article>
+              `,
+            )
+            .join("")}
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+function renderTraceDetail(trace, open) {
+  const detailOpen = open ? "open" : "";
+  return `
+    <details class="message-detail" ${detailOpen}>
+      <summary class="detail-summary">
+        <span>Agent run</span>
+        <span>${trace.length}</span>
+      </summary>
+      <div class="detail-panel">
+        ${
+          trace.length
+            ? `<div class="trace-list">${trace.map((item) => renderTraceItem(item)).join("")}</div>`
+            : `<div class="empty-state">Waiting for reasoning, tool calls, and trace events.</div>`
+        }
+      </div>
+    </details>
+  `;
+}
+
+function renderTraceItem(item) {
+  const kind = item.type || "event";
+  const heading = item.title || item.message || "Agent event";
+  const meta = item.meta || "";
+  const body = item.body || "";
+
+  if (item.type === "command_execution") {
+    return `
+      <article class="trace-card">
+        <div class="trace-kind">command • ${escapeHtml(item.phase || "")}</div>
+        <h4>${escapeHtml(heading)}</h4>
+        <div class="trace-meta">${escapeHtml(meta)}</div>
+        <div class="trace-command">${escapeHtml(body)}</div>
+      </article>
+    `;
+  }
+
+  if (item.type === "reasoning" || item.type === "agent_message" || item.type === "system") {
+    return `
+      <article class="trace-card">
+        <div class="trace-kind">${escapeHtml(kind.replaceAll("_", " "))} • ${escapeHtml(item.phase || "")}</div>
+        <h4>${escapeHtml(heading)}</h4>
+        <div class="trace-body">${renderMarkdown(body)}</div>
+      </article>
+    `;
+  }
+
+  if (item.type === "todo_list") {
+    return `
+      <article class="trace-card">
+        <div class="trace-kind">plan • ${escapeHtml(item.phase || "")}</div>
+        <h4>${escapeHtml(heading)}</h4>
+        <div class="trace-command">${escapeHtml(body)}</div>
+      </article>
+    `;
+  }
+
+  if (item.type === "web_search" || item.type === "mcp_tool_call") {
+    return `
+      <article class="trace-card">
+        <div class="trace-kind">${escapeHtml(kind.replaceAll("_", " "))} • ${escapeHtml(item.phase || "")}</div>
+        <h4>${escapeHtml(heading)}</h4>
+        ${meta ? `<div class="trace-meta">${escapeHtml(meta)}</div>` : ""}
+        ${body ? `<div class="trace-command">${escapeHtml(body)}</div>` : ""}
+      </article>
+    `;
+  }
+
+  return `
+    <article class="trace-card">
+      <div class="trace-kind">${escapeHtml(kind.replaceAll("_", " "))}${item.phase ? ` • ${escapeHtml(item.phase)}` : ""}</div>
+      <h4>${escapeHtml(heading)}</h4>
+      ${meta ? `<div class="trace-meta">${escapeHtml(meta)}</div>` : ""}
+      ${body ? `<div class="trace-body">${renderMarkdown(body)}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderThinkingState() {
+  return `
+    <div class="thinking-block">
+      <div class="thinking-dots" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+      <div>Searching your vault, recent context, and sources…</div>
+    </div>
+  `;
+}
+
+function normalizeCitations(citations) {
+  return citations.map((citation, index) => ({
+    ...citation,
+    number: index + 1,
+  }));
+}
+
+function buildCitationLookup(citations) {
+  const lookup = new Map();
+  citations.forEach((citation) => {
+    const keys = [
+      citation.vault_url,
+      citation.source_url,
+      citation.path,
+      `/vault/${encodeURI(citation.path || "")}`,
+    ]
+      .filter(Boolean)
+      .map(normalizeCitationKey);
+
+    keys.forEach((key) => {
+      if (!lookup.has(key)) {
+        lookup.set(key, citation.number);
+      }
+    });
+  });
+  return lookup;
+}
+
+function normalizeCitationKey(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^https?:\/\/[^/]+/i, "")
+    .replace(/\/+$/, "");
 }
 
 function normalizeSavedFeed(feed) {
@@ -704,48 +895,188 @@ function normalizeSavedFeed(feed) {
     : [];
 }
 
-function formatDate(value) {
-  if (!value) {
-    return "Unknown";
+function renderMarkdown(source, options = {}) {
+  const lines = String(source || "").split("\n");
+  const html = [];
+  let listType = "";
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      if (listType) {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      continue;
+    }
+
+    if (trimmed.startsWith("### ")) {
+      if (listType) {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      html.push(`<h3>${renderInline(trimmed.slice(4), options)}</h3>`);
+      continue;
+    }
+    if (trimmed.startsWith("## ")) {
+      if (listType) {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      html.push(`<h2>${renderInline(trimmed.slice(3), options)}</h2>`);
+      continue;
+    }
+    if (trimmed.startsWith("# ")) {
+      if (listType) {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      html.push(`<h1>${renderInline(trimmed.slice(2), options)}</h1>`);
+      continue;
+    }
+
+    const bulletMatch = trimmed.match(/^- (.+)$/);
+    if (bulletMatch) {
+      if (listType && listType !== "ul") {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      if (!listType) {
+        html.push("<ul>");
+        listType = "ul";
+      }
+      html.push(`<li>${renderInline(bulletMatch[1], options)}</li>`);
+      continue;
+    }
+
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (orderedMatch) {
+      if (listType && listType !== "ol") {
+        html.push(`</${listType}>`);
+        listType = "";
+      }
+      if (!listType) {
+        html.push("<ol>");
+        listType = "ol";
+      }
+      html.push(`<li>${renderInline(orderedMatch[1], options)}</li>`);
+      continue;
+    }
+
+    if (listType) {
+      html.push(`</${listType}>`);
+      listType = "";
+    }
+    html.push(`<p>${renderInline(trimmed, options)}</p>`);
   }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return String(value);
+
+  if (listType) {
+    html.push(`</${listType}>`);
   }
-  return date.toLocaleString();
+  return html.join("");
 }
 
-function formatChatTimestamp(value) {
-  if (!value) {
-    return "Unknown";
+function renderInline(text, options = {}) {
+  const citationLookup = options.citationLookup || new Map();
+  let html = "";
+  let cursor = 0;
+  const source = String(text || "");
+
+  while (cursor < source.length) {
+    if (source[cursor] === "`") {
+      const codeEnd = source.indexOf("`", cursor + 1);
+      if (codeEnd !== -1) {
+        html += `<code>${escapeHtml(source.slice(cursor + 1, codeEnd))}</code>`;
+        cursor = codeEnd + 1;
+        continue;
+      }
+    }
+
+    if (source[cursor] === "[") {
+      const closeBracket = findMarkdownLabelClose(source, cursor + 1);
+      if (closeBracket !== -1) {
+        const closeParen = source.indexOf(")", closeBracket + 2);
+        if (closeParen !== -1) {
+          const label = source.slice(cursor + 1, closeBracket);
+          const href = source.slice(closeBracket + 2, closeParen);
+          const citationNumber = citationLookup.get(normalizeCitationKey(href));
+          if (citationNumber) {
+            html += `<a class="inline-citation" href="${escapeHtml(href)}" target="_blank" rel="noreferrer" title="${escapeHtml(label)}">${citationNumber}</a>`;
+          } else {
+            html += `<a class="text-link" href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${formatInlinePlain(label)}</a>`;
+          }
+          cursor = closeParen + 1;
+          continue;
+        }
+      }
+    }
+
+    const nextSpecial = findNextSpecialToken(source, cursor);
+    html += formatInlinePlain(source.slice(cursor, nextSpecial));
+    cursor = nextSpecial;
   }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return String(value);
-  }
-  return date.toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return html;
 }
 
-function getTimestamp(value) {
-  if (!value) {
-    return 0;
+function formatInlinePlain(text) {
+  return escapeHtml(text)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+}
+
+function findNextSpecialToken(text, start) {
+  const nextCode = text.indexOf("`", start);
+  const nextLink = text.indexOf("[", start);
+  const candidates = [nextCode, nextLink].filter((value) => value !== -1);
+  return candidates.length ? Math.min(...candidates) : text.length;
+}
+
+function findMarkdownLabelClose(text, start) {
+  for (let index = start; index < text.length - 1; index += 1) {
+    if (text[index] === "]" && text[index + 1] === "(") {
+      return index;
+    }
   }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return 0;
+  return -1;
+}
+
+function extractAgentMessageBody(text) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    return "";
   }
-  return date.getTime();
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      if (typeof parsed.answer_markdown === "string" && parsed.answer_markdown.trim()) {
+        return parsed.answer_markdown;
+      }
+      if (typeof parsed.concise_answer === "string" && parsed.concise_answer.trim()) {
+        return parsed.concise_answer;
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return raw;
+}
+
+function formatUsage(usage) {
+  if (!usage) {
+    return "usage unavailable";
+  }
+  const cached = usage.cached_input_tokens || 0;
+  return `${usage.input_tokens || 0} in • ${cached} cached • ${usage.output_tokens || 0} out`;
 }
 
 function groupChatsByRecency(chats) {
   const buckets = [
-    { key: "today", label: "Today", chats: [] },
-    { key: "yesterday", label: "Yesterday", chats: [] },
-    { key: "week", label: "Previous 7 Days", chats: [] },
-    { key: "older", label: "Older", chats: [] },
+    { label: "Today", chats: [] },
+    { label: "Yesterday", chats: [] },
+    { label: "Previous 7 Days", chats: [] },
+    { label: "Older", chats: [] },
   ];
 
   const now = new Date();
@@ -773,110 +1104,64 @@ function groupChatsByRecency(chats) {
   return buckets.filter((bucket) => bucket.chats.length);
 }
 
-function resetComposerState() {
-  state.threadId = "";
-  state.latestQuestion = "";
-  state.latestResult = null;
-  state.feed = [];
-  state.currentChat = null;
-  state.selectedTurnId = "";
-
-  localStorage.removeItem("vaultThreadId");
-  hydrateThread();
-  setRunState("idle", "Idle");
-  resetSaveState();
-  clearAnswerShell();
-  renderCitations([]);
-  renderTrace([]);
-  els.turnCount.textContent = "0";
-  els.turnList.innerHTML = `<div class="empty-state">Select a saved chat or start a new one.</div>`;
-  renderChatList();
+function getTimestamp(value) {
+  if (!value) {
+    return 0;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
-function renderMarkdown(source) {
-  const lines = String(source || "").split("\n");
-  const html = [];
-  let inList = false;
-
-  for (const rawLine of lines) {
-    const line = rawLine.trimEnd();
-    if (!line.trim()) {
-      if (inList) {
-        html.push("</ul>");
-        inList = false;
-      }
-      continue;
-    }
-    if (line.startsWith("### ")) {
-      if (inList) {
-        html.push("</ul>");
-        inList = false;
-      }
-      html.push(`<h3>${renderInline(line.slice(4))}</h3>`);
-      continue;
-    }
-    if (line.startsWith("## ")) {
-      if (inList) {
-        html.push("</ul>");
-        inList = false;
-      }
-      html.push(`<h2>${renderInline(line.slice(3))}</h2>`);
-      continue;
-    }
-    if (line.startsWith("# ")) {
-      if (inList) {
-        html.push("</ul>");
-        inList = false;
-      }
-      html.push(`<h1>${renderInline(line.slice(2))}</h1>`);
-      continue;
-    }
-    if (line.startsWith("- ")) {
-      if (!inList) {
-        html.push("<ul>");
-        inList = true;
-      }
-      html.push(`<li>${renderInline(line.slice(2))}</li>`);
-      continue;
-    }
-    if (inList) {
-      html.push("</ul>");
-      inList = false;
-    }
-    html.push(`<p>${renderInline(line)}</p>`);
+function formatChatTimestamp(value) {
+  if (!value) {
+    return "Unknown";
   }
-
-  if (inList) {
-    html.push("</ul>");
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
   }
-  return html.join("");
+  return date.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
-function extractAgentMessageBody(text) {
-  const raw = String(text || "").trim();
-  if (!raw) {
-    return "";
+function formatMessageTime(value) {
+  if (!value) {
+    return "now";
   }
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") {
-      if (typeof parsed.answer_markdown === "string" && parsed.answer_markdown.trim()) {
-        return parsed.answer_markdown;
-      }
-      if (typeof parsed.concise_answer === "string" && parsed.concise_answer.trim()) {
-        return parsed.concise_answer;
-      }
-    }
-  } catch {
-    // fall through to raw text
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
   }
-  return raw;
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
-function renderInline(text) {
-  return escapeHtml(text)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+function formatDuration(ms) {
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function truncate(text, limit) {
+  const value = String(text || "");
+  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+function summarizeText(text, limit) {
+  return truncate(
+    String(text || "")
+      .replace(/\[[^\]]+\]\([^)]+\)/g, "")
+      .replace(/\s+/g, " ")
+      .trim(),
+    limit,
+  );
 }
 
 function escapeHtml(text) {
@@ -886,11 +1171,4 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
-}
-
-function formatDuration(ms) {
-  if (ms < 1000) {
-    return `${ms}ms`;
-  }
-  return `${(ms / 1000).toFixed(1)}s`;
 }

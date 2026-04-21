@@ -7,164 +7,132 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <div class="page-shell">
-      <aside class="sidebar">
-        <div class="sidebar-top">
-          <div class="brand-block sidebar-brand">
-            <p class="eyebrow">Vault Interface</p>
-            <h1>Vault Lens</h1>
+    <div class="app-shell">
+      <aside class="history-rail">
+        <div class="rail-header">
+          <div class="rail-brand">
+            <div class="brand-mark">V</div>
+            <div>
+              <p class="brand-kicker">Personal Wiki</p>
+              <h1>Vault Lens</h1>
+            </div>
           </div>
-          <button id="new-thread-button" class="secondary-button new-chat-button" type="button">New Chat</button>
+          <button id="new-thread-button" class="new-chat-button" type="button">New chat</button>
         </div>
 
-        <section class="sidebar-card history-card">
-          <div class="panel-head compact-head">
-            <p class="card-label">Chats</p>
-            <span id="chat-count" class="muted">0</span>
-          </div>
-          <div id="chat-list" class="chat-history"></div>
-        </section>
+        <div class="rail-section-head">
+          <span>Chats</span>
+          <span id="chat-count">0</span>
+        </div>
+        <div id="chat-list" class="chat-history"></div>
 
-        <section class="sidebar-card sidebar-footer-card">
-          <p class="card-label">Session</p>
-          <dl class="meta-grid">
-            <div>
-              <dt>Status</dt>
-              <dd id="health-status">Checking…</dd>
+        <div class="rail-footer">
+          <div class="session-card">
+            <div class="session-row">
+              <span>Status</span>
+              <strong id="health-status">Checking…</strong>
             </div>
-            <div>
-              <dt>Thread</dt>
-              <dd id="thread-id">New</dd>
+            <div class="session-row">
+              <span>Model</span>
+              <strong id="model-name">-</strong>
             </div>
-            <div>
-              <dt>Model</dt>
-              <dd id="model-name">-</dd>
+            <div class="session-row">
+              <span>Thread</span>
+              <strong id="thread-id">New</strong>
             </div>
-          </dl>
-        </section>
-
-        <section class="sidebar-card sidebar-footer-card">
-          <p class="card-label">Quick Prompts</p>
-          <div class="preset-list">
-            <button class="preset" data-question="What are the most time-sensitive opportunities or jobs I should look at first?">
-              Time-sensitive queue
-            </button>
-            <button class="preset" data-question="What articles, tweets, and resources do I have about AI agents and how do they connect?">
-              AI agents context
-            </button>
-            <button class="preset" data-question="What decisions or systems in the vault explain how I think about applying to roles?">
-              Decision memory
-            </button>
-            <button class="preset" data-question="What inspiration or references do I have for product, design, or landing page work?">
-              Creative inspiration
-            </button>
           </div>
-        </section>
+        </div>
       </aside>
 
-      <main class="main-panel">
-        <section class="ask-panel">
-          <div class="ask-head">
-            <div>
-              <p class="eyebrow">Agentic Q&amp;A</p>
-              <h2>Query your vault like a working notebook, not a dead archive.</h2>
-            </div>
-            <div id="run-state" class="run-state idle">Idle</div>
+      <main class="chat-shell">
+        <header class="chat-topbar">
+          <div class="topbar-copy">
+            <p class="topbar-kicker">Vault chat</p>
+            <h2 id="chat-title">New chat</h2>
+            <p id="chat-subtitle" class="topbar-subtitle">
+              Ask across opportunities, articles, tweets, thoughts, systems, and decisions.
+            </p>
           </div>
 
-          <form id="query-form" class="query-form">
-            <label class="question-wrap" for="question-input">
-              <span class="label-text">Question</span>
+          <div class="topbar-actions">
+            <div id="save-status" class="save-status hidden"></div>
+            <button id="save-answer-button" class="ghost-button hidden" type="button">File latest answer</button>
+          </div>
+        </header>
+
+        <section id="conversation-viewport" class="conversation-viewport">
+          <div id="conversation-empty" class="empty-thread">
+            <div class="welcome-panel">
+              <p class="welcome-kicker">Search the vault like a real working memory.</p>
+              <h3>Everything important should feel one question away.</h3>
+              <p class="welcome-copy">
+                Ask for urgency, synthesis, inspiration, past decisions, role context, or the exact source behind a claim.
+              </p>
+              <div class="preset-grid">
+                <button class="preset" data-question="What are the most time-sensitive opportunities or jobs I should look at first?">
+                  Time-sensitive queue
+                </button>
+                <button class="preset" data-question="What articles, tweets, and resources do I have about AI agents and how do they connect?">
+                  AI agents context
+                </button>
+                <button class="preset" data-question="What decisions or systems in the vault explain how I think about applying to roles?">
+                  Decision memory
+                </button>
+                <button class="preset" data-question="What inspiration or references do I have for product, design, or landing page work?">
+                  Creative inspiration
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div id="conversation" class="conversation hidden"></div>
+        </section>
+
+        <footer class="composer-shell">
+          <form id="query-form" class="composer-form">
+            <label class="composer-input-wrap" for="question-input">
               <textarea
                 id="question-input"
                 name="question"
-                rows="5"
-                placeholder="Ask for a synthesis, a decision trail, the most urgent things to act on, or connections across articles, tweets, jobs, and notes."
+                rows="4"
+                placeholder="Ask the vault anything you may want to retrieve, synthesize, prioritize, or connect."
               ></textarea>
             </label>
 
-            <div class="controls">
-              <label>
-                <span class="label-text">Reasoning</span>
-                <select id="reasoning-select" name="reasoning">
-                  <option value="low">low</option>
-                  <option value="medium" selected>medium</option>
-                  <option value="high">high</option>
-                  <option value="xhigh">xhigh</option>
-                </select>
-              </label>
+            <div class="composer-footer">
+              <div class="composer-controls">
+                <label class="composer-control">
+                  <span>Reasoning</span>
+                  <select id="reasoning-select" name="reasoning">
+                    <option value="low">low</option>
+                    <option value="medium" selected>medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                  </select>
+                </label>
 
-              <label class="toggle">
-                <input id="web-search-toggle" type="checkbox" checked />
-                <span>Allow web search fallback</span>
-              </label>
+                <label class="composer-toggle">
+                  <input id="web-search-toggle" type="checkbox" checked />
+                  <span>Web search on</span>
+                </label>
+              </div>
 
-              <button id="submit-button" class="primary-button" type="submit">Ask Vault</button>
-            </div>
-          </form>
-          <p class="trace-note">
-            Live view includes reasoning summaries, plan updates, shell commands, web searches, MCP calls, and surfaced agent messages.
-          </p>
-        </section>
-
-        <section class="results-grid">
-          <article class="panel answer-panel">
-            <div class="panel-head">
-              <p class="card-label">Answer</p>
-              <div class="answer-actions">
-                <div id="save-status" class="muted hidden"></div>
-                <button id="save-answer-button" class="secondary-button hidden" type="button">Save To Vault</button>
-                <div id="confidence-badge" class="confidence-badge hidden"></div>
+              <div class="composer-actions">
+                <div id="run-state" class="run-state idle">Idle</div>
+                <button id="submit-button" class="send-button" type="submit">Send</button>
               </div>
             </div>
-            <div id="answer-empty" class="empty-state">
-              Answers, citations, and the tool path will show up here after the first query.
-            </div>
-            <div id="answer-meta" class="answer-meta hidden"></div>
-            <div id="answer-body" class="markdown-body hidden"></div>
-            <div id="gaps-block" class="stack hidden">
-              <p class="card-label">Known Gaps</p>
-              <ul id="gaps-list" class="bullet-list"></ul>
-            </div>
-            <div id="followups-block" class="stack hidden">
-              <p class="card-label">Useful Follow-ups</p>
-              <div id="followups-list" class="chip-row"></div>
-            </div>
-          </article>
-
-          <article class="panel citations-panel">
-            <div class="panel-head">
-              <p class="card-label">Citations</p>
-              <span id="citation-count" class="muted">0</span>
-            </div>
-            <div id="citations-list" class="stack"></div>
-          </article>
-
-          <article class="panel trace-panel">
-            <div class="panel-head">
-              <p class="card-label">Live Agent Feed</p>
-              <span id="trace-count" class="muted">0</span>
-            </div>
-            <div id="trace-list" class="stack"></div>
-          </article>
-
-          <article class="panel chat-panel">
-            <div class="panel-head">
-              <p class="card-label">Chat Trace</p>
-              <span id="turn-count" class="muted">0</span>
-            </div>
-            <div id="turn-list" class="stack"></div>
-          </article>
-        </section>
+          </form>
+        </footer>
       </main>
     </div>
 
     <script src="/app.js" defer></script>
   </body>
-  </html>
+</html>
