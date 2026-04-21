@@ -1,0 +1,20 @@
+{
+  "name": "my_vault",
+  "version": "1.0.0",
+  "description": "This vault is a retrieval-first personal wiki for anything you may want to revisit later: jobs, opportunities, interesting thoughts, technical articles, general reading, tweets, events, reminders, reusable resources, decisions, and personal systems.",
+  "main": "index.js",
+  "scripts": {
+    "rebuild:dashboards": "python3 tools/rebuild_dashboards.py",
+    "enrich:browser:recent": "node tools/enrich_with_browser.mjs . 120 4 30",
+    "telegram:sync": "python3 tools/telegram_inbox.py sync --vault-root .",
+    "telegram:run": "python3 tools/telegram_inbox.py run --vault-root ."
+  },
+  "keywords": [],
+  "author": "suraj <suraj.ranganath@gmail.com> (http://surajr.com/)",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@openai/codex-sdk": "^0.122.0",
+    "playwright": "^1.59.1"
+  }
+}
