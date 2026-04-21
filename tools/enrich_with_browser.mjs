@@ -108,6 +108,65 @@ function truncate(text, limit = 220) {
   return `${cleaned.slice(0, limit - 3).trimEnd()}...`;
 }
 
+function replaceTwitterUrls(text, entities = {}) {
+  let output = String(text || "");
+  for (const entry of entities.urls || []) {
+    const shortUrl = entry.url || "";
+    const expandedUrl = entry.expanded_url || entry.expandedUrl || entry.display_url || "";
+    if (shortUrl && expandedUrl) {
+      output = output.split(shortUrl).join(expandedUrl);
+    }
+  }
+  return cleanText(output);
+}
+
+function xBindingValue(bindings, key) {
+  const binding = (bindings || []).find((entry) => entry?.key === key);
+  const value = binding?.value || {};
+  return value.string_value || value.scribe_key || "";
+}
+
+function xTweetResultFromPayload(payload) {
+  const root = payload?.data?.tweetResult?.result;
+  if (!root || typeof root !== "object") {
+    return null;
+  }
+  if (root.tweet && typeof root.tweet === "object") {
+    return root.tweet;
+  }
+  return root;
+}
+
+function extractXFromPayload(payload, fallbackUrl = "") {
+  const root = xTweetResultFromPayload(payload);
+  if (!root) {
+    return null;
+  }
+  const legacy = root.legacy || {};
+  const noteText = root?.note_tweet?.note_tweet_results?.result?.text || "";
+  const tweetText = replaceTwitterUrls(noteText || legacy.full_text || "", legacy.entities || {});
+  const userLegacy = root?.core?.user_results?.result?.legacy || {};
+  const userCore = root?.core?.user_results?.result?.core || {};
+  const cardBindings = root?.card?.legacy?.binding_values || [];
+  const cardTitle = xBindingValue(cardBindings, "title");
+  const cardDescription = xBindingValue(cardBindings, "description");
+  const cardDomain = xBindingValue(cardBindings, "domain") || xBindingValue(cardBindings, "vanity_url");
+  const expandedUrls = (legacy.entities?.urls || [])
+    .map((entry) => entry.expanded_url || entry.display_url || "")
+    .filter(Boolean);
+  const authorHandle = userLegacy.screen_name ? `@${userLegacy.screen_name}` : "";
+  const authorName = userCore.name || userLegacy.name || "";
+  return {
+    tweetText,
+    authorHandle,
+    authorName,
+    cardTitle: cleanText(cardTitle),
+    cardDescription: cleanText(cardDescription),
+    cardDomain: cleanText(cardDomain),
+    expandedUrls,
+  };
+}
+
 function dedupe(lines, limit = 6, minLength = 20) {
   const out = [];
   const seen = new Set();
@@ -253,6 +312,22 @@ async function enrichNote(browser, filePath) {
 
   const page = await browser.newPage();
   try {
+    let xPayload = null;
+    const captureXPayload = async (response) => {
+      if (xPayload) {
+        return;
+      }
+      const responseUrl = response.url();
+      if (!responseUrl.includes("TweetResultByRestId")) {
+        return;
+      }
+      try {
+        xPayload = await response.json();
+      } catch {
+        // Ignore malformed or non-JSON responses.
+      }
+    };
+    page.on("response", captureXPayload);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
     await page.waitForTimeout(2500);
     const isX = /https?:\/\/(www\.)?(x\.com|twitter\.com)\//i.test(url);
@@ -261,15 +336,29 @@ async function enrichNote(browser, filePath) {
     let browserLines = [];
 
     if (isX) {
+      const gql = extractXFromPayload(xPayload, url);
       const extracted = await extractX(page, url);
-      if (extracted.tweetText) {
-        summary.push(`Post text: ${extracted.tweetText}`);
+      const preferredText = gql?.tweetText || extracted.tweetText || "";
+      if (preferredText) {
+        summary.push(`Post text: ${preferredText}`);
       }
-      if (extracted.description && extracted.description !== extracted.tweetText) {
+      if (gql?.cardTitle) {
+        summary.push(`Linked page: ${gql.cardTitle}${gql.cardDomain ? ` (${gql.cardDomain})` : ""}`);
+      }
+      if (gql?.cardDescription) {
+        summary.push(`Linked page summary: ${gql.cardDescription}`);
+      }
+      if (extracted.description && extracted.description !== preferredText) {
         summary.push(`Post summary: ${extracted.description}`);
       }
-      if (extracted.authorHandle) {
-        signals.push(`Author handle: ${extracted.authorHandle}`);
+      if (gql?.authorHandle || extracted.authorHandle) {
+        signals.push(`Author handle: ${gql?.authorHandle || extracted.authorHandle}`);
+      }
+      if (gql?.authorName) {
+        signals.push(`Author name: ${gql.authorName}`);
+      }
+      for (const expandedUrl of (gql?.expandedUrls || []).slice(0, 3)) {
+        signals.push(`Expanded URL: ${expandedUrl}`);
       }
       if (extracted.title) {
         signals.push(`Page title: ${extracted.title}`);
@@ -277,6 +366,7 @@ async function enrichNote(browser, filePath) {
       browserLines = [
         `Browser checked page on ${new Date().toISOString().slice(0, 10)}.`,
         `Browser URL: ${page.url()}`,
+        ...(xPayload ? ["Browser source: X TweetResultByRestId GraphQL response."] : []),
       ];
     } else {
       const extracted = await extractGeneric(page);
