@@ -275,6 +275,13 @@ dd {
   gap: 18px;
 }
 
+.trace-note {
+  margin: 14px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+  max-width: 78ch;
+}
+
 .question-wrap {
   display: block;
 }
@@ -455,6 +462,10 @@ select:focus {
   background: rgba(33, 24, 15, 0.05);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.trace-body {
+  line-height: 1.62;
 }
 
 .bullet-list {

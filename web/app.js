@@ -3,6 +3,7 @@ const state = {
   health: null,
   latestQuestion: "",
   latestResult: null,
+  feed: [],
 };
 
 const els = {
@@ -84,10 +85,14 @@ async function onSubmit(event) {
   els.submit.disabled = true;
   state.latestQuestion = question;
   state.latestResult = null;
+  state.feed = [];
   resetSaveState();
+  renderTrace([]);
+  renderCitations([]);
+  clearAnswerShell();
 
   try {
-    const response = await fetch("/api/query", {
+    const response = await fetch("/api/query-stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -97,23 +102,14 @@ async function onSubmit(event) {
         includeWebSearch: els.webSearch.checked,
       }),
     });
-    const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.error || "Query failed");
+      const errorText = await response.text();
+      throw new Error(errorText || "Query failed");
     }
-
-    state.threadId = data.threadId || "";
-    state.latestResult = data;
-    if (state.threadId) {
-      localStorage.setItem("vaultThreadId", state.threadId);
+    await consumeQueryStream(response);
+    if (!state.latestResult) {
+      throw new Error("Query completed without a final result.");
     }
-    hydrateThread();
-    renderAnswer(data.answer);
-    renderCitations(data.answer.citations || []);
-    renderTrace(data.trace || []);
-    showSaveButton();
-    els.modelName.textContent = data.meta?.model || state.health?.model || "-";
-    setRunState("done", `Done in ${formatDuration(data.meta?.durationMs || 0)}`);
   } catch (error) {
     setRunState("idle", "Error");
     renderFailure(error instanceof Error ? error.message : String(error));
@@ -152,6 +148,181 @@ async function onSaveAnswer() {
   } finally {
     els.saveAnswerButton.disabled = false;
   }
+}
+
+async function consumeQueryStream(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line) {
+        handleStreamEvent(JSON.parse(line));
+      }
+      newlineIndex = buffer.indexOf("\n");
+    }
+
+    if (done) {
+      const tail = buffer.trim();
+      if (tail) {
+        handleStreamEvent(JSON.parse(tail));
+      }
+      break;
+    }
+  }
+}
+
+function handleStreamEvent(event) {
+  if (event.type === "thread.started") {
+    state.threadId = event.threadId || "";
+    if (state.threadId) {
+      localStorage.setItem("vaultThreadId", state.threadId);
+    }
+    hydrateThread();
+    appendFeed({
+      type: "system",
+      phase: "started",
+      title: "Thread started",
+      body: state.threadId,
+    });
+    return;
+  }
+
+  if (event.type === "turn.started") {
+    appendFeed({
+      type: "system",
+      phase: "started",
+      title: "Turn started",
+      body: "Agent is planning the vault search path.",
+    });
+    return;
+  }
+
+  if (event.type === "turn.completed") {
+    appendFeed({
+      type: "system",
+      phase: "completed",
+      title: "Turn completed",
+      body: `usage: ${formatUsage(event.usage)}`,
+    });
+    return;
+  }
+
+  if (event.type === "turn.failed") {
+    appendFeed({
+      type: "error",
+      phase: "failed",
+      title: "Turn failed",
+      body: event.error || "Unknown failure",
+    });
+    return;
+  }
+
+  if (event.type === "error") {
+    appendFeed({
+      type: "error",
+      phase: "failed",
+      title: "Agent error",
+      body: event.message || "Unknown error",
+    });
+    return;
+  }
+
+  if (event.type === "item") {
+    appendFeed(formatFeedEntry(event.phase, event.item));
+    return;
+  }
+
+  if (event.type === "result") {
+    state.threadId = event.threadId || state.threadId;
+    state.latestResult = event;
+    hydrateThread();
+    renderAnswer(event.answer);
+    renderCitations(event.answer.citations || []);
+    showSaveButton();
+    els.modelName.textContent = event.meta?.model || state.health?.model || "-";
+    setRunState("done", `Done in ${formatDuration(event.meta?.durationMs || 0)}`);
+  }
+}
+
+function formatFeedEntry(phase, item) {
+  if (item.type === "reasoning") {
+    return {
+      type: "reasoning",
+      phase,
+      title: "Reasoning summary",
+      body: item.text,
+    };
+  }
+  if (item.type === "todo_list") {
+    return {
+      type: "todo_list",
+      phase,
+      title: "Plan update",
+      body: item.items.map((todo) => `${todo.completed ? "[x]" : "[ ]"} ${todo.text}`).join("\n"),
+    };
+  }
+  if (item.type === "command_execution") {
+    return {
+      type: "command_execution",
+      phase,
+      title: item.command,
+      body: item.output_preview || "",
+      meta: item.exit_code === null ? item.status : `exit ${item.exit_code}`,
+    };
+  }
+  if (item.type === "web_search") {
+    return {
+      type: "web_search",
+      phase,
+      title: item.query,
+      body: "",
+    };
+  }
+  if (item.type === "mcp_tool_call") {
+    return {
+      type: "mcp_tool_call",
+      phase,
+      title: `${item.server}.${item.tool}`,
+      body: item.arguments_preview || "",
+      meta: item.error ? `${item.status} • ${item.error}` : item.status,
+    };
+  }
+  if (item.type === "agent_message") {
+    return {
+      type: "agent_message",
+      phase,
+      title: "Agent message",
+      body: item.text,
+    };
+  }
+  if (item.type === "error") {
+    return {
+      type: "error",
+      phase,
+      title: "Agent item error",
+      body: item.message,
+    };
+  }
+  return {
+    type: item.type || "event",
+    phase,
+    title: item.type || "event",
+    body: "",
+  };
+}
+
+function appendFeed(entry) {
+  state.feed.unshift(entry);
+  state.feed = state.feed.slice(0, 120);
+  renderTrace(state.feed);
 }
 
 function renderAnswer(answer) {
@@ -207,50 +378,77 @@ function renderTrace(trace) {
           if (item.type === "command_execution") {
             return `
               <article class="trace-card">
-                <div class="trace-kind">command</div>
-                <h3>${escapeHtml(item.command)}</h3>
-                <div class="muted">exit ${escapeHtml(String(item.exit_code))}</div>
-                <div class="trace-command">${escapeHtml(item.output_preview || "")}</div>
+                <div class="trace-kind">command • ${escapeHtml(item.phase || "")}</div>
+                <h3>${escapeHtml(item.title || item.command || "")}</h3>
+                <div class="muted">${escapeHtml(item.meta || (item.exit_code === null ? "" : `exit ${item.exit_code}`))}</div>
+                <div class="trace-command">${escapeHtml(item.body || item.output_preview || "")}</div>
               </article>
             `;
           }
           if (item.type === "web_search") {
             return `
               <article class="trace-card">
-                <div class="trace-kind">web search</div>
-                <h3>${escapeHtml(item.query)}</h3>
+                <div class="trace-kind">web search • ${escapeHtml(item.phase || "")}</div>
+                <h3>${escapeHtml(item.query || item.title || "")}</h3>
               </article>
             `;
           }
           if (item.type === "mcp_tool_call") {
             return `
               <article class="trace-card">
-                <div class="trace-kind">mcp tool</div>
-                <h3>${escapeHtml(`${item.server}.${item.tool}`)}</h3>
-                <div class="muted">${escapeHtml(item.status || "")}${item.error ? ` • ${escapeHtml(item.error)}` : ""}</div>
+                <div class="trace-kind">mcp tool • ${escapeHtml(item.phase || "")}</div>
+                <h3>${escapeHtml(item.title || `${item.server}.${item.tool}`)}</h3>
+                <div class="muted">${escapeHtml(item.meta || item.status || "")}</div>
+                ${item.body ? `<div class="trace-command">${escapeHtml(item.body)}</div>` : ""}
               </article>
             `;
           }
           if (item.type === "todo_list") {
             return `
               <article class="trace-card">
-                <div class="trace-kind">plan</div>
-                <h3>Agent todo list</h3>
-                <div class="trace-command">${escapeHtml(
-                  item.items.map((todo) => `${todo.completed ? "[x]" : "[ ]"} ${todo.text}`).join("\n"),
-                )}</div>
+                <div class="trace-kind">plan • ${escapeHtml(item.phase || "")}</div>
+                <h3>${escapeHtml(item.title || "Agent todo list")}</h3>
+                <div class="trace-command">${escapeHtml(item.body || "")}</div>
+              </article>
+            `;
+          }
+          if (item.type === "reasoning") {
+            return `
+              <article class="trace-card">
+                <div class="trace-kind">reasoning summary • ${escapeHtml(item.phase || "")}</div>
+                <h3>${escapeHtml(item.title || "Reasoning summary")}</h3>
+                <div class="trace-body">${escapeHtml(item.body || "")}</div>
+              </article>
+            `;
+          }
+          if (item.type === "system") {
+            return `
+              <article class="trace-card">
+                <div class="trace-kind">system • ${escapeHtml(item.phase || "")}</div>
+                <h3>${escapeHtml(item.title || "System event")}</h3>
+                <div class="trace-body">${escapeHtml(item.body || "")}</div>
+              </article>
+            `;
+          }
+          if (item.type === "agent_message") {
+            return `
+              <article class="trace-card">
+                <div class="trace-kind">agent message • ${escapeHtml(item.phase || "")}</div>
+                <h3>${escapeHtml(item.title || "Agent message")}</h3>
+                <div class="trace-body">${escapeHtml(item.body || "")}</div>
               </article>
             `;
           }
           return `
             <article class="trace-card">
-              <div class="trace-kind">${escapeHtml(item.type || "event")}</div>
-              <h3>${escapeHtml(item.message || "Agent event")}</h3>
+              <div class="trace-kind">${escapeHtml(item.type || "event")}${item.phase ? ` • ${escapeHtml(item.phase)}` : ""}</div>
+              <h3>${escapeHtml(item.title || item.message || "Agent event")}</h3>
+              ${item.body ? `<div class="trace-body">${escapeHtml(item.body)}</div>` : ""}
             </article>
           `;
         })
         .join("")
-    : `<div class="empty-state">The backend will show shell, search, and tool activity here.</div>`;
+    : `<div class="empty-state">The live feed will show reasoning summaries, plan updates, commands, searches, tool calls, and surfaced agent messages here.</div>`;
 }
 
 function renderFailure(message) {
@@ -276,6 +474,15 @@ function setRunState(kind, label) {
   els.runState.textContent = label;
 }
 
+function clearAnswerShell() {
+  els.answerEmpty.classList.remove("hidden");
+  els.answerBody.classList.add("hidden");
+  els.answerBody.innerHTML = "";
+  els.gapsBlock.classList.add("hidden");
+  els.followupsBlock.classList.add("hidden");
+  els.confidenceBadge.classList.add("hidden");
+}
+
 function showSaveButton() {
   els.saveAnswerButton.classList.remove("hidden");
 }
@@ -294,6 +501,13 @@ function setSaveState(message, href = "") {
   } else {
     els.saveStatus.textContent = message;
   }
+}
+
+function formatUsage(usage) {
+  if (!usage) {
+    return "usage unavailable";
+  }
+  return `${usage.input_tokens || 0} in / ${usage.output_tokens || 0} out`;
 }
 
 function renderMarkdown(source) {

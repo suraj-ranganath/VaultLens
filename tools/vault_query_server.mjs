@@ -79,6 +79,10 @@ const server = http.createServer(async (req, res) => {
       return handleQuery(req, res);
     }
 
+    if (req.method === "POST" && url.pathname === "/api/query-stream") {
+      return handleQueryStream(req, res);
+    }
+
     if (req.method === "POST" && url.pathname === "/api/save-answer") {
       return handleSaveAnswer(req, res);
     }
@@ -149,6 +153,101 @@ async function handleQuery(req, res) {
   });
 }
 
+async function handleQueryStream(req, res) {
+  const body = await readJson(req);
+  const validated = validateQueryRequest(body);
+  if ("error" in validated) {
+    return json(res, validated.status, { error: validated.error });
+  }
+
+  const { question, threadId, reasoningEffort, includeWebSearch, model } = validated;
+  const startedAt = Date.now();
+  const threadOptions = buildThreadOptions({ model, reasoningEffort, includeWebSearch });
+  const thread = threadId ? codex.resumeThread(threadId, threadOptions) : codex.startThread(threadOptions);
+  const { events } = await thread.runStreamed(buildPrompt(question, includeWebSearch), { outputSchema: QUERY_SCHEMA });
+
+  res.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+  });
+
+  const completedItems = [];
+  let finalResponse = "";
+  let usage = null;
+
+  try {
+    for await (const event of events) {
+      if (event.type === "thread.started") {
+        writeNdjson(res, { type: "thread.started", threadId: event.thread_id });
+        continue;
+      }
+      if (event.type === "turn.started") {
+        writeNdjson(res, { type: "turn.started" });
+        continue;
+      }
+      if (event.type === "turn.completed") {
+        usage = event.usage;
+        writeNdjson(res, { type: "turn.completed", usage });
+        continue;
+      }
+      if (event.type === "turn.failed") {
+        writeNdjson(res, { type: "turn.failed", error: event.error.message });
+        break;
+      }
+      if (event.type === "error") {
+        if ((event.message || "").includes("[features].collab")) {
+          continue;
+        }
+        writeNdjson(res, { type: "error", message: event.message });
+        continue;
+      }
+      if (event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed") {
+        if (event.type === "item.completed") {
+          completedItems.push(event.item);
+          if (event.item.type === "agent_message") {
+            finalResponse = event.item.text;
+          }
+        }
+        const normalizedItem = normalizeThreadItem(event.item);
+        if (normalizedItem) {
+          writeNdjson(res, {
+            type: "item",
+            phase: event.type.split(".")[1],
+            item: normalizedItem,
+          });
+        }
+      }
+    }
+
+    if (!finalResponse) {
+      throw new Error("Codex did not return a final structured response.");
+    }
+
+    const answer = parseJson(finalResponse);
+    writeNdjson(res, {
+      type: "result",
+      threadId: thread.id,
+      answer,
+      trace: summarizeTrace(completedItems),
+      usage,
+      meta: {
+        model,
+        reasoningEffort,
+        includeWebSearch,
+        durationMs: Date.now() - startedAt,
+      },
+    });
+  } catch (error) {
+    writeNdjson(res, {
+      type: "error",
+      message: formatError(error),
+    });
+  } finally {
+    res.end();
+  }
+}
+
 async function handleSaveAnswer(req, res) {
   const body = await readJson(req);
   const question = String(body.question || "").trim();
@@ -213,60 +312,70 @@ ${question}
 }
 
 function summarizeTrace(items) {
-  return items
-    .flatMap((item) => {
-      if (item.type === "command_execution") {
-        return [
-          {
-            type: "command_execution",
-            command: item.command,
-            status: item.status,
-            exit_code: item.exit_code ?? null,
-            output_preview: truncate(item.aggregated_output || "", 500),
-          },
-        ];
-      }
-      if (item.type === "web_search") {
-        return [
-          {
-            type: "web_search",
-            query: item.query,
-          },
-        ];
-      }
-      if (item.type === "mcp_tool_call") {
-        return [
-          {
-            type: "mcp_tool_call",
-            server: item.server,
-            tool: item.tool,
-            status: item.status,
-            error: item.error?.message || null,
-          },
-        ];
-      }
-      if (item.type === "todo_list") {
-        return [
-          {
-            type: "todo_list",
-            items: item.items,
-          },
-        ];
-      }
-      if (item.type === "error") {
-        if ((item.message || "").includes("[features].collab")) {
-          return [];
-        }
-        return [
-          {
-            type: "error",
-            message: item.message,
-          },
-        ];
-      }
-      return [];
-    })
-    .slice(0, 80);
+  return items.map(normalizeThreadItem).filter(Boolean).slice(0, 120);
+}
+
+function normalizeThreadItem(item) {
+  if (item.type === "command_execution") {
+    return {
+      id: item.id,
+      type: "command_execution",
+      command: item.command,
+      status: item.status,
+      exit_code: item.exit_code ?? null,
+      output_preview: truncate(item.aggregated_output || "", 700),
+    };
+  }
+  if (item.type === "web_search") {
+    return {
+      id: item.id,
+      type: "web_search",
+      query: item.query,
+    };
+  }
+  if (item.type === "mcp_tool_call") {
+    return {
+      id: item.id,
+      type: "mcp_tool_call",
+      server: item.server,
+      tool: item.tool,
+      status: item.status,
+      error: item.error?.message || null,
+      arguments_preview: truncate(JSON.stringify(item.arguments || {}), 320),
+    };
+  }
+  if (item.type === "todo_list") {
+    return {
+      id: item.id,
+      type: "todo_list",
+      items: item.items,
+    };
+  }
+  if (item.type === "reasoning") {
+    return {
+      id: item.id,
+      type: "reasoning",
+      text: item.text,
+    };
+  }
+  if (item.type === "agent_message") {
+    return {
+      id: item.id,
+      type: "agent_message",
+      text: truncate(item.text || "", 700),
+    };
+  }
+  if (item.type === "error") {
+    if ((item.message || "").includes("[features].collab")) {
+      return null;
+    }
+    return {
+      id: item.id,
+      type: "error",
+      message: item.message,
+    };
+  }
+  return null;
 }
 
 async function writeSavedAnswer({ question, answer, trace, meta, threadId }) {
@@ -527,6 +636,44 @@ async function readJson(req) {
   return text ? JSON.parse(text) : {};
 }
 
+function validateQueryRequest(body) {
+  const question = String(body.question || "").trim();
+  const threadId = String(body.threadId || "").trim() || null;
+  const reasoningEffort = normalizeReasoning(body.reasoningEffort);
+  const includeWebSearch = Boolean(body.includeWebSearch);
+  const model = String(body.model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+
+  if (!question) {
+    return { error: "Missing `question`.", status: 400 };
+  }
+
+  const apiKey = (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || "").trim();
+  if (!apiKey) {
+    return { error: "Missing OPENAI_API_KEY or CODEX_API_KEY in .env.local.", status: 500 };
+  }
+
+  return {
+    question,
+    threadId,
+    reasoningEffort,
+    includeWebSearch,
+    model,
+  };
+}
+
+function buildThreadOptions({ model, reasoningEffort, includeWebSearch }) {
+  return {
+    model,
+    workingDirectory: vaultRoot,
+    skipGitRepoCheck: true,
+    approvalPolicy: "never",
+    sandboxMode: "read-only",
+    networkAccessEnabled: includeWebSearch,
+    webSearchEnabled: includeWebSearch,
+    modelReasoningEffort: reasoningEffort,
+  };
+}
+
 function parseJson(text) {
   const trimmed = String(text || "").trim();
   if (!trimmed) {
@@ -568,6 +715,10 @@ function truncate(text, limit) {
 function json(res, status, payload) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(payload, null, 2));
+}
+
+function writeNdjson(res, payload) {
+  res.write(`${JSON.stringify(payload)}\n`);
 }
 
 function formatError(error) {
