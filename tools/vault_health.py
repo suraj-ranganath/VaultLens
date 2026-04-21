@@ -26,7 +26,7 @@ CANONICAL_FOLDERS = [
     "items/tweets",
 ]
 REQUIRED_FIELDS = ["type", "title", "discovered_on", "status", "priority", "why_saved"]
-RECENT_WARNING_WINDOW_DAYS = 60
+RECENT_ACTION_WINDOW_DAYS = 30
 
 
 def parse_day(value: Any) -> date | None:
@@ -73,13 +73,24 @@ def missing_summary(body: str) -> bool:
     return not section_bullets(body, "Summary")
 
 
+def issue_line(link: str, message: str, discovered_day: date | None = None) -> str:
+    prefix = f"`{discovered_day.isoformat()}` " if discovered_day else ""
+    return f"- {prefix}{link}: {message}"
+
+
+def issue_sort_key(line: str) -> tuple[str, str]:
+    match = re.match(r"- `(\d{4}-\d{2}-\d{2})` ", line)
+    return (match.group(1) if match else "", line)
+
+
 def build_health_report(vault_root: Path) -> tuple[str, dict[str, int]]:
     pages_scanned = 0
     critical: list[str] = []
-    warnings: list[str] = []
-    suggestions: list[str] = []
+    recent_action: list[str] = []
+    browser_queue: list[str] = []
+    older_backlog: list[str] = []
     topic_counter: Counter[str] = Counter()
-    warning_cutoff = date.today() - timedelta(days=RECENT_WARNING_WINDOW_DAYS)
+    recent_cutoff = date.today() - timedelta(days=RECENT_ACTION_WINDOW_DAYS)
 
     for folder in CANONICAL_FOLDERS:
         for path in sorted((vault_root / folder).glob("*.md")):
@@ -93,11 +104,11 @@ def build_health_report(vault_root: Path) -> tuple[str, dict[str, int]]:
             title = data.get("title") or path.stem
             link = f"[[{path.relative_to(vault_root).as_posix()}|{title}]]"
             discovered_day = parse_day(data.get("discovered_on"))
-            is_recent = discovered_day is not None and discovered_day >= warning_cutoff
+            is_recent = discovered_day is not None and discovered_day >= recent_cutoff
             for field in REQUIRED_FIELDS:
                 value = data.get(field)
                 if value in ("", None, []):
-                    critical.append(f"- {link}: missing required field `{field}`.")
+                    critical.append(issue_line(link, f"missing required field `{field}`.", discovered_day))
 
             topics = list(data.get("topics") or [])
             for topic in topics:
@@ -105,55 +116,69 @@ def build_health_report(vault_root: Path) -> tuple[str, dict[str, int]]:
 
             note_type = str(data.get("type") or "")
             if note_type in {"decision", "system"} and missing_summary(body):
-                warnings.append(f"- {link}: missing a usable `## Summary` section.")
+                target = recent_action if is_recent else older_backlog
+                target.append(issue_line(link, "missing a usable `## Summary` section.", discovered_day))
             if note_type in {"article", "resource", "tweet"} and thin_context(body):
-                target = warnings if is_recent else suggestions
-                target.append(f"- {link}: retrieval context is thin and should be enriched or clipped.")
+                target = browser_queue if is_recent else older_backlog
+                target.append(issue_line(link, "retrieval context is thin; run browser enrichment or save a cleaner clip.", discovered_day))
             if note_type in {"thought", "resource", "article", "tweet"} and not topics:
-                target = warnings if is_recent else suggestions
-                target.append(f"- {link}: no topical tags assigned, which weakens retrieval.")
+                target = recent_action if is_recent else older_backlog
+                target.append(issue_line(link, "no topical tags assigned, which weakens retrieval.", discovered_day))
             if note_type == "job":
                 if not data.get("company") or not data.get("role"):
-                    warnings.append(f"- {link}: job note is missing `company` or `role`.")
+                    target = recent_action if is_recent else older_backlog
+                    target.append(issue_line(link, "job note is missing `company` or `role`.", discovered_day))
                 if not data.get("posted_on"):
-                    suggestions.append(f"- {link}: posted date is still unknown; keep checking the source page or supporting artifact.")
+                    target = recent_action if is_recent else older_backlog
+                    target.append(issue_line(link, "posted date is still unknown; keep checking the source page or supporting artifact.", discovered_day))
             if note_type in {"decision", "system"} and not data.get("topics"):
-                suggestions.append(f"- {link}: add topics so the note is surfaced during related queries.")
+                target = recent_action if is_recent else older_backlog
+                target.append(issue_line(link, "add topics so the note is surfaced during related queries.", discovered_day))
 
     for topic, count in topic_counter.most_common(10):
         project_path = vault_root / "projects" / f"{topic}.md"
         topic_path = vault_root / "topics" / f"{topic}.md"
         if count >= 5 and not topic_path.exists():
-            suggestions.append(f"- Topic `{topic}` appears in {count} notes but has no durable topic page yet.")
+            older_backlog.append(f"- Topic `{topic}` appears in {count} notes but has no durable topic page yet.")
         if count >= 8 and not project_path.exists():
-            suggestions.append(f"- Topic `{topic}` appears in {count} notes and may deserve a project page if it becomes active work.")
+            older_backlog.append(f"- Topic `{topic}` appears in {count} notes and may deserve a project page if it becomes active work.")
+
+    critical.sort(key=issue_sort_key, reverse=True)
+    recent_action.sort(key=issue_sort_key, reverse=True)
+    browser_queue.sort(key=issue_sort_key, reverse=True)
+    older_backlog.sort(key=issue_sort_key, reverse=True)
 
     summary = {
         "pages_scanned": pages_scanned,
         "critical": len(critical),
-        "warnings": len(warnings),
-        "suggestions": len(suggestions),
+        "recent_action": len(recent_action),
+        "browser_queue": len(browser_queue),
+        "older_backlog": len(older_backlog),
     }
     lines = [
         "# Vault Health",
         "",
-        "Lint-style health check for canonical notes, retrieval quality, and maintenance gaps.",
+        "Operational health check for canonical notes, retrieval quality, and maintenance gaps.",
         "",
         "## Summary",
         "",
         f"- Pages scanned: {pages_scanned}",
         f"- Critical issues: {len(critical)}",
-        f"- Warnings: {len(warnings)}",
-        f"- Suggestions: {len(suggestions)}",
+        f"- Recent action queue: {len(recent_action)}",
+        f"- Browser enrichment queue: {len(browser_queue)}",
+        f"- Older backlog: {len(older_backlog)}",
+        f"- Recent queue window: last {RECENT_ACTION_WINDOW_DAYS} days",
         "",
         "## Critical",
         "",
     ]
     lines.extend(critical or ["- No critical issues detected."])
-    lines.extend(["", "## Warnings", ""])
-    lines.extend(warnings or ["- No warnings detected."])
-    lines.extend(["", "## Suggestions", ""])
-    lines.extend(suggestions or ["- No suggestions detected."])
+    lines.extend(["", "## Recent Action Queue", ""])
+    lines.extend(recent_action or ["- No recent action items detected."])
+    lines.extend(["", "## Browser Enrichment Queue", ""])
+    lines.extend(browser_queue or ["- No recent browser-enrichment candidates detected."])
+    lines.extend(["", "## Older Backlog", ""])
+    lines.extend(older_backlog or ["- No older backlog detected."])
     lines.append("")
     return "\n".join(lines), summary
 
