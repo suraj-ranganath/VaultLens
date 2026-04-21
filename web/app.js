@@ -4,6 +4,9 @@ const state = {
   latestQuestion: "",
   latestResult: null,
   feed: [],
+  chats: [],
+  currentChat: null,
+  selectedTurnId: "",
 };
 
 const els = {
@@ -14,6 +17,7 @@ const els = {
   submit: document.querySelector("#submit-button"),
   answerEmpty: document.querySelector("#answer-empty"),
   answerBody: document.querySelector("#answer-body"),
+  answerMeta: document.querySelector("#answer-meta"),
   gapsBlock: document.querySelector("#gaps-block"),
   gapsList: document.querySelector("#gaps-list"),
   followupsBlock: document.querySelector("#followups-block"),
@@ -30,6 +34,10 @@ const els = {
   saveAnswerButton: document.querySelector("#save-answer-button"),
   saveStatus: document.querySelector("#save-status"),
   newThreadButton: document.querySelector("#new-thread-button"),
+  chatCount: document.querySelector("#chat-count"),
+  chatList: document.querySelector("#chat-list"),
+  turnCount: document.querySelector("#turn-count"),
+  turnList: document.querySelector("#turn-list"),
   presets: [...document.querySelectorAll(".preset")],
 };
 
@@ -39,6 +47,7 @@ async function boot() {
   hydrateThread();
   bindEvents();
   await refreshHealth();
+  await refreshChats();
 }
 
 function bindEvents() {
@@ -70,6 +79,21 @@ async function refreshHealth() {
   } catch {
     els.healthStatus.textContent = "Offline";
     els.modelName.textContent = "-";
+  }
+}
+
+async function refreshChats() {
+  try {
+    const response = await fetch("/api/chats");
+    const data = await response.json();
+    state.chats = data.chats || [];
+    renderChatList();
+    if (!state.currentChat && state.chats.length) {
+      await loadChat(state.chats[0].id);
+    }
+  } catch {
+    state.chats = [];
+    renderChatList();
   }
 }
 
@@ -110,6 +134,7 @@ async function onSubmit(event) {
     if (!state.latestResult) {
       throw new Error("Query completed without a final result.");
     }
+    await refreshChats();
   } catch (error) {
     setRunState("idle", "Error");
     renderFailure(error instanceof Error ? error.message : String(error));
@@ -249,6 +274,10 @@ function handleStreamEvent(event) {
     showSaveButton();
     els.modelName.textContent = event.meta?.model || state.health?.model || "-";
     setRunState("done", `Done in ${formatDuration(event.meta?.durationMs || 0)}`);
+    renderAnswerMeta(event.usage, event.cost, event.meta);
+    if (event.chat?.id) {
+      loadChat(event.chat.id);
+    }
   }
 }
 
@@ -351,6 +380,26 @@ function renderAnswer(answer) {
       els.question.focus();
     });
   });
+}
+
+function renderAnswerMeta(usage, cost, meta) {
+  const pills = [];
+  if (usage) {
+    pills.push(`<div class="meta-pill">${escapeHtml(formatUsage(usage))}</div>`);
+  }
+  if (cost?.totalUsd != null) {
+    pills.push(`<div class="meta-pill">$${escapeHtml(cost.totalUsd.toFixed(4))}</div>`);
+  }
+  if (meta?.model) {
+    pills.push(`<div class="meta-pill">${escapeHtml(meta.model)}</div>`);
+  }
+  if (cost?.source) {
+    pills.push(
+      `<a class="meta-pill" href="${escapeHtml(cost.source)}" target="_blank" rel="noreferrer">pricing source</a>`,
+    );
+  }
+  els.answerMeta.innerHTML = pills.join("");
+  els.answerMeta.classList.toggle("hidden", pills.length === 0);
 }
 
 function renderCitations(citations) {
@@ -467,6 +516,7 @@ function renderFailure(message) {
   els.gapsBlock.classList.add("hidden");
   els.followupsBlock.classList.add("hidden");
   els.confidenceBadge.classList.add("hidden");
+  els.answerMeta.classList.add("hidden");
   resetSaveState();
 }
 
@@ -483,6 +533,7 @@ function clearAnswerShell() {
   els.answerEmpty.classList.remove("hidden");
   els.answerBody.classList.add("hidden");
   els.answerBody.innerHTML = "";
+  els.answerMeta.classList.add("hidden");
   els.gapsBlock.classList.add("hidden");
   els.followupsBlock.classList.add("hidden");
   els.confidenceBadge.classList.add("hidden");
@@ -512,7 +563,131 @@ function formatUsage(usage) {
   if (!usage) {
     return "usage unavailable";
   }
-  return `${usage.input_tokens || 0} in / ${usage.output_tokens || 0} out`;
+  const cached = usage.cached_input_tokens || 0;
+  return `${usage.input_tokens || 0} in • ${cached} cached • ${usage.output_tokens || 0} out`;
+}
+
+function renderChatList() {
+  els.chatCount.textContent = String(state.chats.length);
+  els.chatList.innerHTML = state.chats.length
+    ? state.chats
+        .map(
+          (chat) => `
+            <button class="chat-button ${chat.id === state.currentChat?.id ? "active" : ""}" type="button" data-chat-id="${escapeHtml(chat.id)}">
+              <div class="card-label">${escapeHtml(formatDate(chat.updatedAt))}</div>
+              <div class="turn-question">${escapeHtml(chat.title || "Untitled chat")}</div>
+              <div class="turn-summary">${escapeHtml(chat.lastQuestion || "")}</div>
+            </button>
+          `,
+        )
+        .join("")
+    : `<div class="empty-state">No saved chats yet.</div>`;
+
+  [...els.chatList.querySelectorAll(".chat-button")].forEach((button) => {
+    button.addEventListener("click", () => loadChat(button.dataset.chatId || ""));
+  });
+}
+
+async function loadChat(chatId) {
+  if (!chatId) {
+    return;
+  }
+  const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`);
+  const data = await response.json();
+  if (!response.ok) {
+    return;
+  }
+  state.currentChat = data.chat;
+  state.selectedTurnId = data.chat.turns?.at(-1)?.id || "";
+  renderChatList();
+  renderTurnList();
+  hydrateSelectedTurn();
+}
+
+function renderTurnList() {
+  const turns = state.currentChat?.turns || [];
+  els.turnCount.textContent = String(turns.length);
+  els.turnList.innerHTML = turns.length
+    ? turns
+        .map(
+          (turn) => `
+            <article class="turn-card ${turn.id === state.selectedTurnId ? "active" : ""}" data-turn-id="${escapeHtml(turn.id)}">
+              <div class="card-label">${escapeHtml(formatDate(turn.completedAt))}</div>
+              <div class="turn-question">${escapeHtml(turn.question)}</div>
+              <div class="turn-summary">${escapeHtml(turn.answer?.concise_answer || "")}</div>
+              <div class="citation-links">
+                <span>${escapeHtml(formatUsage(turn.usage || {}))}</span>
+                ${turn.cost?.totalUsd != null ? `<span>$${escapeHtml(turn.cost.totalUsd.toFixed(4))}</span>` : ""}
+              </div>
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="empty-state">No turns saved yet.</div>`;
+
+  [...els.turnList.querySelectorAll(".turn-card")].forEach((card) => {
+    card.addEventListener("click", () => {
+      state.selectedTurnId = card.dataset.turnId || "";
+      renderTurnList();
+      hydrateSelectedTurn();
+    });
+  });
+}
+
+function hydrateSelectedTurn() {
+  const turns = state.currentChat?.turns || [];
+  const turn = turns.find((entry) => entry.id === state.selectedTurnId) || turns.at(-1);
+  if (!turn) {
+    return;
+  }
+  state.feed = normalizeSavedFeed(turn.feed || turn.trace || []);
+  renderAnswer(turn.answer || {});
+  renderAnswerMeta(turn.usage, turn.cost, turn.meta);
+  renderCitations(turn.answer?.citations || []);
+  renderTrace(state.feed.length ? state.feed : normalizeSavedFeed(turn.trace || []));
+  setRunState("idle", "Loaded");
+}
+
+function normalizeSavedFeed(feed) {
+  return Array.isArray(feed)
+    ? feed
+        .map((entry) => {
+          if (entry?.type === "item" && entry.item) {
+            return formatFeedEntry(entry.phase, entry.item);
+          }
+          if (entry?.type === "thread.started") {
+            return { type: "system", phase: "started", title: "Thread started", body: entry.threadId || "" };
+          }
+          if (entry?.type === "turn.started") {
+            return { type: "system", phase: "started", title: "Turn started", body: "Agent is planning the vault search path." };
+          }
+          if (entry?.type === "turn.completed") {
+            return { type: "system", phase: "completed", title: "Turn completed", body: `usage: ${formatUsage(entry.usage)}` };
+          }
+          if (entry?.type === "error" || entry?.type === "turn.failed") {
+            return { type: "error", phase: "failed", title: "Agent error", body: entry.message || entry.error || "" };
+          }
+          if (entry?.type) {
+            return entry;
+          }
+          if (entry?.command || entry?.type === "command_execution") {
+            return formatFeedEntry("completed", entry);
+          }
+          return null;
+        })
+        .filter(Boolean)
+    : [];
+}
+
+function formatDate(value) {
+  if (!value) {
+    return "Unknown";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toLocaleString();
 }
 
 function renderMarkdown(source) {

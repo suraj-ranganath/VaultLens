@@ -60,6 +60,14 @@
           </dl>
           <button id="new-thread-button" class="secondary-button" type="button">Start Fresh Thread</button>
         </section>
+
+        <section class="sidebar-card">
+          <div class="panel-head compact-head">
+            <p class="card-label">Saved Chats</p>
+            <span id="chat-count" class="muted">0</span>
+          </div>
+          <div id="chat-list" class="stack"></div>
+        </section>
       </aside>
 
       <main class="main-panel">
@@ -120,6 +128,7 @@
             <div id="answer-empty" class="empty-state">
               Answers, citations, and the tool path will show up here after the first query.
             </div>
+            <div id="answer-meta" class="answer-meta hidden"></div>
             <div id="answer-body" class="markdown-body hidden"></div>
             <div id="gaps-block" class="stack hidden">
               <p class="card-label">Known Gaps</p>
@@ -145,6 +154,14 @@
               <span id="trace-count" class="muted">0</span>
             </div>
             <div id="trace-list" class="stack"></div>
+          </article>
+
+          <article class="panel chat-panel">
+            <div class="panel-head">
+              <p class="card-label">Chat Trace</p>
+              <span id="turn-count" class="muted">0</span>
+            </div>
+            <div id="turn-list" class="stack"></div>
           </article>
         </section>
       </main>

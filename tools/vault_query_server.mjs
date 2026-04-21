@@ -13,6 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const vaultRoot = path.resolve(__dirname, "..");
 const webRoot = path.join(vaultRoot, "web");
+const chatTraceRoot = path.join(vaultRoot, "outputs", "chat-traces");
 
 loadEnvFile(path.join(vaultRoot, ".env.local"));
 
@@ -21,6 +22,27 @@ const DEFAULT_MODEL = (process.env.VAULT_QUERY_DEFAULT_MODEL || "gpt-5.4").trim(
 const codex = new Codex({
   apiKey: (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || "").trim(),
 });
+
+const MODEL_PRICING = {
+  "gpt-5.4": {
+    inputPer1M: 2.5,
+    cachedInputPer1M: 0.25,
+    outputPer1M: 15,
+    source: "https://openai.com/api/pricing/",
+  },
+  "gpt-5.4-mini": {
+    inputPer1M: 0.75,
+    cachedInputPer1M: 0.075,
+    outputPer1M: 4.5,
+    source: "https://openai.com/api/pricing/",
+  },
+  "gpt-5.4-nano": {
+    inputPer1M: 0.2,
+    cachedInputPer1M: 0.02,
+    outputPer1M: 1.25,
+    source: "https://openai.com/api/pricing/",
+  },
+};
 
 const QUERY_SCHEMA = {
   type: "object",
@@ -88,6 +110,14 @@ const server = http.createServer(async (req, res) => {
       return handleSaveAnswer(req, res);
     }
 
+    if (req.method === "GET" && url.pathname === "/api/chats") {
+      return handleListChats(res);
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/api/chats/")) {
+      return handleGetChat(decodeURIComponent(url.pathname.replace(/^\/api\/chats\//, "")), res);
+    }
+
     if (req.method === "GET" && url.pathname.startsWith("/vault/")) {
       return serveVaultFile(decodeURIComponent(url.pathname.replace(/^\/vault\//, "")), res);
     }
@@ -138,6 +168,24 @@ async function handleQuery(req, res) {
   const thread = threadId ? codex.resumeThread(threadId, threadOptions) : codex.startThread(threadOptions);
   const turn = await thread.run(buildPrompt(question, includeWebSearch), { outputSchema: QUERY_SCHEMA });
   const answer = await hydrateAnswer(parseJson(turn.finalResponse));
+  const cost = calculateCost(model, turn.usage);
+  const persisted = await persistChatTurn({
+    threadId: thread.id || randomId(),
+    question,
+    answer,
+    trace: summarizeTrace(turn.items),
+    usage: turn.usage,
+    cost,
+    meta: {
+      model,
+      reasoningEffort,
+      includeWebSearch,
+      durationMs: Date.now() - startedAt,
+    },
+    feed: [],
+    startedAt: new Date(startedAt).toISOString(),
+    completedAt: new Date().toISOString(),
+  });
 
   return json(res, 200, {
     ok: true,
@@ -145,6 +193,8 @@ async function handleQuery(req, res) {
     answer,
     trace: summarizeTrace(turn.items),
     usage: turn.usage,
+    cost,
+    chat: buildChatSummary(persisted),
     meta: {
       model,
       reasoningEffort,
@@ -176,31 +226,42 @@ async function handleQueryStream(req, res) {
   const completedItems = [];
   let finalResponse = "";
   let usage = null;
+  const feed = [];
 
   try {
     for await (const event of events) {
       if (event.type === "thread.started") {
-        writeNdjson(res, { type: "thread.started", threadId: event.thread_id });
+        const payload = { type: "thread.started", threadId: event.thread_id };
+        feed.push(payload);
+        writeNdjson(res, payload);
         continue;
       }
       if (event.type === "turn.started") {
-        writeNdjson(res, { type: "turn.started" });
+        const payload = { type: "turn.started" };
+        feed.push(payload);
+        writeNdjson(res, payload);
         continue;
       }
       if (event.type === "turn.completed") {
         usage = event.usage;
-        writeNdjson(res, { type: "turn.completed", usage });
+        const payload = { type: "turn.completed", usage };
+        feed.push(payload);
+        writeNdjson(res, payload);
         continue;
       }
       if (event.type === "turn.failed") {
-        writeNdjson(res, { type: "turn.failed", error: event.error.message });
+        const payload = { type: "turn.failed", error: event.error.message };
+        feed.push(payload);
+        writeNdjson(res, payload);
         break;
       }
       if (event.type === "error") {
         if ((event.message || "").includes("[features].collab")) {
           continue;
         }
-        writeNdjson(res, { type: "error", message: event.message });
+        const payload = { type: "error", message: event.message };
+        feed.push(payload);
+        writeNdjson(res, payload);
         continue;
       }
       if (event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed") {
@@ -212,11 +273,13 @@ async function handleQueryStream(req, res) {
         }
         const normalizedItem = normalizeThreadItem(event.item);
         if (normalizedItem) {
-          writeNdjson(res, {
+          const payload = {
             type: "item",
             phase: event.type.split(".")[1],
             item: normalizedItem,
-          });
+          };
+          feed.push(payload);
+          writeNdjson(res, payload);
         }
       }
     }
@@ -226,12 +289,32 @@ async function handleQueryStream(req, res) {
     }
 
     const answer = await hydrateAnswer(parseJson(finalResponse));
+    const cost = calculateCost(model, usage);
+    const persisted = await persistChatTurn({
+      threadId: thread.id || randomId(),
+      question,
+      answer,
+      trace: summarizeTrace(completedItems),
+      usage,
+      cost,
+      meta: {
+        model,
+        reasoningEffort,
+        includeWebSearch,
+        durationMs: Date.now() - startedAt,
+      },
+      feed,
+      startedAt: new Date(startedAt).toISOString(),
+      completedAt: new Date().toISOString(),
+    });
     writeNdjson(res, {
       type: "result",
       threadId: thread.id,
       answer,
       trace: summarizeTrace(completedItems),
       usage,
+      cost,
+      chat: buildChatSummary(persisted),
       meta: {
         model,
         reasoningEffort,
@@ -277,6 +360,25 @@ async function handleSaveAnswer(req, res) {
     path: written.relativePath,
     title: written.title,
     url: `/vault/${encodeURI(written.relativePath)}`,
+  });
+}
+
+async function handleListChats(res) {
+  const chats = await listChatTraces();
+  return json(res, 200, {
+    ok: true,
+    chats: chats.map(buildChatSummary),
+  });
+}
+
+async function handleGetChat(chatId, res) {
+  const chat = await readChatTrace(chatId);
+  if (!chat) {
+    return json(res, 404, { error: "Chat trace not found." });
+  }
+  return json(res, 200, {
+    ok: true,
+    chat,
   });
 }
 
@@ -367,7 +469,7 @@ function normalizeThreadItem(item) {
     return {
       id: item.id,
       type: "agent_message",
-      text: truncate(item.text || "", 700),
+      text: item.text || "",
     };
   }
   if (item.type === "error") {
@@ -500,6 +602,99 @@ async function writeSavedAnswer({ question, answer, trace, meta, threadId }) {
   return {
     title,
     relativePath: path.relative(vaultRoot, targetPath).replaceAll(path.sep, "/"),
+  };
+}
+
+async function persistChatTurn({ threadId, question, answer, trace, usage, cost, meta, feed, startedAt, completedAt }) {
+  await fsp.mkdir(chatTraceRoot, { recursive: true });
+  const safeId = sanitizeChatId(threadId || randomId());
+  const targetPath = path.join(chatTraceRoot, `${safeId}.json`);
+
+  let chat = {
+    id: safeId,
+    threadId: safeId,
+    title: buildOutputTitle(question),
+    createdAt: startedAt,
+    updatedAt: completedAt,
+    model: meta.model,
+    turns: [],
+  };
+
+  if (await fileExists(targetPath)) {
+    try {
+      chat = JSON.parse(await fsp.readFile(targetPath, "utf8"));
+    } catch {
+      // Keep a fresh structure if the prior trace is unreadable.
+    }
+  }
+
+  chat.id = safeId;
+  chat.threadId = safeId;
+  chat.title = chat.title || buildOutputTitle(question);
+  chat.createdAt = chat.createdAt || startedAt;
+  chat.updatedAt = completedAt;
+  chat.model = meta.model;
+  chat.turns = Array.isArray(chat.turns) ? chat.turns : [];
+  chat.turns.push({
+    id: randomId(),
+    question,
+    answer,
+    trace,
+    usage,
+    cost,
+    meta,
+    feed,
+    startedAt,
+    completedAt,
+  });
+
+  await fsp.writeFile(targetPath, JSON.stringify(chat, null, 2), "utf8");
+  return chat;
+}
+
+async function listChatTraces() {
+  try {
+    await fsp.mkdir(chatTraceRoot, { recursive: true });
+    const files = (await fsp.readdir(chatTraceRoot)).filter((name) => name.endsWith(".json"));
+    const chats = [];
+    for (const file of files) {
+      const fullPath = path.join(chatTraceRoot, file);
+      try {
+        const chat = JSON.parse(await fsp.readFile(fullPath, "utf8"));
+        chats.push(chat);
+      } catch {
+        // Skip unreadable traces.
+      }
+    }
+    chats.sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+    return chats;
+  } catch {
+    return [];
+  }
+}
+
+async function readChatTrace(chatId) {
+  const safeId = sanitizeChatId(chatId);
+  const targetPath = path.join(chatTraceRoot, `${safeId}.json`);
+  if (!(await fileExists(targetPath))) {
+    return null;
+  }
+  return JSON.parse(await fsp.readFile(targetPath, "utf8"));
+}
+
+function buildChatSummary(chat) {
+  const turns = Array.isArray(chat.turns) ? chat.turns : [];
+  const lastTurn = turns.at(-1) || null;
+  return {
+    id: chat.id,
+    threadId: chat.threadId,
+    title: chat.title,
+    updatedAt: chat.updatedAt,
+    turnCount: turns.length,
+    model: chat.model,
+    lastQuestion: lastTurn?.question || "",
+    lastAnswer: lastTurn?.answer?.concise_answer || lastTurn?.answer?.answer_markdown || "",
+    lastCost: lastTurn?.cost || null,
   };
 }
 
@@ -683,6 +878,36 @@ function buildThreadOptions({ model, reasoningEffort, includeWebSearch }) {
   };
 }
 
+function calculateCost(model, usage) {
+  const pricing = MODEL_PRICING[String(model || "").toLowerCase()];
+  if (!pricing || !usage) {
+    return null;
+  }
+
+  const cachedInputTokens = Number(usage.cached_input_tokens || 0);
+  const totalInputTokens = Number(usage.input_tokens || 0);
+  const uncachedInputTokens = Math.max(0, totalInputTokens - cachedInputTokens);
+  const outputTokens = Number(usage.output_tokens || 0);
+
+  const inputCost = (uncachedInputTokens / 1_000_000) * pricing.inputPer1M;
+  const cachedInputCost = (cachedInputTokens / 1_000_000) * pricing.cachedInputPer1M;
+  const outputCost = (outputTokens / 1_000_000) * pricing.outputPer1M;
+  const totalCost = inputCost + cachedInputCost + outputCost;
+
+  return {
+    currency: "USD",
+    assumption: "standard pricing under 272K context window",
+    source: pricing.source,
+    inputTokens: uncachedInputTokens,
+    cachedInputTokens,
+    outputTokens,
+    inputUsd: inputCost,
+    cachedInputUsd: cachedInputCost,
+    outputUsd: outputCost,
+    totalUsd: totalCost,
+  };
+}
+
 async function hydrateAnswer(answer) {
   const citations = [];
   for (const citation of Array.isArray(answer.citations) ? answer.citations : []) {
@@ -766,6 +991,17 @@ function rewriteAnswerMarkdownLinks(markdown, citations) {
 
 function buildVaultUrl(relativePath) {
   return `/vault/${encodeURI(String(relativePath || "").replace(/^\/+/, ""))}`;
+}
+
+function sanitizeChatId(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "") || randomId();
+}
+
+function randomId() {
+  return crypto.randomBytes(8).toString("hex");
 }
 
 function parseJson(text) {

@@ -366,6 +366,10 @@ select:focus {
   margin-bottom: 16px;
 }
 
+.compact-head {
+  margin-bottom: 10px;
+}
+
 .answer-actions {
   display: flex;
   align-items: center;
@@ -383,6 +387,23 @@ select:focus {
   color: var(--muted);
   line-height: 1.65;
   padding: 12px 0 4px;
+}
+
+.answer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.meta-pill {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.64);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
 }
 
 .markdown-body {
@@ -448,6 +469,46 @@ select:focus {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--accent);
+}
+
+.chat-button,
+.turn-card {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.chat-button {
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-button.active {
+  border-color: rgba(158, 61, 36, 0.45);
+  background: rgba(158, 61, 36, 0.08);
+}
+
+.turn-card {
+  padding: 14px;
+  cursor: pointer;
+}
+
+.turn-card.active {
+  border-color: rgba(36, 89, 65, 0.4);
+  background: rgba(36, 89, 65, 0.08);
+}
+
+.turn-question {
+  margin: 8px 0;
+  font-weight: 700;
+}
+
+.turn-summary {
+  color: var(--muted);
+  line-height: 1.55;
 }
 
 .citation-kind,
