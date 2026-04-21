@@ -1,0 +1,27 @@
+---
+description: my-vault: local-first personal knowledge vault with hot cache, dashboards, browser enrichment, and durable markdown notes
+globs:
+  - "tools/**/*.py"
+  - "tools/**/*.mjs"
+  - "templates/**/*.md"
+  - "AGENTS.md"
+  - "WIKI.md"
+alwaysApply: true
+---
+
+# my-vault
+
+Read `AGENTS.md` for the operating contract.
+
+Session startup:
+
+1. Read `hot.md` if present.
+2. Read `index.md`.
+3. Prefer `dashboards/` before individual notes.
+
+Critical rules:
+
+- Do not mutate `raw/` or `imports/`.
+- Keep latest shared material first in surfacing views.
+- Keep `log.md` append-only.
+- Keep `hot.md` short and overwrite it completely.

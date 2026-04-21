@@ -18,7 +18,11 @@ Tracked here:
 
 - `tools/` for ingestion, dashboard rebuilds, artifact attachment, and browser enrichment
 - `templates/` for canonical note shapes
+- `config/obsidian/` for tracked Obsidian defaults that can be installed into a local vault
+- `hooks/` for hot-cache style hook definitions
+- `bin/setup-vault.sh` for local vault bootstrap
 - `AGENTS.md` for the operating rules the agent follows
+- `WIKI.md`, `CLAUDE.md`, `GEMINI.md`, and agent bootstrap files for cross-tool consistency
 - `package.json` for the Codex SDK and Playwright toolchain
 - `.env.example` for local configuration shape
 
@@ -26,6 +30,7 @@ Ignored from Git:
 
 - `items/`, `topics/`, `projects/`, `dashboards/`, `raw/`, `imports/`, and `outputs/`
 - `.env.local` and any other secret-bearing env files
+- `hot.md`, `index.md`, and `log.md`
 - Obsidian local state and dependency directories
 
 ## Model And Agent Path
@@ -36,7 +41,21 @@ Ignored from Git:
 
 The browser fallback is intentionally focused on recent material. The current policy is to run Playwright enrichment only for notes discovered in the last 30 days, with special attention to X and other pages that are weak or blocked under plain HTTP fetches.
 
+Borrowed and adapted from the `claude-obsidian` pattern:
+
+- `hot.md` as a cross-session cache
+- `dashboards/dashboard.base` as a native Obsidian Bases view
+- `dashboards/vault-health.md` as a lint-style maintenance surface
+- tracked Obsidian config templates plus a setup script
+- multi-agent bootstrap docs so different tools share the same vault contract
+
 ## Core Workflows
+
+### 0. Install local Obsidian defaults
+
+```bash
+npm run vault:setup
+```
 
 ### 1. Ingest a chat export
 
@@ -50,6 +69,14 @@ python3 tools/ingest_whatsapp_inbox.py --vault-root .
 ```bash
 npm run rebuild:dashboards
 ```
+
+This rebuild also refreshes:
+
+- `hot.md`
+- `index.md`
+- `dashboards/dashboard.base`
+- `dashboards/dashboard.md`
+- `dashboards/vault-health.md`
 
 ### 3. Enrich recent weak links with Playwright
 
@@ -85,6 +112,12 @@ npm run telegram:run
 
 The Telegram receiver stores raw updates locally, appends a normalized inbox stream, lets a local Codex agent decide how to classify or file each message, and acknowledges successful ingestion with `👍`. If the machine is down, the next sync catches up from Telegram history.
 
+### 5. Run a health check directly
+
+```bash
+npm run vault:health
+```
+
 ## Knowledge Design Principles
 
 - explicit and inspectable over hidden memory
@@ -93,4 +126,6 @@ The Telegram receiver stores raw updates locally, appends a normalized inbox str
 - newest shared material should surface first in dashboards
 - job notes should preserve website-posted date when known
 - decisions and systems should be first-class notes
+- recent context should be available through a compact hot cache
+- maintenance should be explicit through a lint-style health page
 - outputs from future queries should be filed back into the wiki so the corpus compounds

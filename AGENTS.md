@@ -35,7 +35,9 @@ This vault is an Obsidian-first markdown wiki for personal knowledge capture, op
 - `outputs/`: reusable generated artifacts such as briefs, research notes, slide decks, and answer files
 - `templates/`: note templates used during ingest and maintenance
 - `index.md`: catalog of major pages
+- `hot.md`: compact cross-session cache of recent context
 - `log.md`: append-only operational log
+- `raw/.manifest.json`: ingest manifest for source hashes and output summaries
 
 ## Source Handling
 
@@ -223,17 +225,18 @@ When the user provides a new export:
 
 When answering questions:
 
-1. Start with the most relevant dashboard page.
-2. Read the canonical item notes referenced there.
-3. Read topic pages, decision notes, and project pages when synthesis, history, or intent-tracking is required.
-4. Surface items by relevance, combining:
+1. Read `hot.md` first when it exists.
+2. Start with the most relevant dashboard page.
+3. Read the canonical item notes referenced there.
+4. Read topic pages, decision notes, and project pages when synthesis, history, or intent-tracking is required.
+5. Surface items by relevance, combining:
    - explicit deadlines and dates
    - recency of discovery or publication
    - overlap with the user's recurring interests and recent questions
    - manual priority and `why_saved`
    - prior verdicts and recurring systems
-5. Cite canonical notes, not imports, whenever possible.
-6. If the answer creates durable value, file it into `topics/`, `projects/`, or `outputs/`.
+6. Cite canonical notes, not imports, whenever possible.
+7. If the answer creates durable value, file it into `topics/`, `projects/`, or `outputs/`.
 
 ## Surfacing Rules
 
@@ -251,6 +254,7 @@ When answering questions:
   - repeated mentions across exports
 - When the user asks about a topic, look for both direct matches and adjacent topics that often co-occur in saved items.
 - When the user asks for advice or ideation, privilege pages that capture taste, preferences, prior inspirations, and explicit decisions.
+- Refresh `hot.md`, the native Bases dashboard, and the health report after substantial ingest or enrichment changes.
 
 ## Project and Output Workflow
 

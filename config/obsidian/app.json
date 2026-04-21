@@ -1,0 +1,16 @@
+{
+  "userIgnoreFilters": [
+    "tools/",
+    "templates/",
+    "hooks/",
+    "config/",
+    "bin/",
+    "README.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "WIKI.md",
+    "package.json",
+    "package-lock.json"
+  ]
+}

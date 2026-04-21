@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -1275,6 +1276,266 @@ def render_decisions_ledger(project_pages: list[Path]) -> str:
     return "\n".join(lines)
 
 
+def render_dashboard_base() -> str:
+    lines = [
+        "filters:",
+        "  and:",
+        '    - file.inFolder("items")',
+        '    - \'file.ext == "md"\'',
+        "",
+        "formulas:",
+        "  age_days: '(now() - file.mtime).days'",
+        "  has_deadline: 'if(deadline, \"yes\", \"\")'",
+        "",
+        "properties:",
+        "  type:",
+        '    displayName: "Type"',
+        "  priority:",
+        '    displayName: "Priority"',
+        "  deadline:",
+        '    displayName: "Deadline"',
+        "  discovered_on:",
+        '    displayName: "Saved"',
+        "  formula.age_days:",
+        '    displayName: "Days Since Edit"',
+        "",
+        "views:",
+        "  - type: table",
+        '    name: "Recent Items"',
+        "    limit: 25",
+        "    order:",
+        "      - discovered_on",
+        "      - type",
+        "      - priority",
+        "      - formula.age_days",
+        "  - type: table",
+        '    name: "Jobs To Apply"',
+        "    filters:",
+        "      and:",
+        '        - file.inFolder("items/jobs")',
+        '        - \'application_status == "to_apply" or application_status == "to_review"\'',
+        "    order:",
+        "      - discovered_on",
+        "      - posted_on",
+        "      - priority",
+        "      - deadline",
+        "  - type: table",
+        '    name: "Reading Queue"',
+        "    filters:",
+        "      and:",
+        '        - \'type == "article" or type == "resource" or type == "tweet"\'',
+        "    order:",
+        "      - discovered_on",
+        "      - priority",
+        "      - formula.age_days",
+        "  - type: table",
+        '    name: "Upcoming Deadlines"',
+        "    filters:",
+        "      and:",
+        '        - \'deadline\'',
+        '        - \'status != "done" and status != "closed" and status != "archived"\'',
+        "    order:",
+        "      - discovered_on",
+        "      - deadline",
+        "      - priority",
+        "  - type: table",
+        '    name: "Decisions And Systems"',
+        "    filters:",
+        "      or:",
+        '        - file.inFolder("items/decisions")',
+        '        - file.inFolder("items/systems")',
+        "    order:",
+        "      - discovered_on",
+        "      - verdict",
+        "      - priority",
+        "  - type: list",
+        '    name: "Thoughts Radar"',
+        "    filters:",
+        "      and:",
+        '        - file.inFolder("items/thoughts")',
+        '        - \'status != "archived"\'',
+        "    order:",
+        "      - discovered_on",
+        "      - priority",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_dashboard_hub() -> str:
+    lines = [
+        "# Vault Dashboard",
+        "",
+        "This is the native Obsidian dashboard surface for the vault. It complements the markdown dashboards with a single Bases view and links to the deeper operational pages.",
+        "",
+        "## Native Dashboard",
+        "",
+        "![[dashboard.base]]",
+        "",
+        "## Operational Pages",
+        "",
+        "- [[relevant-now|Relevant Now]]",
+        "- [[jobs-urgent|Jobs Urgent]]",
+        "- [[jobs-ledger|Jobs Ledger]]",
+        "- [[reading-queue|Reading Queue]]",
+        "- [[thoughts-radar|Thoughts Radar]]",
+        "- [[recent-items|Recent Items]]",
+        "- [[followups|Followups]]",
+        "- [[deadlines|Deadlines]]",
+        "- [[decisions-ledger|Decisions Ledger]]",
+        "- [[vault-health|Vault Health]]",
+        "",
+        "## Operating Notes",
+        "",
+        "- Latest shared items should surface first by default.",
+        "- Website-posted dates remain visible on job notes even when surfacing is recency-first.",
+        "- `hot.md` is the cross-session cache for recent context.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_hot_cache(items: list[tuple[Item, Path]], project_pages: list[Path]) -> str:
+    recent = sorted(items, key=lambda pair: (pair[0].discovered_on, pair[0].last_relevant_on), reverse=True)[:20]
+    recent_titles = [f"[[{vault_rel_path(path)}|{item.title}]]" for item, path in recent[:6]]
+    topic_counts = Counter(
+        topic
+        for item, _ in recent
+        for topic in item.topics
+    )
+    active_topics = [topic for topic, _ in topic_counts.most_common(5)]
+    open_jobs = [
+        pair for pair in recent
+        if pair[0].type == "job" and pair[0].application_status in {"to_review", "to_apply", "interviewing"}
+    ][:5]
+    timely = [
+        pair for pair in recent
+        if pair[0].deadline or pair[0].type in {"event", "reminder", "opportunity"}
+    ][:5]
+    lines = [
+        "---",
+        'type: "meta"',
+        'title: "Hot Cache"',
+        f'updated: "{datetime.now().isoformat(timespec="seconds")}"',
+        'tags: ["meta", "hot-cache"]',
+        'status: "evergreen"',
+        "---",
+        "",
+        "# Recent Context",
+        "",
+        "## Last Updated",
+        f"{CURRENT_DATE.isoformat()} — rebuilt vault surfaces and refreshed recent retrieval context.",
+        "",
+        "## Key Recent Facts",
+    ]
+    if recent_titles:
+        lines.extend([f"- Most recent items in the vault: {', '.join(recent_titles[:3])}."])
+    if active_topics:
+        lines.append(f"- Active recent topics: {', '.join(f'`{topic}`' for topic in active_topics)}.")
+    if open_jobs:
+        lines.append(f"- Open recent job flow items: {', '.join(item.title for item, _ in open_jobs[:3])}.")
+    if timely:
+        lines.append(f"- Time-sensitive recent items remain concentrated in: {', '.join(item.title for item, _ in timely[:3])}.")
+    lines.extend([
+        "",
+        "## Recent Changes",
+        f"- Rebuilt markdown dashboards and the native Bases dashboard from {len(items)} canonical notes.",
+        f"- Active project pages currently present: {len(project_pages)}.",
+        "- Browser enrichment is prioritized for recent weak links, especially X posts from the last 30 days.",
+        "",
+        "## Active Threads",
+    ])
+    if active_topics:
+        for topic in active_topics[:4]:
+            lines.append(f"- Current interest cluster: `#{topic}`.")
+    else:
+        lines.append("- No dominant topic cluster was detected in the recent item window.")
+    lines.append("- Keep the next ingest focused on high-context captures: jobs, technical reading, thoughts, and explicit decisions.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_root_index(items: list[tuple[Item, Path]], project_pages: list[Path]) -> str:
+    counts = Counter(item.type for item, _ in items)
+    total = len(items)
+    lines = [
+        "# Index",
+        "",
+        "This page catalogs the main operating surfaces in the vault.",
+        "",
+        f"Last rebuilt: {CURRENT_DATE.isoformat()} | Canonical notes: {total} | Projects: {len(project_pages)}",
+        "",
+        "## Core Navigation",
+        "",
+        "- [[hot|Hot Cache]]: recent cross-session context for fast startup and cross-project retrieval",
+        "- [[log|Log]]: append-only history of major ingest and maintenance operations",
+        "- [[dashboards/dashboard|Vault Dashboard]]: native dashboard hub with the Bases view and links to deeper pages",
+        "- [[dashboards/vault-health|Vault Health]]: lint-style scan for weak notes, missing metadata, and maintenance gaps",
+        "",
+        "## Dashboards",
+        "",
+        "- [[dashboards/relevant-now|Relevant Now]]: time-sensitive and topic-relevant items that should be surfaced first",
+        "- [[dashboards/jobs-urgent|Jobs Urgent]]: highest-priority job applications and time-sensitive postings",
+        "- [[dashboards/jobs-ledger|Jobs Ledger]]: ledger of job opportunities organized by posted date metadata",
+        "- [[dashboards/artifact-capture-queue|Artifact Capture Queue]]: notes that need first-party clips, PDFs, screenshots, or pasted descriptions",
+        "- [[dashboards/decisions-ledger|Decisions Ledger]]: explicit verdicts, go-test-skip calls, and their rationale",
+        "- [[dashboards/deadlines|Deadlines]]: all known deadlines across jobs, events, reminders, and opportunities",
+        "- [[dashboards/reading-queue|Reading Queue]]: technical and general reading worth revisiting",
+        "- [[dashboards/thoughts-radar|Thoughts Radar]]: recent and high-signal personal thoughts, ideas, and observations",
+        "- [[dashboards/recent-items|Recent Items]]: recently ingested items across all categories",
+        "- [[dashboards/followups|Followups]]: open reminders and unresolved opportunities",
+        "",
+        "## Canonical Note Space",
+        "",
+        f"- `jobs`: {counts.get('job', 0)}",
+        f"- `articles`: {counts.get('article', 0)}",
+        f"- `thoughts`: {counts.get('thought', 0)}",
+        f"- `tweets`: {counts.get('tweet', 0)}",
+        f"- `resources`: {counts.get('resource', 0)}",
+        f"- `opportunities`: {counts.get('opportunity', 0)}",
+        f"- `reminders`: {counts.get('reminder', 0)}",
+        f"- `events`: {counts.get('event', 0)}",
+        f"- `decisions`: {counts.get('decision', 0)}",
+        f"- `systems`: {counts.get('system', 0)}",
+        "",
+        "## Inputs",
+        "",
+        "- [[imports/chat-exports/README|Chat Exports]]: immutable source files to be ingested",
+        "- [[imports/whatsapp-inbox/README|WhatsApp Inbox]]: self-group exports for low-friction day-to-day capture",
+        "- [[imports/telegram-inbox/README|Telegram Inbox]]: always-on live bot inbox for future capture",
+        "- [[raw/README|Raw Corpus]]: canonical source corpus for clips, exports, images, and documents",
+        "",
+        "## Templates",
+        "",
+        "- [[templates/item-template|Item Template]]",
+        "- [[templates/job-template|Job Template]]",
+        "- [[templates/thought-template|Thought Template]]",
+        "- [[templates/decision-template|Decision Template]]",
+        "- [[templates/system-template|System Template]]",
+        "- [[templates/project-template|Project Template]]",
+        "- [[templates/topic-template|Topic Template]]",
+        "",
+        "## System",
+        "",
+        "- [[AGENTS]]: operating rules for ingest, query, and maintenance",
+        "- [[WIKI]]: reference schema and architectural contract for the vault",
+        "- `raw/.manifest.json`: local ingest manifest for processed source files",
+        "",
+        "## Topic Space",
+        "",
+        "- [[topics/README|Topics]]: synthesis pages are created here as the vault grows",
+        "",
+        "## Project Space",
+        "",
+        "- [[projects/README|Projects]]: active projects gather related topics, decisions, and outputs",
+        "",
+        "## Output Space",
+        "",
+        "- [[outputs/README|Outputs]]: reusable briefs, notes, and deliverables generated from the wiki",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
@@ -1299,6 +1560,42 @@ def upsert_log(log_path: Path, source_rel: str, item_count: int, url_count: int,
         return
     if entry not in original:
         log_path.write_text(original.rstrip() + "\n" + entry)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def upsert_source_manifest(
+    manifest_path: Path,
+    source_rel: str,
+    source_path: Path,
+    item_count: int,
+    url_count: int,
+    text_count: int,
+    output_rel: str,
+) -> None:
+    try:
+        manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    except Exception:
+        manifest = {}
+    stat = source_path.stat()
+    manifest[source_rel] = {
+        "sha256": file_sha256(source_path),
+        "size": stat.st_size,
+        "mtime": int(stat.st_mtime),
+        "ingested_on": CURRENT_DATE.isoformat(),
+        "items_written": item_count,
+        "url_items": url_count,
+        "text_items": text_count,
+        "summary_output": output_rel,
+    }
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
 
 def ingest(vault_root: Path, source_path: Path) -> None:
@@ -1459,6 +1756,10 @@ def ingest(vault_root: Path, source_path: Path) -> None:
         output_path,
         render_output_summary(source_rel, written_items, topic_counts, recent_jobs, recent_thoughts),
     )
+    write(vault_root / "dashboards" / "dashboard.base", render_dashboard_base())
+    write(vault_root / "dashboards" / "dashboard.md", render_dashboard_hub())
+    write(vault_root / "hot.md", render_hot_cache(written_items, project_pages))
+    write(vault_root / "index.md", render_root_index(written_items, project_pages))
 
     upsert_log(
         vault_root / "log.md",
@@ -1466,6 +1767,15 @@ def ingest(vault_root: Path, source_path: Path) -> None:
         len(written_items),
         len(url_items),
         len(text_items),
+    )
+    upsert_source_manifest(
+        vault_root / "raw" / ".manifest.json",
+        source_rel,
+        raw_copy,
+        len(written_items),
+        len(url_items),
+        len(text_items),
+        output_path.relative_to(vault_root).as_posix(),
     )
 
     print(

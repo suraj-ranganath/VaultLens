@@ -9,16 +9,21 @@ import yaml
 
 from ingest_chat_export import (
     Item,
+    render_dashboard_base,
+    render_dashboard_hub,
     render_deadlines,
     render_decisions_ledger,
     render_followups,
+    render_hot_cache,
     render_jobs_ledger,
     render_jobs_urgent,
     render_reading_queue,
     render_recent_items,
     render_relevant_now,
+    render_root_index,
     render_thoughts_radar,
 )
+from vault_health import build_health_report
 
 
 def load_note(path: Path) -> tuple[dict, str]:
@@ -97,7 +102,13 @@ def rebuild(vault_root: Path) -> dict:
     write(vault_root / "dashboards" / "recent-items.md", render_recent_items(items))
     write(vault_root / "dashboards" / "followups.md", render_followups(items))
     write(vault_root / "dashboards" / "decisions-ledger.md", render_decisions_ledger(project_pages))
-    return {"items": len(items), "projects": len(project_pages)}
+    write(vault_root / "dashboards" / "dashboard.base", render_dashboard_base())
+    write(vault_root / "dashboards" / "dashboard.md", render_dashboard_hub())
+    write(vault_root / "hot.md", render_hot_cache(items, project_pages))
+    write(vault_root / "index.md", render_root_index(items, project_pages))
+    health_report, health_summary = build_health_report(vault_root)
+    write(vault_root / "dashboards" / "vault-health.md", health_report)
+    return {"items": len(items), "projects": len(project_pages), **health_summary}
 
 
 def main() -> None:

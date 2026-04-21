@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f hot.md ] && cat hot.md || true"
+          },
+          {
+            "type": "prompt",
+            "prompt": "If hot.md exists in the current project, silently read it now to restore recent vault context. Do not announce this."
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "If hot.md exists in the current project, silently re-read it now to restore the hot cache after compaction. Do not announce this."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "([ -d items ] || [ -d dashboards ]) && echo 'HOT_CACHE: refresh hot.md if the canonical note corpus changed this session.' || true"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,49 @@
+:root {
+  --vault-jobs: #c586c0;
+  --vault-reading: #6a9955;
+  --vault-thoughts: #dcdcaa;
+  --vault-decisions: #ce9178;
+  --vault-synthesis: #569cd6;
+  --vault-dashboards: #4fc1ff;
+  --vault-dim: #606060;
+}
+
+.nav-folder-title[data-path^="items/jobs"] { color: var(--vault-jobs); }
+.nav-folder-title[data-path^="items/articles"] { color: var(--vault-reading); }
+.nav-folder-title[data-path^="items/resources"] { color: var(--vault-reading); }
+.nav-folder-title[data-path^="items/tweets"] { color: var(--vault-reading); }
+.nav-folder-title[data-path^="items/thoughts"] { color: var(--vault-thoughts); }
+.nav-folder-title[data-path^="items/reminders"] { color: var(--vault-thoughts); }
+.nav-folder-title[data-path^="items/events"] { color: var(--vault-thoughts); }
+.nav-folder-title[data-path^="items/decisions"] { color: var(--vault-decisions); }
+.nav-folder-title[data-path^="items/systems"] { color: var(--vault-decisions); }
+.nav-folder-title[data-path^="topics"] { color: var(--vault-synthesis); }
+.nav-folder-title[data-path^="projects"] { color: var(--vault-synthesis); }
+.nav-folder-title[data-path^="dashboards"] { color: var(--vault-dashboards); }
+.nav-folder-title[data-path="raw"],
+.nav-folder-title[data-path="imports"],
+.nav-folder-title[data-path="tools"],
+.nav-folder-title[data-path="templates"],
+.nav-folder-title[data-path="config"],
+.nav-folder-title[data-path="hooks"],
+.nav-folder-title[data-path="bin"] {
+  color: var(--vault-dim);
+  opacity: 0.6;
+}
+
+.callout[data-callout='contradiction'] {
+  --callout-color: 209, 105, 105;
+  --callout-icon: lucide-alert-triangle;
+}
+.callout[data-callout='gap'] {
+  --callout-color: 220, 220, 170;
+  --callout-icon: lucide-help-circle;
+}
+.callout[data-callout='key-insight'] {
+  --callout-color: 79, 193, 255;
+  --callout-icon: lucide-lightbulb;
+}
+.callout[data-callout='stale'] {
+  --callout-color: 128, 128, 128;
+  --callout-icon: lucide-clock;
+}
