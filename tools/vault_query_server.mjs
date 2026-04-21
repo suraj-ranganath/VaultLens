@@ -37,8 +37,9 @@ const QUERY_SCHEMA = {
           title: { type: "string" },
           note_type: { type: "string" },
           relevance: { type: "string" },
+          source_url: { type: ["string", "null"] },
         },
-        required: ["path", "title", "note_type", "relevance"],
+        required: ["path", "title", "note_type", "relevance", "source_url"],
         additionalProperties: false,
       },
     },
@@ -136,7 +137,7 @@ async function handleQuery(req, res) {
 
   const thread = threadId ? codex.resumeThread(threadId, threadOptions) : codex.startThread(threadOptions);
   const turn = await thread.run(buildPrompt(question, includeWebSearch), { outputSchema: QUERY_SCHEMA });
-  const answer = parseJson(turn.finalResponse);
+  const answer = await hydrateAnswer(parseJson(turn.finalResponse));
 
   return json(res, 200, {
     ok: true,
@@ -224,7 +225,7 @@ async function handleQueryStream(req, res) {
       throw new Error("Codex did not return a final structured response.");
     }
 
-    const answer = parseJson(finalResponse);
+    const answer = await hydrateAnswer(parseJson(finalResponse));
     writeNdjson(res, {
       type: "result",
       threadId: thread.id,
@@ -301,6 +302,10 @@ Answering rules:
 - web search is ${includeWebSearch ? "allowed only when the vault is insufficient and external context materially helps" : "disabled for this turn"}
 - cite the vault files you actually relied on
 - cite paths relative to the vault root
+- in \`answer_markdown\`, place inline markdown citations directly next to the claims they support
+- every inline vault citation must use markdown links like \`[note](/vault/relative/path.md)\`
+- when a cited note has an external primary source, include it inline too as \`[primary](https://...)\` when relevant
+- never use Obsidian wiki-link syntax like \`[[...]]\` inside \`answer_markdown\`; use standard markdown links only
 - if the vault does not support part of the answer, say that explicitly in \`gaps\`
 - keep the answer high-signal and useful, not verbose for its own sake
 
@@ -435,9 +440,13 @@ async function writeSavedAnswer({ question, answer, trace, meta, threadId }) {
   if (citations.length) {
     lines.push("## Citations", "");
     for (const citation of citations) {
-      lines.push(
+      const parts = [
         `- [[${citation.path}|${citation.title || citation.path}]] (${citation.note_type || "note"}): ${citation.relevance || ""}`.trim(),
-      );
+      ];
+      if (citation.source_url) {
+        parts.push(`([primary source](${citation.source_url}))`);
+      }
+      lines.push(parts.join(" "));
     }
     lines.push("");
   }
@@ -672,6 +681,91 @@ function buildThreadOptions({ model, reasoningEffort, includeWebSearch }) {
     webSearchEnabled: includeWebSearch,
     modelReasoningEffort: reasoningEffort,
   };
+}
+
+async function hydrateAnswer(answer) {
+  const citations = [];
+  for (const citation of Array.isArray(answer.citations) ? answer.citations : []) {
+    const sourceUrl = citation.source_url || (await readPrimaryUrlForCitation(citation.path));
+    citations.push({
+      ...citation,
+      vault_url: buildVaultUrl(citation.path),
+      source_url: sourceUrl || null,
+    });
+  }
+
+  return {
+    ...answer,
+    citations,
+    answer_markdown: rewriteAnswerMarkdownLinks(String(answer.answer_markdown || ""), citations),
+  };
+}
+
+async function readPrimaryUrlForCitation(relativePath) {
+  const safePath = safeJoin(vaultRoot, relativePath);
+  if (!safePath || !(await fileExists(safePath))) {
+    return null;
+  }
+  const text = await fsp.readFile(safePath, "utf8");
+  if (!text.startsWith("---\n")) {
+    return null;
+  }
+  const end = text.indexOf("\n---\n", 4);
+  if (end === -1) {
+    return null;
+  }
+  const frontmatter = text.slice(4, end);
+  const match = frontmatter.match(/^url:\s*["']?(.+?)["']?\s*$/m);
+  return match ? match[1].trim() : null;
+}
+
+function rewriteAnswerMarkdownLinks(markdown, citations) {
+  let normalized = markdown;
+  normalized = normalized.replace(/\[\[([^\]]+)\]\(([^)]+)\)\]/g, "[$1]($2)");
+  normalized = normalized.replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, (_full, target, label) => `[${label}](${buildVaultUrl(target)})`);
+
+  const byPath = new Map(
+    citations
+      .filter((citation) => citation.path && citation.vault_url)
+      .map((citation) => [citation.path, citation.vault_url]),
+  );
+
+  normalized = normalized.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (full, label, href) => {
+    const trimmedHref = String(href || "").trim();
+    if (!trimmedHref) {
+      return full;
+    }
+    if (trimmedHref.startsWith("/vault/") || trimmedHref.startsWith("http://") || trimmedHref.startsWith("https://")) {
+      return full;
+    }
+    if (byPath.has(trimmedHref)) {
+      return `[${label}](${byPath.get(trimmedHref)})`;
+    }
+    if (trimmedHref.endsWith(".md")) {
+      return `[${label}](${buildVaultUrl(trimmedHref)})`;
+    }
+    return full;
+  });
+
+  const byVaultUrl = new Map(
+    citations
+      .filter((citation) => citation.vault_url && citation.source_url)
+      .map((citation) => [citation.vault_url, citation.source_url]),
+  );
+
+  normalized = normalized.replace(/\[([^\]]+)\]\((\/vault\/[^)]+)\)(?!\s*\[primary\]\()/g, (full, label, href) => {
+    const sourceUrl = byVaultUrl.get(href);
+    if (!sourceUrl) {
+      return full;
+    }
+    return `${full} [primary](${sourceUrl})`;
+  });
+
+  return normalized;
+}
+
+function buildVaultUrl(relativePath) {
+  return `/vault/${encodeURI(String(relativePath || "").replace(/^\/+/, ""))}`;
 }
 
 function parseJson(text) {

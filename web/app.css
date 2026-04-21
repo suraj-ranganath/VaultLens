@@ -435,6 +435,21 @@ select:focus {
   text-decoration: underline;
 }
 
+.citation-links {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 10px 0 0;
+}
+
+.citation-links a {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+}
+
 .citation-kind,
 .trace-kind,
 .confidence-badge {

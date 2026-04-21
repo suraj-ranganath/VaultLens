@@ -361,9 +361,13 @@ function renderCitations(citations) {
           (citation) => `
             <article class="citation-card">
               <div class="citation-kind">${escapeHtml(citation.note_type || "note")}</div>
-              <h3><a href="/vault/${encodeURI(citation.path)}" target="_blank" rel="noreferrer">${escapeHtml(citation.title || citation.path)}</a></h3>
+              <h3><a href="${escapeHtml(citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">${escapeHtml(citation.title || citation.path)}</a></h3>
               <div class="muted">${escapeHtml(citation.path)}</div>
               <p>${escapeHtml(citation.relevance || "")}</p>
+              <p class="citation-links">
+                <a href="${escapeHtml(citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">Vault note</a>
+                ${citation.source_url ? `<a href="${escapeHtml(citation.source_url)}" target="_blank" rel="noreferrer">Primary source</a>` : ""}
+              </p>
             </article>
           `,
         )
