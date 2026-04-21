@@ -15,34 +15,23 @@
   <body>
     <div class="page-shell">
       <aside class="sidebar">
-        <div class="brand-block">
-          <p class="eyebrow">Vault Interface</p>
-          <h1>Vault Lens</h1>
-          <p class="lede">
-            Ask the vault a question. The answer comes from agentic local search over your notes, dashboards, topics,
-            projects, and outputs.
-          </p>
+        <div class="sidebar-top">
+          <div class="brand-block sidebar-brand">
+            <p class="eyebrow">Vault Interface</p>
+            <h1>Vault Lens</h1>
+          </div>
+          <button id="new-thread-button" class="secondary-button new-chat-button" type="button">New Chat</button>
         </div>
 
-        <section class="sidebar-card">
-          <p class="card-label">Prompts</p>
-          <div class="preset-list">
-            <button class="preset" data-question="What are the most time-sensitive opportunities or jobs I should look at first?">
-              Time-sensitive queue
-            </button>
-            <button class="preset" data-question="What articles, tweets, and resources do I have about AI agents and how do they connect?">
-              AI agents context
-            </button>
-            <button class="preset" data-question="What decisions or systems in the vault explain how I think about applying to roles?">
-              Decision memory
-            </button>
-            <button class="preset" data-question="What inspiration or references do I have for product, design, or landing page work?">
-              Creative inspiration
-            </button>
+        <section class="sidebar-card history-card">
+          <div class="panel-head compact-head">
+            <p class="card-label">Chats</p>
+            <span id="chat-count" class="muted">0</span>
           </div>
+          <div id="chat-list" class="chat-history"></div>
         </section>
 
-        <section class="sidebar-card">
+        <section class="sidebar-card sidebar-footer-card">
           <p class="card-label">Session</p>
           <dl class="meta-grid">
             <div>
@@ -58,15 +47,24 @@
               <dd id="model-name">-</dd>
             </div>
           </dl>
-          <button id="new-thread-button" class="secondary-button" type="button">Start Fresh Thread</button>
         </section>
 
-        <section class="sidebar-card">
-          <div class="panel-head compact-head">
-            <p class="card-label">Saved Chats</p>
-            <span id="chat-count" class="muted">0</span>
+        <section class="sidebar-card sidebar-footer-card">
+          <p class="card-label">Quick Prompts</p>
+          <div class="preset-list">
+            <button class="preset" data-question="What are the most time-sensitive opportunities or jobs I should look at first?">
+              Time-sensitive queue
+            </button>
+            <button class="preset" data-question="What articles, tweets, and resources do I have about AI agents and how do they connect?">
+              AI agents context
+            </button>
+            <button class="preset" data-question="What decisions or systems in the vault explain how I think about applying to roles?">
+              Decision memory
+            </button>
+            <button class="preset" data-question="What inspiration or references do I have for product, design, or landing page work?">
+              Creative inspiration
+            </button>
           </div>
-          <div id="chat-list" class="stack"></div>
         </section>
       </aside>
 

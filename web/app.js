@@ -54,11 +54,7 @@ function bindEvents() {
   els.form.addEventListener("submit", onSubmit);
   els.saveAnswerButton.addEventListener("click", onSaveAnswer);
   els.newThreadButton.addEventListener("click", () => {
-    state.threadId = "";
-    localStorage.removeItem("vaultThreadId");
-    hydrateThread();
-    setRunState("idle", "Idle");
-    resetSaveState();
+    resetComposerState();
   });
 
   els.presets.forEach((button) => {
@@ -568,16 +564,40 @@ function formatUsage(usage) {
 }
 
 function renderChatList() {
-  els.chatCount.textContent = String(state.chats.length);
-  els.chatList.innerHTML = state.chats.length
-    ? state.chats
+  const chats = [...state.chats].sort((left, right) => {
+    const leftTime = getTimestamp(left.updatedAt || left.createdAt);
+    const rightTime = getTimestamp(right.updatedAt || right.createdAt);
+    return rightTime - leftTime;
+  });
+
+  els.chatCount.textContent = String(chats.length);
+  els.chatList.innerHTML = chats.length
+    ? groupChatsByRecency(chats)
         .map(
-          (chat) => `
-            <button class="chat-button ${chat.id === state.currentChat?.id ? "active" : ""}" type="button" data-chat-id="${escapeHtml(chat.id)}">
-              <div class="card-label">${escapeHtml(formatDate(chat.updatedAt))}</div>
-              <div class="turn-question">${escapeHtml(chat.title || "Untitled chat")}</div>
-              <div class="turn-summary">${escapeHtml(chat.lastQuestion || "")}</div>
-            </button>
+          ({ label, chats: group }) => `
+            <section class="chat-history-group">
+              <div class="chat-history-label">${escapeHtml(label)}</div>
+              ${group
+                .map((chat) => {
+                  const title = chat.title || chat.lastQuestion || "Untitled chat";
+                  const preview = chat.lastQuestion && chat.lastQuestion !== title ? chat.lastQuestion : "Open this trace";
+                  return `
+                    <button
+                      class="chat-button ${chat.id === state.currentChat?.id ? "active" : ""}"
+                      type="button"
+                      data-chat-id="${escapeHtml(chat.id)}"
+                      title="${escapeHtml(title)}"
+                    >
+                      <div class="chat-meta-row">
+                        <span class="chat-date-pill">${escapeHtml(formatChatTimestamp(chat.updatedAt || chat.createdAt))}</span>
+                      </div>
+                      <div class="turn-question">${escapeHtml(title)}</div>
+                      <div class="turn-summary">${escapeHtml(preview)}</div>
+                    </button>
+                  `;
+                })
+                .join("")}
+            </section>
           `,
         )
         .join("")
@@ -599,6 +619,11 @@ async function loadChat(chatId) {
   }
   state.currentChat = data.chat;
   state.selectedTurnId = data.chat.turns?.at(-1)?.id || "";
+  state.threadId = data.chat.threadId || state.threadId;
+  if (state.threadId) {
+    localStorage.setItem("vaultThreadId", state.threadId);
+  }
+  hydrateThread();
   renderChatList();
   renderTurnList();
   hydrateSelectedTurn();
@@ -688,6 +713,84 @@ function formatDate(value) {
     return String(value);
   }
   return date.toLocaleString();
+}
+
+function formatChatTimestamp(value) {
+  if (!value) {
+    return "Unknown";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function getTimestamp(value) {
+  if (!value) {
+    return 0;
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 0;
+  }
+  return date.getTime();
+}
+
+function groupChatsByRecency(chats) {
+  const buckets = [
+    { key: "today", label: "Today", chats: [] },
+    { key: "yesterday", label: "Yesterday", chats: [] },
+    { key: "week", label: "Previous 7 Days", chats: [] },
+    { key: "older", label: "Older", chats: [] },
+  ];
+
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const yesterdayStart = todayStart - 24 * 60 * 60 * 1000;
+  const weekStart = todayStart - 7 * 24 * 60 * 60 * 1000;
+
+  chats.forEach((chat) => {
+    const timestamp = getTimestamp(chat.updatedAt || chat.createdAt);
+    if (timestamp >= todayStart) {
+      buckets[0].chats.push(chat);
+      return;
+    }
+    if (timestamp >= yesterdayStart) {
+      buckets[1].chats.push(chat);
+      return;
+    }
+    if (timestamp >= weekStart) {
+      buckets[2].chats.push(chat);
+      return;
+    }
+    buckets[3].chats.push(chat);
+  });
+
+  return buckets.filter((bucket) => bucket.chats.length);
+}
+
+function resetComposerState() {
+  state.threadId = "";
+  state.latestQuestion = "";
+  state.latestResult = null;
+  state.feed = [];
+  state.currentChat = null;
+  state.selectedTurnId = "";
+
+  localStorage.removeItem("vaultThreadId");
+  hydrateThread();
+  setRunState("idle", "Idle");
+  resetSaveState();
+  clearAnswerShell();
+  renderCitations([]);
+  renderTrace([]);
+  els.turnCount.textContent = "0";
+  els.turnList.innerHTML = `<div class="empty-state">Select a saved chat or start a new one.</div>`;
+  renderChatList();
 }
 
 function renderMarkdown(source) {
