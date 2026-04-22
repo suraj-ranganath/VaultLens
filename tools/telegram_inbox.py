@@ -203,6 +203,21 @@ def telegram_send_message(token: str, chat_id: int, text: str, reply_to_message_
     return telegram_api(token, "sendMessage", **params)
 
 
+def telegram_send_long_message(token: str, chat_id: int, text: str, reply_to_message_id: int | None = None) -> list[dict[str, Any]]:
+    chunks = split_message_chunks(text)
+    responses: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks):
+        responses.append(
+            telegram_send_message(
+                token,
+                chat_id=chat_id,
+                text=chunk,
+                reply_to_message_id=reply_to_message_id if index == 0 else None,
+            )
+        )
+    return responses
+
+
 def get_updates(token: str, offset: int | None, poll_timeout: int) -> list[dict[str, Any]]:
     params: dict[str, Any] = {
         "timeout": poll_timeout,
@@ -224,6 +239,7 @@ def load_state(inbox_dir: Path) -> dict[str, Any]:
             "last_ingest_at": "",
             "stream_file": "",
             "agent_threads": {},
+            "query_threads": {},
         },
     )
 
@@ -325,6 +341,102 @@ def normalize_agent_decision(decision: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def invoke_vault_query_agent(
+    vault_root: Path,
+    openai_api_key: str,
+    question: str,
+    model: str,
+    reasoning_effort: str,
+    prior_thread_id: str | None,
+) -> dict[str, Any]:
+    script_path = vault_root / "tools" / "telegram_vault_query.mjs"
+    payload = {
+        "model": model,
+        "reasoningEffort": reasoning_effort,
+        "workingDirectory": str(vault_root),
+        "question": question,
+        "threadId": prior_thread_id,
+        "includeWebSearch": True,
+    }
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = openai_api_key
+    result = subprocess.run(
+        ["node", str(script_path)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        cwd=vault_root,
+        env=env,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Vault query agent process failed")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Vault query agent returned invalid JSON: {exc}") from exc
+
+
+def format_telegram_query_response(query_result: dict[str, Any]) -> str:
+    answer = query_result.get("answer") or {}
+    body = str(answer.get("concise_answer") or answer.get("answer_markdown") or "").strip()
+    body = strip_markdown_for_telegram(body)
+
+    citations = []
+    for citation in answer.get("citations") or []:
+        source_url = str(citation.get("source_url") or "").strip()
+        if not source_url:
+            continue
+        citations.append((str(citation.get("title") or citation.get("path") or "Source").strip(), source_url))
+
+    lines = [body] if body else ["No answer available."]
+    if citations:
+        lines.append("")
+        lines.append("Sources:")
+        for index, (title, url) in enumerate(citations[:8], start=1):
+            lines.append(f"{index}. {title}")
+            lines.append(url)
+
+    gaps = [str(gap).strip() for gap in answer.get("gaps") or [] if str(gap).strip()]
+    if gaps:
+        lines.append("")
+        lines.append("Known gaps:")
+        for gap in gaps[:3]:
+            lines.append(f"- {gap}")
+
+    return "\n".join(lines).strip()
+
+
+def strip_markdown_for_telegram(text: str) -> str:
+    cleaned = str(text or "")
+    cleaned = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r" \1 ", cleaned)
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = cleaned.replace("**", "").replace("*", "")
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def split_message_chunks(text: str, limit: int = 3500) -> list[str]:
+    source = str(text or "").strip()
+    if not source:
+        return [""]
+    chunks: list[str] = []
+    remaining = source
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at < limit // 2:
+            split_at = remaining.rfind(" ", 0, limit)
+        if split_at < limit // 2:
+            split_at = limit
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return [chunk for chunk in chunks if chunk]
+
+
 def invoke_codex_agent(
     vault_root: Path,
     session_name: str,
@@ -376,6 +488,10 @@ def execute_agent_actions(
     normalized_message: dict[str, Any],
     decision: dict[str, Any],
     actions: list[dict[str, str]],
+    state: dict[str, Any],
+    openai_api_key: str,
+    agent_model: str,
+    agent_reasoning_effort: str,
 ) -> list[dict[str, Any]]:
     inbox_dir, _ = ensure_directories(vault_root)
     stream_file = stream_path(inbox_dir, session_name)
@@ -453,6 +569,33 @@ def execute_agent_actions(
             results.append({"tool": tool, "status": "ok", "reason": reason})
             continue
 
+        if tool == "answer_vault_query":
+            prior_thread_id = (state.get("query_threads") or {}).get(str(normalized_message["chat_id"]))
+            query_result = invoke_vault_query_agent(
+                vault_root=vault_root,
+                openai_api_key=openai_api_key,
+                question=normalized_message["raw_text"],
+                model=agent_model,
+                reasoning_effort=agent_reasoning_effort,
+                prior_thread_id=prior_thread_id,
+            )
+            thread_id = str(query_result.get("threadId") or "").strip()
+            if thread_id:
+                state.setdefault("query_threads", {})
+                state["query_threads"][str(normalized_message["chat_id"])] = thread_id
+            results.append(
+                {
+                    "tool": tool,
+                    "status": "ok",
+                    "reason": reason,
+                    "thread_id": thread_id,
+                    "reply_text": format_telegram_query_response(query_result),
+                    "usage": query_result.get("usage"),
+                    "cost": query_result.get("cost"),
+                }
+            )
+            continue
+
         raise RuntimeError(f"Unsupported agent tool: {tool}")
 
     return results
@@ -493,6 +636,7 @@ def sync_once(
     acked = 0
     agent_runs = 0
     ingested = 0
+    answered = 0
     action_records: list[dict[str, Any]] = []
     for update in updates:
         update_id = int(update["update_id"])
@@ -539,14 +683,24 @@ def sync_once(
             store_in_vault=bool(decision.get("storeInVault")),
             include_ingest=ingest_after_sync,
         )
+        if decision.get("classification") == "vault_query" and not any(action["tool"] == "answer_vault_query" for action in actions):
+            actions = ensure_action_order(
+                actions + [{"tool": "answer_vault_query", "reason": "Answer the user's vault question directly in Telegram."}],
+                store_in_vault=bool(decision.get("storeInVault")),
+                include_ingest=ingest_after_sync,
+            )
         tool_results: list[dict[str, Any]] = []
-        if decision.get("storeInVault"):
+        if decision.get("storeInVault") or any(action.get("tool") == "answer_vault_query" for action in actions):
             tool_results = execute_agent_actions(
                 vault_root=vault_root,
                 session_name=session_name,
                 normalized_message=normalized,
                 decision=decision,
                 actions=actions,
+                state=state,
+                openai_api_key=openai_api_key,
+                agent_model=agent_model,
+                agent_reasoning_effort=agent_reasoning_effort,
             )
             if any(result.get("tool") == "run_vault_ingest" for result in tool_results):
                 ingested += 1
@@ -574,6 +728,16 @@ def sync_once(
             ],
         )
 
+        query_result = next((result for result in tool_results if result.get("tool") == "answer_vault_query" and result.get("status") == "ok"), None)
+        if query_result and str(query_result.get("reply_text") or "").strip():
+            telegram_send_long_message(
+                token,
+                chat_id=chat_id,
+                text=str(query_result["reply_text"]),
+                reply_to_message_id=normalized["message_id"],
+            )
+            answered += 1
+
         ack_allowed = bool(decision.get("storeInVault")) and bool(decision.get("sendAck", True)) and ingest_after_sync
         if ack_allowed:
             acknowledgement = str(decision.get("acknowledgement") or "👍")
@@ -599,6 +763,7 @@ def sync_once(
                 "classification": decision.get("classification"),
                 "stored": bool(decision.get("storeInVault")),
                 "acked": ack_allowed,
+                "answered": bool(query_result),
                 "actions": [action["tool"] for action in actions],
             }
         )
@@ -610,6 +775,7 @@ def sync_once(
         "accepted_messages": accepted,
         "agent_runs": agent_runs,
         "ingested_messages": ingested,
+        "answered_messages": answered,
         "acked_messages": acked,
         "stream_file": str(stream_path(inbox_dir, session_name)),
         "raw_updates_file": str(raw_file),

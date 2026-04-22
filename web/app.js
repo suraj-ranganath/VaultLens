@@ -764,19 +764,19 @@ function renderSourcesDetail(citations, turn) {
                     <span class="source-kind">${escapeHtml(citation.note_type || "note")}</span>
                   </div>
                   <div class="source-title">
-                    <a href="${escapeHtml(citation.contextual_vault_url || citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">
+                    <a href="${escapeHtml(citation.source_url || citation.contextual_vault_url || citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">
                       ${escapeHtml(citation.title || citation.path)}
                     </a>
                   </div>
                   <p class="source-relevance">${escapeHtml(citation.relevance || "")}</p>
                   <div class="source-links">
+                    ${isUsableHref(citation.source_url) ? `<a href="${escapeHtml(citation.source_url)}" target="_blank" rel="noreferrer">Primary source</a>` : ""}
                     <a href="${escapeHtml(citation.contextual_vault_url || citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">Vault note</a>
                     ${
                       state.currentChat?.id && turn?.id
                         ? `<a href="${escapeHtml(buildChatUrl(state.currentChat.id, turn.id))}">Chat turn</a>`
                         : ""
                     }
-                    ${isUsableHref(citation.source_url) ? `<a href="${escapeHtml(citation.source_url)}" target="_blank" rel="noreferrer">Primary article</a>` : ""}
                   </div>
                 </article>
               `,
@@ -897,6 +897,7 @@ function buildCitationLookup(citations) {
   citations.forEach((citation) => {
     const keys = [
       citation.path,
+      citation.source_url,
       citation.vault_url,
       `/vault/${encodeURI(citation.path || "")}`,
     ]
@@ -907,7 +908,7 @@ function buildCitationLookup(citations) {
       if (!lookup.has(key)) {
         lookup.set(key, {
           number: citation.number,
-          href: citation.contextual_vault_url || citation.vault_url || citation.source_url || "#",
+          href: citation.source_url || citation.contextual_vault_url || citation.vault_url || "#",
           label: citation.title || citation.path || `Source ${citation.number}`,
         });
       }
@@ -917,10 +918,17 @@ function buildCitationLookup(citations) {
 }
 
 function normalizeCitationKey(value) {
-  return String(value || "")
-    .trim()
-    .replace(/^https?:\/\/[^/]+/i, "")
-    .replace(/\/+$/, "");
+  const trimmed = String(value || "").trim();
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const url = new URL(trimmed);
+      url.hash = "";
+      return url.toString().replace(/\/+$/, "");
+    } catch {
+      return trimmed.replace(/\/+$/, "");
+    }
+  }
+  return trimmed.replace(/^https?:\/\/[^/]+/i, "").replace(/\/+$/, "");
 }
 
 function normalizeSavedFeed(feed) {

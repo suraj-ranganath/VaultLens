@@ -49,6 +49,7 @@ The user may send:
 - links to technical articles
 - X/Twitter links
 - job opportunities
+- direct questions that should be answered from the vault
 - reminders or personal notes
 - mixed messages that include a link plus extra instructions
 - messages that tell the system how to remember or prioritize something
@@ -61,10 +62,13 @@ Available local actions you may request:
 3. rebuild_artifact_capture_queue
 4. refresh_live_metadata_jobs_recent
 5. refresh_live_metadata_knowledge_all
+6. answer_vault_query
 
 Rules:
 - If the message should become part of the vault, set storeInVault=true.
 - If storeInVault=true, include append_message_to_stream and run_vault_ingest in actions.
+- If the message is primarily asking a question that should be answered from the vault, request answer_vault_query.
+- For pure questions, usually set storeInVault=false unless the message also asks to remember something.
 - Only request live metadata refresh when it is clearly worth the extra work.
 - Only request rebuild_artifact_capture_queue when the message likely introduces a weak or blocked link that will need supporting artifacts later.
 - Preserve user-added context or instructions in your reasoning and summaries.
@@ -98,6 +102,7 @@ const schema = {
         "reminder",
         "resource",
         "event",
+        "vault_query",
         "mixed",
         "ignore",
       ],
@@ -127,6 +132,7 @@ const schema = {
               "rebuild_artifact_capture_queue",
               "refresh_live_metadata_jobs_recent",
               "refresh_live_metadata_knowledge_all",
+              "answer_vault_query",
             ],
           },
           reason: { type: "string" },

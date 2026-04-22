@@ -409,8 +409,8 @@ Answering rules:
 - cite the vault files you actually relied on
 - cite paths relative to the vault root
 - in \`answer_markdown\`, place inline markdown citations directly next to the claims they support
-- every inline vault citation must use markdown links like \`[note](/vault/relative/path.md)\`
-- when a cited note has an external primary source, include it inline too as \`[primary](https://...)\` when relevant
+- user-facing citation links in \`answer_markdown\` should prefer the external primary source URL for each cited note when available
+- only fall back to markdown links like \`[note](/vault/relative/path.md)\` when no external primary source exists for that citation
 - never use Obsidian wiki-link syntax like \`[[...]]\` inside \`answer_markdown\`; use standard markdown links only
 - if the vault does not support part of the answer, say that explicitly in \`gaps\`
 - keep the answer high-signal and useful, not verbose for its own sake
@@ -2008,10 +2008,12 @@ async function hydrateAnswer(answer) {
   const citations = [];
   for (const citation of Array.isArray(answer.citations) ? answer.citations : []) {
     const sourceUrl = citation.source_url || (await readPrimaryUrlForCitation(citation.path));
+    const vaultUrl = buildVaultUrl(citation.path);
     citations.push({
       ...citation,
-      vault_url: buildVaultUrl(citation.path),
+      vault_url: vaultUrl,
       source_url: sourceUrl || null,
+      citation_url: sourceUrl || vaultUrl,
     });
   }
 
@@ -2043,43 +2045,42 @@ async function readPrimaryUrlForCitation(relativePath) {
 function rewriteAnswerMarkdownLinks(markdown, citations) {
   let normalized = markdown;
   normalized = normalized.replace(/\[\[([^\]]+)\]\(([^)]+)\)\]/g, "[$1]($2)");
-  normalized = normalized.replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, (_full, target, label) => `[${label}](${buildVaultUrl(target)})`);
 
   const byPath = new Map(
     citations
-      .filter((citation) => citation.path && citation.vault_url)
-      .map((citation) => [citation.path, citation.vault_url]),
+      .filter((citation) => citation.path && citation.citation_url)
+      .map((citation) => [citation.path, citation.citation_url]),
   );
+
+  const byVaultUrl = new Map(
+    citations
+      .filter((citation) => citation.vault_url && citation.citation_url)
+      .map((citation) => [citation.vault_url, citation.citation_url]),
+  );
+
+  normalized = normalized.replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, (_full, target, label) => {
+    const citationUrl = byPath.get(target) || buildVaultUrl(target);
+    return `[${label}](${citationUrl})`;
+  });
 
   normalized = normalized.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (full, label, href) => {
     const trimmedHref = String(href || "").trim();
     if (!trimmedHref) {
       return full;
     }
-    if (trimmedHref.startsWith("/vault/") || trimmedHref.startsWith("http://") || trimmedHref.startsWith("https://")) {
+    if (trimmedHref.startsWith("http://") || trimmedHref.startsWith("https://")) {
       return full;
     }
     if (byPath.has(trimmedHref)) {
       return `[${label}](${byPath.get(trimmedHref)})`;
     }
+    if (byVaultUrl.has(trimmedHref)) {
+      return `[${label}](${byVaultUrl.get(trimmedHref)})`;
+    }
     if (trimmedHref.endsWith(".md")) {
-      return `[${label}](${buildVaultUrl(trimmedHref)})`;
+      return `[${label}](${byPath.get(trimmedHref) || buildVaultUrl(trimmedHref)})`;
     }
     return full;
-  });
-
-  const byVaultUrl = new Map(
-    citations
-      .filter((citation) => citation.vault_url && citation.source_url)
-      .map((citation) => [citation.vault_url, citation.source_url]),
-  );
-
-  normalized = normalized.replace(/\[([^\]]+)\]\((\/vault\/[^)]+)\)(?!\s*\[primary\]\()/g, (full, label, href) => {
-    const sourceUrl = byVaultUrl.get(href);
-    if (!sourceUrl) {
-      return full;
-    }
-    return `${full} [primary](${sourceUrl})`;
   });
 
   return normalized;
