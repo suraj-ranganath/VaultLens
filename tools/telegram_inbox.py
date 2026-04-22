@@ -310,6 +310,21 @@ def ensure_action_order(
     return ordered
 
 
+def normalize_agent_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(decision or {})
+    store_in_vault = bool(normalized.get("storeInVault"))
+
+    if store_in_vault:
+        normalized["sendAck"] = True
+        acknowledgement = str(normalized.get("acknowledgement") or "").strip()
+        normalized["acknowledgement"] = acknowledgement or "👍"
+    else:
+        normalized["sendAck"] = bool(normalized.get("sendAck", False))
+        normalized["acknowledgement"] = str(normalized.get("acknowledgement") or "").strip()
+
+    return normalized
+
+
 def invoke_codex_agent(
     vault_root: Path,
     session_name: str,
@@ -518,7 +533,7 @@ def sync_once(
             prior_thread_id=prior_thread_id,
         )
         agent_runs += 1
-        decision = agent_result.get("decision") or {}
+        decision = normalize_agent_decision(agent_result.get("decision") or {})
         actions = ensure_action_order(
             [action for action in decision.get("actions", []) if isinstance(action, dict)],
             store_in_vault=bool(decision.get("storeInVault")),
