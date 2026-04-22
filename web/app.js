@@ -8,6 +8,8 @@ const state = {
   currentChat: null,
   pendingTurn: null,
   isStreaming: false,
+  routeChatId: "",
+  routeTurnId: "",
 };
 
 const els = {
@@ -32,6 +34,8 @@ const els = {
   conversationEmpty: document.querySelector("#conversation-empty"),
   presets: [...document.querySelectorAll(".preset")],
 };
+
+Object.assign(state, readRouteFromLocation());
 
 boot();
 
@@ -66,6 +70,21 @@ function bindEvents() {
     els.question.value = followup.dataset.followupQuestion || "";
     els.question.focus();
   });
+
+  window.addEventListener("popstate", () => {
+    const route = readRouteFromLocation();
+    state.routeChatId = route.routeChatId;
+    state.routeTurnId = route.routeTurnId;
+    if (state.routeChatId) {
+      void loadChat(state.routeChatId, {
+        turnId: state.routeTurnId || "",
+        updateRoute: false,
+        preserveSaveState: true,
+      });
+      return;
+    }
+    resetComposerState({ clearRouteState: false });
+  });
 }
 
 async function refreshHealth() {
@@ -89,7 +108,11 @@ async function refreshChats() {
     state.chats = data.chats || [];
     renderChatList();
     if (!state.currentChat && !state.pendingTurn && state.chats.length) {
-      await loadChat(state.chats[0].id);
+      const targetChatId = state.routeChatId || state.chats[0].id;
+      await loadChat(targetChatId, {
+        turnId: state.routeChatId === targetChatId ? state.routeTurnId : "",
+        updateRoute: false,
+      });
       return;
     }
   } catch {
@@ -520,15 +543,21 @@ async function loadChat(chatId, options = {}) {
   state.feed = [];
   state.threadId = data.chat.threadId || state.threadId;
   state.isStreaming = false;
+  state.routeChatId = data.chat.id || "";
+  state.routeTurnId = options.turnId || "";
 
   if (state.threadId) {
     localStorage.setItem("vaultThreadId", state.threadId);
   }
 
+  if (options.updateRoute !== false) {
+    updateChatRoute(state.routeChatId, state.routeTurnId);
+  }
+
   hydrateThread();
   renderChatList();
   renderHeader();
-  renderConversation({ scroll: true });
+  renderConversation({ scroll: !options.turnId, turnId: options.turnId || "" });
   setRunState("idle", "Loaded");
 
   if (!options.preserveSaveState) {
@@ -536,7 +565,7 @@ async function loadChat(chatId, options = {}) {
   }
 }
 
-function resetComposerState() {
+function resetComposerState(options = {}) {
   state.threadId = "";
   state.latestQuestion = "";
   state.latestResult = null;
@@ -544,8 +573,13 @@ function resetComposerState() {
   state.currentChat = null;
   state.pendingTurn = null;
   state.isStreaming = false;
+  state.routeChatId = "";
+  state.routeTurnId = "";
 
   localStorage.removeItem("vaultThreadId");
+  if (options.clearRouteState !== false) {
+    clearRoute();
+  }
   hydrateThread();
   renderHeader();
   setRunState("idle", "Idle");
@@ -555,7 +589,7 @@ function resetComposerState() {
   els.question.focus();
 }
 
-function renderConversation({ scroll = false } = {}) {
+function renderConversation({ scroll = false, turnId = "" } = {}) {
   const turns = [];
   if (state.currentChat?.turns?.length) {
     turns.push(
@@ -585,12 +619,19 @@ function renderConversation({ scroll = false } = {}) {
     requestAnimationFrame(() => {
       els.conversationViewport.scrollTop = els.conversationViewport.scrollHeight;
     });
+    return;
+  }
+
+  if (turnId) {
+    requestAnimationFrame(() => {
+      scrollToTurn(turnId);
+    });
   }
 }
 
 function renderTurnBlock(turn, isLast) {
   return `
-    <section class="turn-block">
+    <section class="turn-block" id="turn-${escapeHtml(turn.id || "")}">
       ${renderUserMessage(turn)}
       ${renderAssistantMessage(turn, isLast)}
     </section>
@@ -615,7 +656,10 @@ function renderUserMessage(turn) {
 
 function renderAssistantMessage(turn, isLast) {
   const answer = turn.answer || {};
-  const citations = normalizeCitations(answer.citations || []);
+  const citations = normalizeCitations(answer.citations || [], {
+    chatId: state.currentChat?.id || "",
+    turnId: turn.id || "",
+  });
   const citationLookup = buildCitationLookup(citations);
   const trace = turn.live ? turn.feed || [] : normalizeSavedFeed(turn.feed || turn.trace || []);
   const body =
@@ -628,7 +672,7 @@ function renderAssistantMessage(turn, isLast) {
   const meta = renderAssistantMeta(turn, answer);
   const gaps = renderGaps(answer.gaps || []);
   const followups = renderFollowups(answer.follow_up_questions || []);
-  const sourcesDetail = citations.length ? renderSourcesDetail(citations) : "";
+  const sourcesDetail = citations.length ? renderSourcesDetail(citations, turn) : "";
   const traceDetail = trace.length || turn.live ? renderTraceDetail(trace, Boolean(turn.live && state.isStreaming)) : "";
 
   return `
@@ -702,7 +746,7 @@ function renderFollowups(followUps) {
   `;
 }
 
-function renderSourcesDetail(citations) {
+function renderSourcesDetail(citations, turn) {
   return `
     <details class="message-detail">
       <summary class="detail-summary">
@@ -720,14 +764,19 @@ function renderSourcesDetail(citations) {
                     <span class="source-kind">${escapeHtml(citation.note_type || "note")}</span>
                   </div>
                   <div class="source-title">
-                    <a href="${escapeHtml(citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">
+                    <a href="${escapeHtml(citation.contextual_vault_url || citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">
                       ${escapeHtml(citation.title || citation.path)}
                     </a>
                   </div>
                   <p class="source-relevance">${escapeHtml(citation.relevance || "")}</p>
                   <div class="source-links">
-                    <a href="${escapeHtml(citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">Vault note</a>
-                    ${citation.source_url ? `<a href="${escapeHtml(citation.source_url)}" target="_blank" rel="noreferrer">Primary article</a>` : ""}
+                    <a href="${escapeHtml(citation.contextual_vault_url || citation.vault_url || `/vault/${encodeURI(citation.path)}`)}" target="_blank" rel="noreferrer">Vault note</a>
+                    ${
+                      state.currentChat?.id && turn?.id
+                        ? `<a href="${escapeHtml(buildChatUrl(state.currentChat.id, turn.id))}">Chat turn</a>`
+                        : ""
+                    }
+                    ${isUsableHref(citation.source_url) ? `<a href="${escapeHtml(citation.source_url)}" target="_blank" rel="noreferrer">Primary article</a>` : ""}
                   </div>
                 </article>
               `,
@@ -829,10 +878,17 @@ function renderThinkingState() {
   `;
 }
 
-function normalizeCitations(citations) {
+function normalizeCitations(citations, context = {}) {
   return citations.map((citation, index) => ({
     ...citation,
     number: index + 1,
+    contextual_vault_url: citation.path
+      ? buildContextualVaultUrl(citation.path, {
+          chatId: context.chatId,
+          turnId: context.turnId,
+          sourceIndex: index + 1,
+        })
+      : citation.vault_url || "",
   }));
 }
 
@@ -840,9 +896,8 @@ function buildCitationLookup(citations) {
   const lookup = new Map();
   citations.forEach((citation) => {
     const keys = [
-      citation.vault_url,
-      citation.source_url,
       citation.path,
+      citation.vault_url,
       `/vault/${encodeURI(citation.path || "")}`,
     ]
       .filter(Boolean)
@@ -850,7 +905,11 @@ function buildCitationLookup(citations) {
 
     keys.forEach((key) => {
       if (!lookup.has(key)) {
-        lookup.set(key, citation.number);
+        lookup.set(key, {
+          number: citation.number,
+          href: citation.contextual_vault_url || citation.vault_url || citation.source_url || "#",
+          label: citation.title || citation.path || `Source ${citation.number}`,
+        });
       }
     });
   });
@@ -1001,11 +1060,17 @@ function renderInline(text, options = {}) {
         if (closeParen !== -1) {
           const label = source.slice(cursor + 1, closeBracket);
           const href = source.slice(closeBracket + 2, closeParen);
-          const citationNumber = citationLookup.get(normalizeCitationKey(href));
-          if (citationNumber) {
-            html += `<a class="inline-citation" href="${escapeHtml(href)}" target="_blank" rel="noreferrer" title="${escapeHtml(label)}">${citationNumber}</a>`;
+          const normalizedHref = String(href || "").trim();
+          if (!normalizedHref || normalizedHref === "\"" || normalizedHref === "'" || normalizedHref === "#") {
+            html += formatInlinePlain(label);
+            cursor = closeParen + 1;
+            continue;
+          }
+          const citation = citationLookup.get(normalizeCitationKey(normalizedHref));
+          if (citation) {
+            html += `<a class="inline-citation" href="${escapeHtml(citation.href)}" target="_blank" rel="noreferrer" title="${escapeHtml(citation.label || label)}">${citation.number}</a>`;
           } else {
-            html += `<a class="text-link" href="${escapeHtml(href)}" target="_blank" rel="noreferrer">${formatInlinePlain(label)}</a>`;
+            html += `<a class="text-link" href="${escapeHtml(normalizedHref)}" target="_blank" rel="noreferrer">${formatInlinePlain(label)}</a>`;
           }
           cursor = closeParen + 1;
           continue;
@@ -1040,6 +1105,14 @@ function findMarkdownLabelClose(text, start) {
     }
   }
   return -1;
+}
+
+function isUsableHref(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized || normalized === "\"" || normalized === "'" || normalized === "#") {
+    return false;
+  }
+  return true;
 }
 
 function extractAgentMessageBody(text) {
@@ -1124,6 +1197,62 @@ function formatChatTimestamp(value) {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function buildContextualVaultUrl(relativePath, context = {}) {
+  const base = `/vault/${encodeURI(String(relativePath || "").replace(/^\/+/, ""))}`;
+  const params = new URLSearchParams();
+  if (context.chatId) {
+    params.set("chat", context.chatId);
+  }
+  if (context.turnId) {
+    params.set("turn", context.turnId);
+  }
+  if (context.sourceIndex) {
+    params.set("source", String(context.sourceIndex));
+  }
+  const query = params.toString();
+  return query ? `${base}?${query}` : base;
+}
+
+function buildChatUrl(chatId, turnId = "") {
+  const params = new URLSearchParams();
+  if (chatId) {
+    params.set("chat", chatId);
+  }
+  if (turnId) {
+    params.set("turn", turnId);
+  }
+  const query = params.toString();
+  return query ? `/?${query}` : "/";
+}
+
+function readRouteFromLocation() {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    routeChatId: params.get("chat") || "",
+    routeTurnId: params.get("turn") || "",
+  };
+}
+
+function updateChatRoute(chatId, turnId = "") {
+  const nextUrl = buildChatUrl(chatId, turnId);
+  window.history.replaceState({}, "", nextUrl);
+}
+
+function clearRoute() {
+  window.history.replaceState({}, "", "/");
+}
+
+function scrollToTurn(turnId) {
+  if (!turnId) {
+    return;
+  }
+  const target = document.getElementById(`turn-${turnId}`);
+  if (!target) {
+    return;
+  }
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function formatMessageTime(value) {

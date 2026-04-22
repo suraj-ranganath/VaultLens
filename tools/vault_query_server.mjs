@@ -123,7 +123,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/vault/")) {
-      return serveVaultFile(decodeURIComponent(url.pathname.replace(/^\/vault\//, "")), res);
+      return serveVaultFile(decodeURIComponent(url.pathname.replace(/^\/vault\//, "")), url, res);
     }
 
     if (req.method === "GET") {
@@ -725,7 +725,7 @@ async function serveStatic(requestPath, res) {
   fs.createReadStream(resolved).pipe(res);
 }
 
-async function serveVaultFile(relativePath, res) {
+async function serveVaultFile(relativePath, requestUrl, res) {
   if (!isAllowedVaultPath(relativePath)) {
     return json(res, 403, { error: "Path is not exposed by the vault web interface." });
   }
@@ -739,7 +739,8 @@ async function serveVaultFile(relativePath, res) {
     return serveVaultRawFile(relativePath, res);
   }
 
-  const note = await readVaultNote(relativePath);
+  const context = parseVaultRequestContext(requestUrl?.searchParams);
+  const note = await buildVaultNotePageModel(relativePath, context);
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
   res.end(renderVaultNotePage(note));
 }
@@ -776,6 +777,7 @@ async function readVaultNote(relativePath) {
   const sourceUrl = String(meta.url || "").trim() || null;
   const noteType = String(meta.type || "").trim() || "note";
   const tags = Array.isArray(meta.tags) ? meta.tags : [];
+  const topics = Array.isArray(meta.topics) ? meta.topics : [];
 
   return {
     path: relativePath,
@@ -785,31 +787,77 @@ async function readVaultNote(relativePath) {
     noteType,
     sourceUrl,
     tags,
+    topics,
     frontmatter: meta,
+  };
+}
+
+async function buildVaultNotePageModel(relativePath, context = {}) {
+  const note = await readVaultNote(relativePath);
+  const [backlinks, chatMentions, citationSet] = await Promise.all([
+    findNoteBacklinks(relativePath),
+    findChatMentions(relativePath),
+    buildCitationSet(relativePath, context),
+  ]);
+
+  const publishedOn = String(note.frontmatter.published_on || "").trim();
+  const discoveredOn = String(note.frontmatter.discovered_on || "").trim();
+  const sourceExport = String(note.frontmatter.source_export || "").trim();
+  const sourceSender = String(note.frontmatter.source_sender || "").trim();
+  const authorName = firstPresent(
+    note.frontmatter.author,
+    note.frontmatter.author_name,
+    note.frontmatter.source_author,
+    note.frontmatter.byline,
+  );
+  const authorCredential = firstPresent(
+    note.frontmatter.author_credential,
+    note.frontmatter.author_credentials,
+    note.frontmatter.credential,
+    note.frontmatter.credentials,
+  );
+
+  return {
+    ...note,
+    context,
+    publishedOn,
+    discoveredOn,
+    deadline: String(note.frontmatter.deadline || "").trim(),
+    status: String(note.frontmatter.status || "").trim(),
+    priority: String(note.frontmatter.priority || "").trim(),
+    timeliness: String(note.frontmatter.timeliness || "").trim(),
+    sourceExport,
+    sourceSender,
+    authorName,
+    authorCredential,
+    sourceSite: deriveSourceSite(note.sourceUrl, note.frontmatter),
+    backlinks,
+    chatMentions,
+    citationSet,
+    backToChatUrl: buildChatUrl(context.chatId, context.turnId),
   };
 }
 
 function renderVaultNotePage(note) {
   const subtitleBits = [note.noteType, note.path];
-  const publishedOn = String(note.frontmatter.published_on || "").trim();
-  const discoveredOn = String(note.frontmatter.discovered_on || "").trim();
-  if (publishedOn) {
-    subtitleBits.push(`published ${publishedOn}`);
+  if (note.publishedOn) {
+    subtitleBits.push(`published ${note.publishedOn}`);
   }
-  if (discoveredOn) {
-    subtitleBits.push(`saved ${discoveredOn}`);
+  if (note.discoveredOn) {
+    subtitleBits.push(`saved ${note.discoveredOn}`);
   }
 
-  const tagChips = note.tags.length
+  const chips = [...note.tags, ...note.topics.map((topic) => `topic:${topic}`)];
+  const tagChips = chips.length
     ? `
         <div class="note-chip-row">
-          ${note.tags.map((tag) => `<span class="note-chip">${escapeHtml(String(tag))}</span>`).join("")}
+          ${chips.map((tag) => `<span class="note-chip">${escapeHtml(String(tag))}</span>`).join("")}
         </div>
       `
     : "";
 
   const relatedLinks = [
-    `<a class="note-action secondary" href="/">Back to chat</a>`,
+    `<a class="note-action secondary" href="${escapeHtml(note.backToChatUrl)}">Back to chat</a>`,
     `<a class="note-action secondary" href="${escapeHtml(buildObsidianUrl(note.absolutePath))}">Open in Obsidian</a>`,
     `<a class="note-action secondary" href="${escapeHtml(buildVaultRawUrl(note.path))}" target="_blank" rel="noreferrer">Raw markdown</a>`,
     note.sourceUrl
@@ -818,6 +866,114 @@ function renderVaultNotePage(note) {
   ]
     .filter(Boolean)
     .join("");
+
+  const metadataFacts = [
+    renderFact("Type", note.noteType),
+    renderFact("Path", note.path, "mono"),
+    renderFact("Website", note.sourceSite),
+    renderFact("Author", note.authorName),
+    renderFact("Credential", note.authorCredential),
+    renderFact("Published", note.publishedOn),
+    renderFact("Added", note.discoveredOn),
+    renderFact("Deadline", note.deadline),
+    renderFact("Status", note.status),
+    renderFact("Priority", note.priority),
+    renderFact("Timeliness", note.timeliness),
+    note.sourceSender ? renderFact("Captured from", note.sourceSender) : "",
+    note.sourceExport
+      ? renderFact("Source export", `<a href="${escapeHtml(buildVaultRawUrl(note.sourceExport))}" target="_blank" rel="noreferrer">${escapeHtml(note.sourceExport)}</a>`, "html")
+      : "",
+  ]
+    .filter(Boolean)
+    .join("");
+
+  const citationRail = note.citationSet
+    ? `
+        <section class="rail-card">
+          <p class="rail-kicker">Citation set</p>
+          <h3>Within this answer</h3>
+          <p class="rail-copy">
+            Source ${note.citationSet.index} of ${note.citationSet.total} from
+            <a href="${escapeHtml(note.citationSet.chatUrl)}">${escapeHtml(note.citationSet.chatTitle)}</a>.
+          </p>
+          <div class="citation-nav">
+            ${
+              note.citationSet.previous
+                ? `<a class="note-action secondary citation-nav-link" href="${escapeHtml(note.citationSet.previous.url)}">Previous source</a>`
+                : `<span class="note-action secondary is-disabled">Previous source</span>`
+            }
+            ${
+              note.citationSet.next
+                ? `<a class="note-action secondary citation-nav-link" href="${escapeHtml(note.citationSet.next.url)}">Next source</a>`
+                : `<span class="note-action secondary is-disabled">Next source</span>`
+            }
+          </div>
+          <div class="citation-current">
+            <div class="citation-current-title">${escapeHtml(note.citationSet.current.title || note.title)}</div>
+            ${
+              note.citationSet.current.relevance
+                ? `<p class="citation-current-copy">${escapeHtml(note.citationSet.current.relevance)}</p>`
+                : ""
+            }
+          </div>
+        </section>
+      `
+    : "";
+
+  const backlinkSection = note.backlinks.length
+    ? `
+        <section class="related-section">
+          <div class="section-heading">
+            <p class="section-kicker">Backlinks</p>
+            <h2>Mentioned elsewhere in the vault</h2>
+          </div>
+          <div class="related-grid">
+            ${note.backlinks
+              .map(
+                (entry) => `
+                  <article class="related-card">
+                    <div class="related-topline">
+                      <span class="related-kind">${escapeHtml(entry.noteType || "note")}</span>
+                      <span class="related-path">${escapeHtml(entry.path)}</span>
+                    </div>
+                    <h3><a href="${escapeHtml(entry.url)}">${escapeHtml(entry.title)}</a></h3>
+                    ${entry.excerpt ? `<p>${escapeHtml(entry.excerpt)}</p>` : ""}
+                  </article>
+                `,
+              )
+              .join("")}
+          </div>
+        </section>
+      `
+    : "";
+
+  const chatMentionSection = note.chatMentions.length
+    ? `
+        <section class="related-section">
+          <div class="section-heading">
+            <p class="section-kicker">Chat traces</p>
+            <h2>Mentioned in chats</h2>
+          </div>
+          <div class="related-grid">
+            ${note.chatMentions
+              .map(
+                (entry) => `
+                  <article class="related-card">
+                    <div class="related-topline">
+                      <span class="related-kind">${escapeHtml(entry.dateLabel)}</span>
+                      <span class="related-path">${escapeHtml(entry.chatTitle)}</span>
+                    </div>
+                    <h3><a href="${escapeHtml(entry.url)}">${escapeHtml(entry.question)}</a></h3>
+                    ${entry.relevance ? `<p>${escapeHtml(entry.relevance)}</p>` : ""}
+                    ${entry.snippet ? `<p class="muted-copy">${escapeHtml(entry.snippet)}</p>` : ""}
+                  </article>
+                `,
+              )
+              .join("")}
+          </div>
+        </section>
+      `
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -833,22 +989,24 @@ function renderVaultNotePage(note) {
     />
     <style>
       :root {
-        --bg: #212121;
-        --panel: rgba(255, 255, 255, 0.04);
-        --panel-strong: rgba(255, 255, 255, 0.06);
+        --bg: #1b1c1f;
+        --bg-soft: #222428;
+        --panel: rgba(255, 255, 255, 0.045);
+        --panel-strong: rgba(255, 255, 255, 0.07);
         --line: rgba(255, 255, 255, 0.1);
-        --text: #ececec;
-        --muted: #a6a6a6;
-        --accent: #10a37f;
-        --shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+        --text: #ece7de;
+        --muted: #a79f94;
+        --accent: #7de2c2;
+        --accent-strong: #38c598;
+        --shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
       }
       * { box-sizing: border-box; }
       html, body {
         margin: 0;
         min-height: 100%;
         background:
-          radial-gradient(circle at top left, rgba(16, 163, 127, 0.1), transparent 20%),
-          radial-gradient(circle at top right, rgba(255, 255, 255, 0.04), transparent 18%),
+          radial-gradient(circle at top left, rgba(125, 226, 194, 0.12), transparent 22%),
+          radial-gradient(circle at top right, rgba(244, 198, 131, 0.08), transparent 18%),
           var(--bg);
         color: var(--text);
         font-family: "Instrument Sans", sans-serif;
@@ -867,18 +1025,19 @@ function renderVaultNotePage(note) {
       }
       .note-shell {
         position: relative;
-        width: min(1040px, calc(100% - 32px));
+        width: min(1320px, calc(100% - 32px));
         margin: 32px auto;
         border: 1px solid var(--line);
-        border-radius: 28px;
+        border-radius: 30px;
         background: var(--panel);
         box-shadow: var(--shadow);
         overflow: hidden;
+        backdrop-filter: blur(18px);
       }
       .note-header {
-        padding: 28px 30px 22px;
+        padding: 30px 32px 24px;
         border-bottom: 1px solid var(--line);
-        background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
       }
       .note-kicker,
       .note-subtitle,
@@ -895,7 +1054,8 @@ function renderVaultNotePage(note) {
       }
       .note-title {
         margin: 0;
-        font-size: clamp(2rem, 4vw, 3rem);
+        max-width: 15ch;
+        font-size: clamp(2.2rem, 4.2vw, 3.6rem);
         line-height: 1.05;
       }
       .note-subtitle {
@@ -939,16 +1099,39 @@ function renderVaultNotePage(note) {
         font-size: 0.7rem;
       }
       .note-action.primary {
-        background: rgba(16, 163, 127, 0.16);
-        border-color: rgba(16, 163, 127, 0.32);
-        color: #d7fff5;
+        background: rgba(56, 197, 152, 0.16);
+        border-color: rgba(56, 197, 152, 0.32);
+        color: #dbfff5;
       }
       .note-action.secondary {
         background: rgba(255, 255, 255, 0.03);
         color: var(--text);
       }
+      .note-action.is-disabled {
+        opacity: 0.45;
+        pointer-events: none;
+      }
+      .note-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.4fr) minmax(280px, 380px);
+        gap: 24px;
+        padding: 26px;
+      }
+      .note-main {
+        min-width: 0;
+      }
+      .note-rail {
+        position: relative;
+      }
+      .note-content,
+      .rail-card,
+      .related-card {
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.035);
+        border-radius: 24px;
+      }
       .note-content {
-        padding: 30px;
+        padding: 30px 32px;
       }
       .note-body {
         line-height: 1.75;
@@ -970,7 +1153,7 @@ function renderVaultNotePage(note) {
         line-height: 1.15;
       }
       .note-body a {
-        color: #d7fff5;
+        color: var(--accent);
       }
       .note-body code {
         font-family: "IBM Plex Mono", monospace;
@@ -989,6 +1172,126 @@ function renderVaultNotePage(note) {
         background: transparent;
         padding: 0;
       }
+      .note-rail-stack {
+        position: sticky;
+        top: 18px;
+        display: grid;
+        gap: 16px;
+      }
+      .rail-card {
+        padding: 18px 18px 20px;
+      }
+      .rail-kicker,
+      .section-kicker,
+      .related-kind,
+      .related-path,
+      .fact-label {
+        font-family: "IBM Plex Mono", monospace;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .rail-kicker,
+      .section-kicker,
+      .fact-label,
+      .related-kind,
+      .related-path {
+        margin: 0 0 8px;
+        color: var(--muted);
+        font-size: 0.68rem;
+      }
+      .rail-card h3,
+      .section-heading h2,
+      .related-card h3 {
+        margin: 0;
+        line-height: 1.15;
+      }
+      .rail-copy,
+      .citation-current-copy,
+      .related-card p,
+      .muted-copy {
+        margin: 10px 0 0;
+        color: #d7d0c7;
+        line-height: 1.6;
+      }
+      .citation-nav {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 16px;
+      }
+      .citation-nav-link,
+      .citation-nav .note-action {
+        width: 100%;
+      }
+      .citation-current {
+        margin-top: 16px;
+        padding-top: 16px;
+        border-top: 1px solid var(--line);
+      }
+      .citation-current-title {
+        font-weight: 700;
+        line-height: 1.35;
+      }
+      .fact-list {
+        display: grid;
+        gap: 12px;
+      }
+      .fact-row {
+        display: grid;
+        gap: 6px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .fact-row:last-child {
+        padding-bottom: 0;
+        border-bottom: 0;
+      }
+      .fact-value {
+        color: var(--text);
+        line-height: 1.45;
+        word-break: break-word;
+      }
+      .fact-value.mono {
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 0.88rem;
+      }
+      .related-sections {
+        display: grid;
+        gap: 20px;
+        padding: 0 26px 26px;
+      }
+      .related-section {
+        display: grid;
+        gap: 14px;
+      }
+      .section-heading {
+        display: grid;
+        gap: 6px;
+      }
+      .related-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 14px;
+      }
+      .related-card {
+        padding: 18px;
+      }
+      .related-card h3 a,
+      .rail-card a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      .related-topline {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+      .related-path {
+        text-align: right;
+        max-width: 50%;
+        word-break: break-word;
+      }
       @media (max-width: 720px) {
         .note-shell {
           width: min(100%, calc(100% - 16px));
@@ -998,6 +1301,18 @@ function renderVaultNotePage(note) {
         .note-header,
         .note-content {
           padding: 20px 18px;
+        }
+        .note-layout,
+        .related-sections {
+          padding: 18px;
+        }
+      }
+      @media (max-width: 1080px) {
+        .note-layout {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .note-rail-stack {
+          position: static;
         }
       }
     </style>
@@ -1011,12 +1326,272 @@ function renderVaultNotePage(note) {
         ${tagChips}
         <div class="note-actions">${relatedLinks}</div>
       </header>
-      <section class="note-content">
-        <div class="note-body">${renderMarkdownDocument(stripDuplicateLeadingTitle(note.body, note.title))}</div>
-      </section>
+      <div class="note-layout">
+        <main class="note-main">
+          <section class="note-content">
+            <div class="note-body">${renderMarkdownDocument(stripDuplicateLeadingTitle(note.body, note.title), { context: note.context })}</div>
+          </section>
+        </main>
+        <aside class="note-rail">
+          <div class="note-rail-stack">
+            <section class="rail-card">
+              <p class="rail-kicker">Metadata</p>
+              <h3>Source context</h3>
+              <div class="fact-list">${metadataFacts}</div>
+            </section>
+            ${citationRail}
+          </div>
+        </aside>
+      </div>
+      <div class="related-sections">
+        ${backlinkSection}
+        ${chatMentionSection}
+      </div>
     </article>
   </body>
 </html>`;
+}
+
+function renderFact(label, value, kind = "text") {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  const renderedValue =
+    kind === "html"
+      ? value
+      : `<span class="fact-value${kind === "mono" ? " mono" : ""}">${escapeHtml(normalized)}</span>`;
+  if (kind === "html") {
+    return `
+      <div class="fact-row">
+        <div class="fact-label">${escapeHtml(label)}</div>
+        <div class="fact-value">${value}</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="fact-row">
+      <div class="fact-label">${escapeHtml(label)}</div>
+      ${renderedValue}
+    </div>
+  `;
+}
+
+function parseVaultRequestContext(searchParams) {
+  return {
+    chatId: String(searchParams?.get("chat") || "").trim(),
+    turnId: String(searchParams?.get("turn") || "").trim(),
+    sourceIndex: Number.parseInt(String(searchParams?.get("source") || ""), 10) || 0,
+  };
+}
+
+async function buildCitationSet(relativePath, context = {}) {
+  if (!context.chatId || !context.turnId) {
+    return null;
+  }
+  const chat = await readChatTrace(context.chatId);
+  if (!chat) {
+    return null;
+  }
+  const turn = Array.isArray(chat.turns) ? chat.turns.find((entry) => entry.id === context.turnId) : null;
+  if (!turn) {
+    return null;
+  }
+  const citations = Array.isArray(turn.answer?.citations) ? turn.answer.citations : [];
+  if (!citations.length) {
+    return null;
+  }
+  let index = context.sourceIndex > 0 ? context.sourceIndex - 1 : citations.findIndex((citation) => citation.path === relativePath);
+  if (index < 0 || index >= citations.length) {
+    index = citations.findIndex((citation) => citation.path === relativePath);
+  }
+  if (index < 0) {
+    return null;
+  }
+
+  const entries = citations.map((citation, citationIndex) => ({
+    ...citation,
+    url: buildContextualVaultUrl(citation.path, {
+      chatId: chat.id,
+      turnId: turn.id,
+      sourceIndex: citationIndex + 1,
+    }),
+  }));
+
+  return {
+    index: index + 1,
+    total: entries.length,
+    current: entries[index],
+    previous: index > 0 ? entries[index - 1] : null,
+    next: index < entries.length - 1 ? entries[index + 1] : null,
+    chatTitle: chat.title || buildOutputTitle(turn.question || "Chat"),
+    chatUrl: buildChatUrl(chat.id, turn.id),
+  };
+}
+
+async function findNoteBacklinks(relativePath) {
+  const markdownFiles = await listVaultMarkdownFiles();
+  const normalizedPath = String(relativePath || "").replace(/^\/+/, "");
+  const pathWithoutExt = normalizedPath.replace(/\.md$/i, "");
+  const vaultUrl = buildVaultUrl(normalizedPath);
+  const candidates = [
+    normalizedPath,
+    pathWithoutExt,
+    vaultUrl,
+    `[[${pathWithoutExt}]]`,
+    `[[${pathWithoutExt}|`,
+    `[[${normalizedPath}]]`,
+    `[[${normalizedPath}|`,
+  ];
+
+  const matches = [];
+  for (const file of markdownFiles) {
+    if (file === normalizedPath) {
+      continue;
+    }
+    const absolutePath = safeJoin(vaultRoot, file);
+    if (!absolutePath) {
+      continue;
+    }
+    const text = await fsp.readFile(absolutePath, "utf8");
+    const matchedToken = candidates.find((token) => text.includes(token));
+    if (!matchedToken) {
+      continue;
+    }
+    const note = await readVaultNote(file);
+    matches.push({
+      path: file,
+      title: note.title,
+      noteType: note.noteType,
+      url: buildVaultUrl(file),
+      excerpt: extractMatchExcerpt(text, matchedToken),
+    });
+    if (matches.length >= 16) {
+      break;
+    }
+  }
+
+  return matches;
+}
+
+async function findChatMentions(relativePath) {
+  const chats = await listChatTraces();
+  const mentions = [];
+
+  for (const chat of chats) {
+    const turns = Array.isArray(chat.turns) ? [...chat.turns].reverse() : [];
+    for (const turn of turns) {
+      const citations = Array.isArray(turn.answer?.citations) ? turn.answer.citations : [];
+      const matchedCitation = citations.find((citation) => citation.path === relativePath);
+      if (!matchedCitation) {
+        continue;
+      }
+      mentions.push({
+        chatId: chat.id,
+        turnId: turn.id,
+        chatTitle: chat.title || buildOutputTitle(turn.question || "Chat"),
+        question: turn.question || "Open chat turn",
+        relevance: matchedCitation.relevance || "",
+        snippet: truncate(stripMarkdown(turn.answer?.concise_answer || turn.answer?.answer_markdown || ""), 180),
+        dateLabel: formatChatDateLabel(turn.completedAt || turn.startedAt || chat.updatedAt),
+        url: buildChatUrl(chat.id, turn.id),
+      });
+      if (mentions.length >= 12) {
+        return mentions;
+      }
+    }
+  }
+
+  return mentions;
+}
+
+let markdownFileIndexCache = {
+  expiresAt: 0,
+  files: [],
+};
+
+async function listVaultMarkdownFiles() {
+  const now = Date.now();
+  if (markdownFileIndexCache.expiresAt > now && markdownFileIndexCache.files.length) {
+    return markdownFileIndexCache.files;
+  }
+
+  const roots = ["items", "topics", "projects", "dashboards", "outputs"];
+  const files = [];
+  for (const root of roots) {
+    const resolved = path.join(vaultRoot, root);
+    if (await dirExists(resolved)) {
+      files.push(...(await walkMarkdownFiles(resolved, root)));
+    }
+  }
+
+  for (const rootFile of ["index.md", "hot.md", "AGENTS.md", "WIKI.md", "README.md"]) {
+    const resolved = path.join(vaultRoot, rootFile);
+    if (await fileExists(resolved)) {
+      files.push(rootFile);
+    }
+  }
+
+  markdownFileIndexCache = {
+    expiresAt: now + 30_000,
+    files: [...new Set(files)].sort(),
+  };
+  return markdownFileIndexCache.files;
+}
+
+async function walkMarkdownFiles(absoluteDir, relativeDir) {
+  const entries = await fsp.readdir(absoluteDir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const absolutePath = path.join(absoluteDir, entry.name);
+    const relativePath = path.posix.join(relativeDir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await walkMarkdownFiles(absolutePath, relativePath)));
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith(".md")) {
+      files.push(relativePath);
+    }
+  }
+  return files;
+}
+
+function extractMatchExcerpt(text, token) {
+  const lines = String(text || "").split(/\r?\n/);
+  const line = lines.find((entry) => entry.includes(token)) || "";
+  return truncate(line.replace(/^#+\s*/, "").replace(/^\s*-\s*/, "").trim(), 180);
+}
+
+function deriveSourceSite(sourceUrl, frontmatter = {}) {
+  const explicit = firstPresent(frontmatter.site_name, frontmatter.site, frontmatter.publisher);
+  if (explicit) {
+    return explicit;
+  }
+  if (!sourceUrl) {
+    return "";
+  }
+  try {
+    const hostname = new URL(sourceUrl).hostname.replace(/^www\./, "");
+    const labels = hostname.split(".");
+    const domain = labels.length > 1 ? labels[labels.length - 2] : labels[0];
+    return domain
+      .split(/[-_]/g)
+      .filter(Boolean)
+      .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+      .join(" ");
+  } catch {
+    return "";
+  }
+}
+
+function firstPresent(...values) {
+  for (const value of values) {
+    const normalized = String(value || "").trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return "";
 }
 
 function splitFrontmatter(text) {
@@ -1102,7 +1677,7 @@ function parseFrontmatterValue(value) {
   return trimmed;
 }
 
-function renderMarkdownDocument(markdown) {
+function renderMarkdownDocument(markdown, options = {}) {
   const lines = String(markdown || "").split("\n");
   const html = [];
   let listType = "";
@@ -1146,7 +1721,7 @@ function renderMarkdownDocument(markdown) {
         html.push(`</${listType}>`);
         listType = "";
       }
-      html.push(`<h3>${renderMarkdownInline(trimmed.slice(4))}</h3>`);
+      html.push(`<h3>${renderMarkdownInline(trimmed.slice(4), options)}</h3>`);
       continue;
     }
     if (trimmed.startsWith("## ")) {
@@ -1154,7 +1729,7 @@ function renderMarkdownDocument(markdown) {
         html.push(`</${listType}>`);
         listType = "";
       }
-      html.push(`<h2>${renderMarkdownInline(trimmed.slice(3))}</h2>`);
+      html.push(`<h2>${renderMarkdownInline(trimmed.slice(3), options)}</h2>`);
       continue;
     }
     if (trimmed.startsWith("# ")) {
@@ -1162,7 +1737,7 @@ function renderMarkdownDocument(markdown) {
         html.push(`</${listType}>`);
         listType = "";
       }
-      html.push(`<h1>${renderMarkdownInline(trimmed.slice(2))}</h1>`);
+      html.push(`<h1>${renderMarkdownInline(trimmed.slice(2), options)}</h1>`);
       continue;
     }
 
@@ -1176,7 +1751,7 @@ function renderMarkdownDocument(markdown) {
         html.push("<ul>");
         listType = "ul";
       }
-      html.push(`<li>${renderMarkdownInline(bulletMatch[1])}</li>`);
+      html.push(`<li>${renderMarkdownInline(bulletMatch[1], options)}</li>`);
       continue;
     }
 
@@ -1190,7 +1765,7 @@ function renderMarkdownDocument(markdown) {
         html.push("<ol>");
         listType = "ol";
       }
-      html.push(`<li>${renderMarkdownInline(orderedMatch[1])}</li>`);
+      html.push(`<li>${renderMarkdownInline(orderedMatch[1], options)}</li>`);
       continue;
     }
 
@@ -1199,7 +1774,7 @@ function renderMarkdownDocument(markdown) {
       listType = "";
     }
 
-    html.push(`<p>${renderMarkdownInline(trimmed)}</p>`);
+    html.push(`<p>${renderMarkdownInline(trimmed, options)}</p>`);
   }
 
   if (inCodeBlock) {
@@ -1219,10 +1794,11 @@ function stripDuplicateLeadingTitle(markdown, title) {
   return source.replace(titlePattern, "");
 }
 
-function renderMarkdownInline(text) {
+function renderMarkdownInline(text, options = {}) {
+  const context = options.context || {};
   let normalized = String(text || "");
-  normalized = normalized.replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, (_full, target, label) => `[${label}](${buildVaultUrl(target)})`);
-  normalized = normalized.replace(/\[\[([^\]]+)\]\]/g, (_full, target) => `[${target}](${buildVaultUrl(target)})`);
+  normalized = normalized.replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, (_full, target, label) => `[${label}](${buildContextualVaultUrl(target, context)})`);
+  normalized = normalized.replace(/\[\[([^\]]+)\]\]/g, (_full, target) => `[${target}](${buildContextualVaultUrl(target, context)})`);
 
   const tokenPattern = /`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)/g;
   let html = "";
@@ -1241,7 +1817,7 @@ function renderMarkdownInline(text) {
         href.startsWith("http://") || href.startsWith("https://") || href.startsWith("/vault/") || href.startsWith("/vault-raw/")
           ? href
           : href.endsWith(".md")
-            ? buildVaultUrl(href)
+            ? buildContextualVaultUrl(href, context)
             : buildVaultRawUrl(href);
       html += `<a href="${escapeHtml(resolvedHref)}" target="_blank" rel="noreferrer">${formatRenderedText(label)}</a>`;
     }
@@ -1513,8 +2089,36 @@ function buildVaultUrl(relativePath) {
   return `/vault/${encodeURI(String(relativePath || "").replace(/^\/+/, ""))}`;
 }
 
+function buildContextualVaultUrl(relativePath, context = {}) {
+  const base = buildVaultUrl(relativePath);
+  const params = new URLSearchParams();
+  if (context.chatId) {
+    params.set("chat", context.chatId);
+  }
+  if (context.turnId) {
+    params.set("turn", context.turnId);
+  }
+  if (context.sourceIndex) {
+    params.set("source", String(context.sourceIndex));
+  }
+  const query = params.toString();
+  return query ? `${base}?${query}` : base;
+}
+
 function buildVaultRawUrl(relativePath) {
   return `/vault-raw/${encodeURI(String(relativePath || "").replace(/^\/+/, ""))}`;
+}
+
+function buildChatUrl(chatId, turnId = "") {
+  const params = new URLSearchParams();
+  if (chatId) {
+    params.set("chat", chatId);
+  }
+  if (turnId) {
+    params.set("turn", turnId);
+  }
+  const query = params.toString();
+  return query ? `/?${query}` : "/";
 }
 
 function buildObsidianUrl(absolutePath) {
@@ -1575,12 +2179,45 @@ async function fileExists(target) {
   }
 }
 
+async function dirExists(target) {
+  try {
+    const stat = await fsp.stat(target);
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function truncate(text, limit) {
   const clean = String(text || "").replace(/\s+/g, " ").trim();
   if (clean.length <= limit) {
     return clean;
   }
   return `${clean.slice(0, limit - 3).trim()}...`;
+}
+
+function formatChatDateLabel(value) {
+  if (!value) {
+    return "Unknown date";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Unknown date";
+  }
+  return date.toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function stripMarkdown(text) {
+  return String(text || "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
+    .replace(/[*_>#-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function json(res, status, payload) {
