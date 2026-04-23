@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import mimetypes
 import json
 import os
 import re
@@ -31,6 +33,8 @@ RAW_UPDATES_FILE_NAME = "telegram-updates.jsonl"
 PROCESSED_UPDATES_FILE_NAME = ".telegram_processed_updates.jsonl"
 AGENT_DECISIONS_FILE_NAME = "telegram-agent-decisions.jsonl"
 DEFAULT_AGENT_MODEL = "gpt-5.4"
+ATTACHMENT_ANALYSIS_MAX_BYTES = 8 * 1024 * 1024
+ATTACHMENT_ANALYSIS_TIMEOUT_SECONDS = 90
 
 
 def read_json(path: Path, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -107,6 +111,39 @@ def sender_name(message: dict[str, Any]) -> str:
     return "Unknown"
 
 
+def slugify_fragment(text: str, fallback: str = "file", max_len: int = 40) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")
+    cleaned = re.sub(r"-{2,}", "-", cleaned)
+    if not cleaned:
+        cleaned = fallback
+    return cleaned[:max_len].strip("-") or fallback
+
+
+def ext_from_name(name: str | None) -> str:
+    if not name:
+        return ""
+    return Path(str(name)).suffix.lower()
+
+
+def looks_like_image(file_name: str | None, mime_type: str | None) -> bool:
+    mime = str(mime_type or "").lower()
+    if mime.startswith("image/"):
+        return True
+    suffix = ext_from_name(file_name)
+    return suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"}
+
+
+def choose_attachment_extension(file_name: str | None, mime_type: str | None, file_path: str | None, fallback: str) -> str:
+    for candidate in [file_name, file_path]:
+        suffix = ext_from_name(candidate)
+        if suffix:
+            return suffix
+    guessed = mimetypes.guess_extension(str(mime_type or "").split(";")[0].strip())
+    if guessed:
+        return guessed
+    return fallback
+
+
 def extract_message_text(message: dict[str, Any]) -> str:
     chunks: list[str] = []
     if message.get("text"):
@@ -148,6 +185,45 @@ def extract_message_text(message: dict[str, Any]) -> str:
     return "\n".join(chunk.strip() for chunk in chunks if str(chunk).strip()).strip()
 
 
+def collect_message_attachments(message: dict[str, Any]) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+    if message.get("photo"):
+        photo_sizes = message.get("photo") or []
+        if photo_sizes:
+            photo = photo_sizes[-1] or {}
+            attachments.append(
+                {
+                    "kind": "photo",
+                    "file_id": str(photo.get("file_id") or ""),
+                    "file_unique_id": str(photo.get("file_unique_id") or ""),
+                    "file_name": "",
+                    "mime_type": "image/jpeg",
+                    "width": photo.get("width"),
+                    "height": photo.get("height"),
+                    "file_size": photo.get("file_size"),
+                    "is_image": True,
+                }
+            )
+
+    if message.get("document"):
+        document = message.get("document") or {}
+        mime_type = str(document.get("mime_type") or "")
+        file_name = str(document.get("file_name") or "")
+        attachments.append(
+            {
+                "kind": "document",
+                "file_id": str(document.get("file_id") or ""),
+                "file_unique_id": str(document.get("file_unique_id") or ""),
+                "file_name": file_name,
+                "mime_type": mime_type,
+                "file_size": document.get("file_size"),
+                "is_image": looks_like_image(file_name, mime_type),
+            }
+        )
+
+    return [attachment for attachment in attachments if attachment.get("file_id")]
+
+
 def normalize_message(update: dict[str, Any]) -> dict[str, Any] | None:
     message = (
         update.get("message")
@@ -178,6 +254,267 @@ def normalize_message(update: dict[str, Any]) -> dict[str, Any] | None:
         "export_line": render_export_message(timestamp, sender, text),
         "raw_text": text,
     }
+
+
+def telegram_file_url(token: str, file_path: str) -> str:
+    return f"{API_ROOT}/file/bot{token}/{file_path.lstrip('/')}"
+
+
+def telegram_get_file(token: str, file_id: str) -> dict[str, Any]:
+    payload = telegram_api(token, "getFile", file_id=file_id)
+    result = payload.get("result") or {}
+    if not isinstance(result, dict) or not result.get("file_path"):
+        raise RuntimeError(f"Telegram getFile did not return a file path for {file_id}")
+    return result
+
+
+def download_telegram_attachment(token: str, file_id: str) -> tuple[bytes, dict[str, Any]]:
+    file_meta = telegram_get_file(token, file_id)
+    response = requests.get(telegram_file_url(token, str(file_meta["file_path"])), timeout=ATTACHMENT_ANALYSIS_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    return response.content, file_meta
+
+
+def response_output_text(payload: dict[str, Any]) -> str:
+    text = str(payload.get("output_text") or "").strip()
+    if text:
+        return text
+    chunks: list[str] = []
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content") or []:
+            if not isinstance(content, dict):
+                continue
+            if isinstance(content.get("text"), str):
+                chunks.append(content["text"])
+    return "\n".join(chunk.strip() for chunk in chunks if chunk.strip()).strip()
+
+
+def summarize_attachment_with_openai(
+    *,
+    openai_api_key: str,
+    model: str,
+    artifact_path: Path,
+    mime_type: str,
+    original_text: str,
+) -> dict[str, Any]:
+    content_bytes = artifact_path.read_bytes()
+    if len(content_bytes) > ATTACHMENT_ANALYSIS_MAX_BYTES:
+        return {
+            "summary": f"Attachment saved to {artifact_path.name}, but it was too large for inline vision analysis.",
+            "extracted_text": "",
+            "urls": [],
+            "qr_values": [],
+            "event_clues": [],
+            "job_clues": [],
+            "reminder_clues": [],
+            "needs_manual_review": True,
+        }
+
+    encoded = base64.b64encode(content_bytes).decode("ascii")
+    prompt = (
+        "Analyze this Telegram attachment for a personal knowledge vault.\n"
+        "Return strict JSON with keys: summary, extracted_text, urls, qr_values, event_clues, job_clues, "
+        "reminder_clues, needs_manual_review.\n"
+        "Use short strings. event_clues, job_clues, reminder_clues must be arrays of short bullet-like strings.\n"
+        "If this looks like a screenshot of a job post or application status, extract role/company/status/date clues.\n"
+        "If this looks like an event screenshot or flyer, extract event/date/time/location/registration clues.\n"
+        "If there is a QR code, decode it if possible and include the resolved text or URL in qr_values.\n"
+        "If there is visible text, place the useful text in extracted_text.\n"
+        "Do not invent details."
+    )
+    context = str(original_text or "").strip()
+    user_parts: list[dict[str, Any]] = [
+        {
+            "type": "input_text",
+            "text": f"Telegram message context:\n{context or '(no caption or text supplied)'}",
+        },
+        {
+            "type": "input_image",
+            "image_url": f"data:{mime_type};base64,{encoded}",
+        },
+    ]
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": prompt}]},
+                {"role": "user", "content": user_parts},
+            ],
+            "text": {"format": {"type": "json_object"}},
+        },
+        timeout=ATTACHMENT_ANALYSIS_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    text = response_output_text(payload)
+    if not text:
+        raise RuntimeError("OpenAI attachment analysis returned no text")
+    parsed = json.loads(text)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("OpenAI attachment analysis did not return a JSON object")
+    return parsed
+
+
+def clean_attachment_list(value: Any, *, limit: int = 5, item_limit: int = 180) -> list[str]:
+    cleaned: list[str] = []
+    for item in value or []:
+        text = re.sub(r"\s+", " ", str(item or "")).strip()
+        if not text:
+            continue
+        cleaned.append(text[:item_limit])
+        if len(cleaned) >= limit:
+            break
+    return cleaned
+
+
+def clean_attachment_text(value: Any, *, limit: int = 900) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:limit]
+
+
+def save_attachment_bytes(
+    *,
+    vault_root: Path,
+    normalized_message: dict[str, Any],
+    attachment: dict[str, Any],
+    file_meta: dict[str, Any],
+    content: bytes,
+) -> Path:
+    is_image = bool(attachment.get("is_image"))
+    base_dir = vault_root / "raw" / ("images" if is_image else "docs") / "telegram"
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = normalized_message["timestamp_iso"][:10]
+    stem_parts = [
+        timestamp,
+        "telegram",
+        f"chat-{normalized_message['chat_id']}",
+        f"msg-{normalized_message['message_id']}",
+        attachment.get("kind") or "file",
+    ]
+    if attachment.get("file_name"):
+        stem_parts.append(slugify_fragment(Path(str(attachment["file_name"])).stem, fallback="file"))
+    extension = choose_attachment_extension(
+        attachment.get("file_name"),
+        attachment.get("mime_type"),
+        file_meta.get("file_path"),
+        ".jpg" if is_image else ".bin",
+    )
+    filename = " ".join(str(part) for part in stem_parts if str(part).strip()) + extension
+    path = base_dir / filename
+    if path.exists():
+        unique_suffix = slugify_fragment(str(attachment.get("file_unique_id") or attachment.get("file_id") or "dup"), fallback="dup", max_len=16)
+        path = base_dir / f"{path.stem} {unique_suffix}{path.suffix}"
+    path.write_bytes(content)
+    return path
+
+
+def build_attachment_context(attachments: list[dict[str, Any]]) -> str:
+    if not attachments:
+        return ""
+    lines = ["Attachment context:"]
+    for index, attachment in enumerate(attachments, start=1):
+        kind = str(attachment.get("kind") or "attachment")
+        artifact_path = str(attachment.get("artifact_path") or "").strip()
+        mime_type = str(attachment.get("mime_type") or "").strip()
+        lines.append(f"- attachment_{index}: {kind}")
+        if artifact_path:
+            lines.append(f"  saved_artifact: {artifact_path}")
+        if mime_type:
+            lines.append(f"  mime_type: {mime_type}")
+        summary = clean_attachment_text(attachment.get("summary"), limit=280)
+        if summary:
+            lines.append(f"  summary: {summary}")
+        extracted_text = clean_attachment_text(attachment.get("extracted_text"), limit=700)
+        if extracted_text:
+            lines.append(f"  extracted_text: {extracted_text}")
+        for label, key in [
+            ("qr_values", "qr_values"),
+            ("urls", "urls"),
+            ("event_clues", "event_clues"),
+            ("job_clues", "job_clues"),
+            ("reminder_clues", "reminder_clues"),
+        ]:
+            values = clean_attachment_list(attachment.get(key))
+            if values:
+                lines.append(f"  {label}: {' | '.join(values)}")
+        if attachment.get("analysis_error"):
+            lines.append(f"  analysis_error: {attachment['analysis_error']}")
+    return "\n".join(lines).strip()
+
+
+def enrich_message_attachments(
+    *,
+    vault_root: Path,
+    token: str,
+    openai_api_key: str,
+    attachment_model: str,
+    update: dict[str, Any],
+    normalized_message: dict[str, Any],
+) -> dict[str, Any]:
+    message = (
+        update.get("message")
+        or update.get("edited_message")
+        or update.get("channel_post")
+        or update.get("edited_channel_post")
+        or {}
+    )
+    attachments = collect_message_attachments(message)
+    if not attachments:
+        normalized_message["attachments"] = []
+        return normalized_message
+
+    enriched_attachments: list[dict[str, Any]] = []
+    for attachment in attachments:
+        enriched = dict(attachment)
+        try:
+            content, file_meta = download_telegram_attachment(token, str(attachment["file_id"]))
+            artifact_path = save_attachment_bytes(
+                vault_root=vault_root,
+                normalized_message=normalized_message,
+                attachment=attachment,
+                file_meta=file_meta,
+                content=content,
+            )
+            enriched["artifact_path"] = artifact_path.relative_to(vault_root).as_posix()
+            if attachment.get("is_image"):
+                mime_type = str(attachment.get("mime_type") or mimetypes.guess_type(artifact_path.name)[0] or "image/jpeg")
+                analysis = summarize_attachment_with_openai(
+                    openai_api_key=openai_api_key,
+                    model=attachment_model,
+                    artifact_path=artifact_path,
+                    mime_type=mime_type,
+                    original_text=normalized_message.get("raw_text") or "",
+                )
+                enriched["summary"] = clean_attachment_text(analysis.get("summary"), limit=320)
+                enriched["extracted_text"] = clean_attachment_text(analysis.get("extracted_text"), limit=1200)
+                enriched["urls"] = clean_attachment_list(analysis.get("urls"))
+                enriched["qr_values"] = clean_attachment_list(analysis.get("qr_values"))
+                enriched["event_clues"] = clean_attachment_list(analysis.get("event_clues"))
+                enriched["job_clues"] = clean_attachment_list(analysis.get("job_clues"))
+                enriched["reminder_clues"] = clean_attachment_list(analysis.get("reminder_clues"))
+                enriched["needs_manual_review"] = bool(analysis.get("needs_manual_review"))
+            else:
+                enriched["summary"] = f"Non-image attachment saved to {artifact_path.name}."
+        except Exception as exc:
+            enriched["analysis_error"] = f"{type(exc).__name__}: {exc}"
+        enriched_attachments.append(enriched)
+
+    attachment_context = build_attachment_context(enriched_attachments)
+    raw_text_parts = [str(normalized_message.get("raw_text") or "").strip(), attachment_context]
+    raw_text = "\n\n".join(part for part in raw_text_parts if part)
+    normalized_message["attachments"] = enriched_attachments
+    normalized_message["raw_text"] = raw_text.strip()
+    timestamp = datetime.fromisoformat(str(normalized_message["timestamp_iso"]))
+    normalized_message["export_line"] = render_export_message(timestamp, str(normalized_message["sender"]), normalized_message["raw_text"])
+    return normalized_message
 
 
 def render_export_message(timestamp: datetime, sender: str, text: str) -> str:
@@ -680,6 +1017,14 @@ def process_update_batch(
         if normalized is None:
             state["last_update_id"] = update_id
             continue
+        normalized = enrich_message_attachments(
+            vault_root=vault_root,
+            token=token,
+            openai_api_key=openai_api_key,
+            attachment_model=agent_model,
+            update=update,
+            normalized_message=normalized,
+        )
 
         chat_id = int(normalized["chat_id"])
         state.setdefault("known_chats", {})

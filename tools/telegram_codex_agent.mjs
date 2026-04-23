@@ -49,6 +49,7 @@ The user may send:
 - links to technical articles
 - X/Twitter links
 - job opportunities
+- screenshots, photos, QR codes, or image-based notes
 - direct questions that should be answered from the vault
 - reminders or personal notes
 - mixed messages that include a link plus extra instructions
@@ -69,6 +70,7 @@ Rules:
 - If storeInVault=true, include append_message_to_stream and run_vault_ingest in actions.
 - If the message is primarily asking a question that should be answered from the vault, request answer_vault_query.
 - For pure questions, usually set storeInVault=false unless the message also asks to remember something.
+- If attachments are present, use their extracted context and saved artifact paths when deciding classification and importance.
 - Only request live metadata refresh when it is clearly worth the extra work.
 - Only request rebuild_artifact_capture_queue when the message likely introduces a weak or blocked link that will need supporting artifacts later.
 - Preserve user-added context or instructions in your reasoning and summaries.
