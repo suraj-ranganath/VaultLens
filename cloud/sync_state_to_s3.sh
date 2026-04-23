@@ -20,16 +20,25 @@ if [ -z "$BUCKET" ] || [ "$BUCKET" = "None" ]; then
   exit 1
 fi
 
-for directory in dashboards imports items outputs projects raw topics; do
-  if [ -d "$directory" ]; then
-    aws s3 sync "$directory" "s3://${BUCKET}/state/${directory}" --delete
+ARCHIVE="$(mktemp -t my-vault-state.XXXXXX.tar.gz)"
+cleanup() {
+  rm -f "$ARCHIVE"
+}
+trap cleanup EXIT
+
+INCLUDES=()
+for path in dashboards imports items outputs projects raw topics hot.md index.md log.md; do
+  if [ -e "$path" ]; then
+    INCLUDES+=("$path")
   fi
 done
 
-for file in hot.md index.md log.md; do
-  if [ -f "$file" ]; then
-    aws s3 cp "$file" "s3://${BUCKET}/state/${file}"
-  fi
-done
+if [ "${#INCLUDES[@]}" -eq 0 ]; then
+  echo "No ignored vault state paths found to upload." >&2
+  exit 1
+fi
 
-printf "Synced local ignored vault state to s3://%s/state/\n" "$BUCKET"
+tar -czf "$ARCHIVE" "${INCLUDES[@]}"
+aws s3 cp "$ARCHIVE" "s3://${BUCKET}/state/vault-state.tar.gz"
+
+printf "Synced local ignored vault state bundle to s3://%s/state/vault-state.tar.gz\n" "$BUCKET"

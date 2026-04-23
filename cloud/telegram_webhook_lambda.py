@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import tarfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,7 @@ CODE_PATHS = [
     "templates",
     "tools",
 ]
+STATE_BUNDLE_NAME = "vault-state.tar.gz"
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -166,45 +168,56 @@ def prepare_work_root() -> None:
 
 def download_state() -> None:
     bucket = required_env("VAULT_STATE_BUCKET")
-    prefix = state_prefix()
+    key = state_bundle_key()
     client = boto3.client("s3")
-    paginator = client.get_paginator("list_objects_v2")
+    archive_path = WORK_ROOT / STATE_BUNDLE_NAME
+    try:
+        client.download_file(bucket, key, str(archive_path))
+    except client.exceptions.NoSuchKey:
+        return
+    except Exception as exc:
+        if "404" in str(exc) or "Not Found" in str(exc):
+            return
+        raise
 
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if key.endswith("/"):
-                continue
-            relative = key[len(prefix) :]
-            if not relative or relative.startswith("../"):
-                continue
-            target = WORK_ROOT / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            client.download_file(bucket, key, str(target))
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            target = (WORK_ROOT / member.name).resolve()
+            if os.path.commonpath([str(WORK_ROOT), str(target)]) != str(WORK_ROOT):
+                raise RuntimeError(f"Unsafe path in state bundle: {member.name}")
+        archive.extractall(WORK_ROOT)
+    archive_path.unlink(missing_ok=True)
 
 
 def upload_state() -> None:
     bucket = required_env("VAULT_STATE_BUCKET")
-    prefix = state_prefix()
+    key = state_bundle_key()
     client = boto3.client("s3")
+    archive_path = WORK_ROOT / STATE_BUNDLE_NAME
 
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for path in iter_state_paths():
+            archive.add(path, arcname=path.relative_to(WORK_ROOT).as_posix())
+
+    client.upload_file(str(archive_path), bucket, key)
+    archive_path.unlink(missing_ok=True)
+
+
+def iter_state_paths() -> list[Path]:
+    paths: list[Path] = []
     for directory in STATE_DIRS:
         root = WORK_ROOT / directory
         if not root.exists():
             continue
         for path in root.rglob("*"):
             if path.is_file() and not path.is_symlink():
-                upload_path(client, bucket, prefix, path)
+                paths.append(path)
 
     for file_name in STATE_FILES:
         path = WORK_ROOT / file_name
         if path.exists() and path.is_file():
-            upload_path(client, bucket, prefix, path)
-
-
-def upload_path(client: Any, bucket: str, prefix: str, path: Path) -> None:
-    relative = path.relative_to(WORK_ROOT).as_posix()
-    client.upload_file(str(path), bucket, f"{prefix}{relative}")
+            paths.append(path)
+    return sorted(paths)
 
 
 def run_telegram_webhook(update: dict[str, Any]) -> dict[str, Any]:
@@ -248,6 +261,10 @@ def run_telegram_webhook(update: dict[str, Any]) -> dict[str, Any]:
 
 def state_prefix() -> str:
     return clean_prefix(os.environ.get("VAULT_STATE_PREFIX", "state"))
+
+
+def state_bundle_key() -> str:
+    return f"{state_prefix()}{STATE_BUNDLE_NAME}"
 
 
 def clean_prefix(raw: str) -> str:

@@ -7,9 +7,9 @@ This deploys the vault Telegram agent as a webhook-first AWS path.
 - Telegram sends messages to an AWS Lambda Function URL.
 - The receiver Lambda validates Telegram's `X-Telegram-Bot-Api-Secret-Token` header.
 - The receiver stores the raw update in S3 and asynchronously invokes a processor Lambda.
-- The processor Lambda restores ignored vault state from S3 into `/tmp/my-vault`.
+- The processor Lambda restores the ignored vault state bundle from S3 into `/tmp/my-vault`.
 - The processor runs `tools/telegram_inbox.py webhook`, which uses the same Codex-backed decision, ingest, query, and acknowledgement path as local polling.
-- After processing, the processor syncs updated vault state back to S3.
+- After processing, the processor writes one compressed state bundle back to S3.
 
 The processor has `ReservedConcurrentExecutions: 1` so two Telegram messages cannot race while writing the same vault files.
 
@@ -18,6 +18,7 @@ The processor has `ReservedConcurrentExecutions: 1` so two Telegram messages can
 - No always-on instance.
 - No API Gateway bill: Lambda Function URL is used directly.
 - S3 stores the ignored vault data cheaply.
+- S3 request cost stays low because the ignored vault state is stored as one compressed bundle instead of thousands of tiny objects.
 - Lambda runs only when Telegram sends a message.
 - Secrets use encrypted Lambda environment variables rather than Secrets Manager, avoiding a recurring Secrets Manager charge.
 
@@ -63,7 +64,7 @@ Run this after the first deploy and whenever you want to push local-only vault d
 npm run cloud:sync-state
 ```
 
-The script uploads:
+The script uploads one compressed `state/vault-state.tar.gz` bundle containing:
 
 - `dashboards/`
 - `imports/`
