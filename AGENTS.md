@@ -1,18 +1,20 @@
 # AGENTS.md
 
-This vault is an Obsidian-first markdown wiki for personal knowledge capture, opportunity tracking, decision tracking, and retrieval. The agent owns the structure, bookkeeping, surfacing, filing, and maintenance. The user owns source curation, priority, and intent.
+This vault is an AWS-backed, agent-maintained markdown wiki for personal knowledge capture, opportunity tracking, decision tracking, and retrieval. The canonical vault state lives in AWS so Telegram can remain the always-on ingestion path. Local checkouts, Obsidian views, and web interfaces are working copies and operator surfaces over that canonical state. The agent owns structure, bookkeeping, surfacing, filing, sync discipline, and maintenance. The user owns source curation, priority, and intent.
 
 ## Operating Philosophy
 
 - Build for agent retrieval first. A strong file layout, stable summaries, backlinks, and clear indexes beat opaque app memory.
-- Keep all important knowledge explicit and inspectable in markdown and local assets.
+- Keep all important knowledge explicit and inspectable in markdown and portable assets.
 - Prefer universal files over provider-specific memory systems.
 - Treat the compiled wiki as a long-term artifact that multiple AI tools can operate on.
 - Store decisions, verdicts, and systems alongside knowledge so future work starts from prior reasoning instead of from scratch.
+- Treat the AWS-hosted vault state as canonical. Local environments may enrich, inspect, or render the vault, but they should sync back to the cloud state instead of silently diverging from it.
+- Optimize new development around two goals: enriching the canonical AWS knowledge base and making it easier to interface with through Telegram, web chat, Obsidian, and future surfaces.
 
 ## Directory Contract
 
-- `raw/`: canonical immutable source corpus
+- `raw/`: immutable source corpus within the vault state
 - `raw/chat-exports/`: chat exports and message dumps
 - `raw/web-clips/`: clipped web articles and pages
 - `raw/images/`: images, screenshots, and visual inspiration
@@ -39,9 +41,21 @@ This vault is an Obsidian-first markdown wiki for personal knowledge capture, op
 - `log.md`: append-only operational log
 - `raw/.manifest.json`: ingest manifest for source hashes and output summaries
 
+## Canonical State Contract
+
+- AWS is the canonical source of truth for vault data.
+- Canonical state currently consists of:
+  - the vault state bundle stored in S3
+  - immutable Telegram webhook event payloads stored in S3
+  - cloud-side processing that updates the vault state from new Telegram messages
+- GitHub is only for code, templates, infra, and documentation. Never commit personal vault data.
+- Local vault files are editable working copies for development, debugging, Obsidian browsing, browser-based enrichment, and repair work.
+- Any local workflow that changes vault content must be designed to sync changes back to the canonical AWS state.
+- Browser automation enrichment may remain local-only when that is materially cheaper or operationally simpler, but any durable metadata or note updates produced from it should be written back into canonical state.
+
 ## Source Handling
 
-- Treat everything inside `raw/` and `imports/` as immutable.
+- Treat everything inside `raw/` and append-only ingress logs under `imports/` as immutable once captured into canonical state.
 - Never rewrite or delete a user-provided export.
 - Record source provenance in canonical notes via `source_export` and `source_excerpt`.
 - Prefer storing source artifacts in `raw/`.
@@ -49,6 +63,7 @@ This vault is an Obsidian-first markdown wiki for personal knowledge capture, op
 - Treat `imports/whatsapp-inbox/` as the staging area for self-group WhatsApp exports before they are copied into `raw/chat-exports/`.
 - Treat `imports/telegram-inbox/` as the live normalized stream for bot-captured Telegram messages.
 - Treat `raw/telegram-updates/` as the immutable append-only raw source for Telegram bot updates.
+- Treat S3-backed canonical state as the master copy for those artifacts and notes. Local copies are mirrors or temporary workspaces unless explicitly synced back.
 
 ## Canonical Note Rules
 
@@ -212,6 +227,19 @@ When the user provides a new export:
 20. Update `index.md` if a new durable page type or topic page was created.
 21. If the ingest reveals a reusable question answer, brief, or synthesis, write it to `outputs/` and link it back into the wiki.
 22. Maintain an artifact capture queue for notes whose live context is too weak for reliable retrieval.
+
+## Cloud-First Development Rules
+
+- Default to building against the AWS-backed canonical vault, not a purely local vault.
+- New ingestion paths should assume the machine may be offline and should recover cleanly from queued cloud-side events.
+- New interfaces should read from and write to canonical AWS state, either directly or through a sync layer that preserves cloud canon.
+- Prefer designs that expose agent traces, citations, decisions, and retrieval context cleanly across Telegram and web surfaces.
+- Keep browser-based enrichment optional and local when it is too expensive or brittle for cloud execution.
+- When adding features, prioritize:
+  - better canonical data quality
+  - better retrieval and surfacing
+  - better interoperability across interfaces
+  - safer sync semantics between local tools and AWS state
 
 ## Job-Specific Rules
 
