@@ -351,12 +351,13 @@ def invoke_vault_query_agent(
     prior_thread_id: str | None,
 ) -> dict[str, Any]:
     script_path = vault_root / "tools" / "telegram_vault_query.mjs"
+    resume_threads = os.environ.get("VAULT_DISABLE_CODEX_THREAD_RESUME", "").strip() != "1"
     payload = {
         "model": model,
         "reasoningEffort": reasoning_effort,
         "workingDirectory": str(vault_root),
         "question": question,
-        "threadId": prior_thread_id,
+        "threadId": prior_thread_id if resume_threads else None,
         "includeWebSearch": True,
     }
     env = os.environ.copy()
@@ -449,12 +450,13 @@ def invoke_codex_agent(
     prior_thread_id: str | None,
 ) -> dict[str, Any]:
     script_path = vault_root / "tools" / "telegram_codex_agent.mjs"
+    resume_threads = os.environ.get("VAULT_DISABLE_CODEX_THREAD_RESUME", "").strip() != "1"
     payload = {
         "model": agent_model,
         "reasoningEffort": agent_reasoning_effort,
         "workingDirectory": str(vault_root),
         "additionalDirectories": [str(vault_root / "raw"), str(vault_root / "imports"), str(vault_root / "items")],
-        "threadId": prior_thread_id,
+        "threadId": prior_thread_id if resume_threads else None,
         "instructions": {
             "ack_rule": "Send a thumbs up only after the message was successfully ingested and all requested local actions completed.",
             "message_context_rule": "Preserve user-written context or instructions that accompany links.",

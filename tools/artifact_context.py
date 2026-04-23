@@ -40,7 +40,7 @@ class QueueRecord:
 
 
 def load_note(path: Path) -> tuple[dict[str, Any], str]:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8", errors="ignore")
     if not text.startswith("---\n"):
         raise ValueError(f"{path} does not start with frontmatter")
     _, rest = text.split("---\n", 1)
@@ -220,9 +220,12 @@ def classify_issue(data: dict[str, Any], body: str, context_lines: list[str]) ->
 def collect_queue(vault_root: Path) -> list[QueueRecord]:
     records: list[QueueRecord] = []
     for path in sorted((vault_root / "items").rglob("*.md")):
-        if path.name == "README.md":
+        if path.name == "README.md" or path.name.startswith("._"):
             continue
-        data, body = load_note(path)
+        try:
+            data, body = load_note(path)
+        except Exception:
+            continue
         context_lines = extract_section_lines(body, "Retrieved Context") or extract_section_lines(body, "Role Context")
         if not context_lines:
             continue

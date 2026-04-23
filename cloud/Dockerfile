@@ -9,7 +9,7 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-RUN pip install --no-cache-dir boto3 requests
+RUN pip install --no-cache-dir boto3 requests pyyaml beautifulsoup4
 
 COPY AGENTS.md CLAUDE.md GEMINI.md README.md WIKI.md ./
 COPY bin ./bin

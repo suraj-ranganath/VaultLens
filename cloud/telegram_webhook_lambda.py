@@ -221,10 +221,23 @@ def iter_state_paths() -> list[Path]:
 
 
 def run_telegram_webhook(update: dict[str, Any]) -> dict[str, Any]:
+    home_dir = WORK_ROOT / ".home"
+    codex_home = WORK_ROOT / ".codex"
+    npm_cache = WORK_ROOT / ".npm"
+    for directory in (home_dir, codex_home, npm_cache):
+        directory.mkdir(parents=True, exist_ok=True)
+
     env = os.environ.copy()
     env.setdefault("OPENAI_API_KEY", required_env("OPENAI_API_KEY"))
     env.setdefault("TELEGRAM_BOT_TOKEN", required_env("TELEGRAM_BOT_TOKEN"))
     env.setdefault("PATH", os.environ.get("PATH", ""))
+    env["HOME"] = str(home_dir)
+    env["CODEX_HOME"] = str(codex_home)
+    env["NPM_CONFIG_CACHE"] = str(npm_cache)
+    env["XDG_CACHE_HOME"] = str(WORK_ROOT / ".cache")
+    env["XDG_CONFIG_HOME"] = str(WORK_ROOT / ".config")
+    env["XDG_DATA_HOME"] = str(WORK_ROOT / ".local" / "share")
+    env["VAULT_DISABLE_CODEX_THREAD_RESUME"] = "1"
 
     command = [
         "python3",
@@ -256,7 +269,7 @@ def run_telegram_webhook(update: dict[str, Any]) -> dict[str, Any]:
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "telegram webhook processor failed")
-    return json.loads(result.stdout)
+    return parse_json_output(result.stdout)
 
 
 def state_prefix() -> str:
@@ -277,6 +290,25 @@ def required_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def parse_json_output(raw: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    text = str(raw or "").strip()
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            parsed, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        trailing = text[index + end :].strip()
+        if trailing:
+            continue
+        if not isinstance(parsed, dict):
+            raise RuntimeError("Webhook processor did not return a JSON object")
+        return parsed
+    raise RuntimeError(f"Webhook processor did not return parseable JSON: {text[:400]}")
 
 
 def http_response(status_code: int, payload: dict[str, Any]) -> dict[str, Any]:
