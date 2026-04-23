@@ -71,6 +71,9 @@ Rules:
 - If the message is primarily asking a question that should be answered from the vault, request answer_vault_query.
 - For pure questions, usually set storeInVault=false unless the message also asks to remember something.
 - If attachments are present, use their extracted context and saved artifact paths when deciding classification and importance.
+- Treat screenshots, photos, and image-heavy messages with useful information as real vault content, not as low-value attachments.
+- If an image contains technical notes, article screenshots, job details, event details, reminders, or generally useful reference information, usually store it in the vault.
+- Only ignore attachment-heavy messages when they are genuinely trivial, accidental, or non-informative.
 - Only request live metadata refresh when it is clearly worth the extra work.
 - Only request rebuild_artifact_capture_queue when the message likely introduces a weak or blocked link that will need supporting artifacts later.
 - Preserve user-added context or instructions in your reasoning and summaries.

@@ -117,12 +117,14 @@ Search discipline:
 3. Read the most relevant dashboard or topic/project page next.
 4. Use \`rg\` and \`rg --files\` to find candidate notes before opening files.
 5. Prefer canonical notes under \`items/\`, \`topics/\`, \`projects/\`, \`outputs/\`, and \`dashboards/\`.
-6. Only look at \`raw/\` if the canonical notes are insufficient.
-7. Do not modify, create, or delete any files.
-8. Keep the tool path efficient. Avoid opening lots of irrelevant files.
+6. If the user asks how something was ingested, stored, classified, or processed, inspect \`imports/telegram-inbox/\`, especially processed update logs and agent decision traces.
+7. Only look at \`raw/\` if the canonical notes are insufficient.
+8. Do not modify, create, or delete any files.
+9. Keep the tool path efficient. Avoid opening lots of irrelevant files.
 
 Answering rules:
 - treat the local vault as the source of truth
+- for ingestion-history questions, use stored ingest traces and decision logs rather than guessing
 - web search is ${includeWebSearch ? "allowed only when the vault is insufficient and external context materially helps" : "disabled for this turn"}
 - cite the vault files you actually relied on in the structured \`citations\` array
 - cite paths relative to the vault root in the structured \`citations\` array
