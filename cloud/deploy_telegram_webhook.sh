@@ -28,10 +28,8 @@ AWS_ACCOUNT_ID="$(
     --cli-read-timeout 20 \
     --no-cli-pager
 )"
-RECEIVER_ECR_REPO="${STACK_NAME}-receiver"
-PROCESSOR_ECR_REPO="${STACK_NAME}-processor"
-RECEIVER_ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${RECEIVER_ECR_REPO}"
-PROCESSOR_ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${PROCESSOR_ECR_REPO}"
+ECR_REPO="${STACK_NAME}-lambda"
+ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
 
 if [ -z "${TELEGRAM_WEBHOOK_SECRET:-}" ]; then
   TELEGRAM_WEBHOOK_SECRET="$(openssl rand -hex 32)"
@@ -50,8 +48,7 @@ export VAULT_AGENT_MODEL
 export VAULT_AGENT_REASONING_EFFORT
 export STACK_NAME
 export AWS_REGION
-export RECEIVER_ECR_URI
-export PROCESSOR_ECR_URI
+export ECR_URI
 
 sam build --template-file cloud/template.yaml
 
@@ -73,8 +70,7 @@ ensure_ecr_repo() {
     --no-cli-pager >/dev/null
 }
 
-ensure_ecr_repo "$RECEIVER_ECR_REPO"
-ensure_ecr_repo "$PROCESSOR_ECR_REPO"
+ensure_ecr_repo "$ECR_REPO"
 
 SAM_CONFIG_FILE="$(mktemp -t my-vault-sam-config).toml"
 cleanup() {
@@ -102,8 +98,7 @@ if allowed:
     overrides["TelegramAllowedChatIds"] = allowed
 
 parameter_overrides = " ".join(f"{key}={value!r}" for key, value in overrides.items())
-receiver_ecr_uri = os.environ["RECEIVER_ECR_URI"]
-processor_ecr_uri = os.environ["PROCESSOR_ECR_URI"]
+ecr_uri = os.environ["ECR_URI"]
 
 content = f"""version = 0.1
 [default.deploy.parameters]
@@ -113,8 +108,8 @@ capabilities = "CAPABILITY_IAM"
 resolve_s3 = true
 confirm_changeset = false
 image_repositories = [
-  "ReceiverFunction={receiver_ecr_uri}",
-  "ProcessorFunction={processor_ecr_uri}",
+  "ReceiverFunction={ecr_uri}",
+  "ProcessorFunction={ecr_uri}",
 ]
 parameter_overrides = {toml_string(parameter_overrides)}
 """
