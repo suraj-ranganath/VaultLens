@@ -44,7 +44,6 @@ Parameters:
 
 Globals:
   Function:
-    PackageType: Image
     Architectures:
       - arm64
     Environment:
@@ -89,6 +88,7 @@ Resources:
       DockerContext: ..
       DockerTag: vault-telegram-webhook
     Properties:
+      PackageType: Image
       Timeout: 15
       MemorySize: !Ref ReceiverMemoryMb
       Environment:
@@ -108,6 +108,7 @@ Resources:
       DockerContext: ..
       DockerTag: vault-telegram-processor
     Properties:
+      PackageType: Image
       Timeout: 900
       MemorySize: !Ref ProcessorMemoryMb
       ReservedConcurrentExecutions: 1

@@ -19,6 +19,19 @@ AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
 VAULT_AGENT_MODEL="${VAULT_AGENT_MODEL:-gpt-5.4}"
 VAULT_AGENT_REASONING_EFFORT="${VAULT_AGENT_REASONING_EFFORT:-medium}"
 TELEGRAM_ALLOWED_CHAT_IDS="${TELEGRAM_ALLOWED_CHAT_IDS:-}"
+AWS_ACCOUNT_ID="$(
+  aws sts get-caller-identity \
+    --query Account \
+    --output text \
+    --region "$AWS_REGION" \
+    --cli-connect-timeout 5 \
+    --cli-read-timeout 20 \
+    --no-cli-pager
+)"
+RECEIVER_ECR_REPO="${STACK_NAME}-receiver"
+PROCESSOR_ECR_REPO="${STACK_NAME}-processor"
+RECEIVER_ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${RECEIVER_ECR_REPO}"
+PROCESSOR_ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${PROCESSOR_ECR_REPO}"
 
 if [ -z "${TELEGRAM_WEBHOOK_SECRET:-}" ]; then
   TELEGRAM_WEBHOOK_SECRET="$(openssl rand -hex 32)"
@@ -29,28 +42,96 @@ if [ -z "${TELEGRAM_WEBHOOK_SECRET:-}" ]; then
   printf "Generated TELEGRAM_WEBHOOK_SECRET and appended it to .env.local\n"
 fi
 
+export OPENAI_API_KEY
+export TELEGRAM_BOT_TOKEN
+export TELEGRAM_WEBHOOK_SECRET
+export TELEGRAM_ALLOWED_CHAT_IDS
+export VAULT_AGENT_MODEL
+export VAULT_AGENT_REASONING_EFFORT
+export STACK_NAME
+export AWS_REGION
+export RECEIVER_ECR_URI
+export PROCESSOR_ECR_URI
+
 sam build --template-file cloud/template.yaml
 
-sam deploy \
-  --stack-name "$STACK_NAME" \
-  --region "$AWS_REGION" \
-  --capabilities CAPABILITY_IAM \
-  --resolve-s3 \
-  --resolve-image-repos \
-  --no-confirm-changeset \
-  --parameter-overrides \
-    OpenAIApiKey="$OPENAI_API_KEY" \
-    TelegramBotToken="$TELEGRAM_BOT_TOKEN" \
-    TelegramWebhookSecret="$TELEGRAM_WEBHOOK_SECRET" \
-    TelegramAllowedChatIds="$TELEGRAM_ALLOWED_CHAT_IDS" \
-    VaultAgentModel="$VAULT_AGENT_MODEL" \
-    VaultAgentReasoningEffort="$VAULT_AGENT_REASONING_EFFORT"
+ensure_ecr_repo() {
+  local repo_name="$1"
+  aws ecr describe-repositories \
+    --repository-names "$repo_name" \
+    --region "$AWS_REGION" \
+    --cli-connect-timeout 5 \
+    --cli-read-timeout 20 \
+    --no-cli-pager >/dev/null 2>&1 && return 0
+
+  aws ecr create-repository \
+    --repository-name "$repo_name" \
+    --region "$AWS_REGION" \
+    --image-scanning-configuration scanOnPush=false \
+    --cli-connect-timeout 5 \
+    --cli-read-timeout 20 \
+    --no-cli-pager >/dev/null
+}
+
+ensure_ecr_repo "$RECEIVER_ECR_REPO"
+ensure_ecr_repo "$PROCESSOR_ECR_REPO"
+
+SAM_CONFIG_FILE="$(mktemp -t my-vault-sam-config).toml"
+cleanup() {
+  rm -f "$SAM_CONFIG_FILE"
+}
+trap cleanup EXIT
+
+python3 - "$SAM_CONFIG_FILE" <<'PY'
+import json
+import os
+import sys
+
+def toml_string(value):
+    return json.dumps(str(value))
+
+overrides = {
+    "OpenAIApiKey": os.environ["OPENAI_API_KEY"],
+    "TelegramBotToken": os.environ["TELEGRAM_BOT_TOKEN"],
+    "TelegramWebhookSecret": os.environ["TELEGRAM_WEBHOOK_SECRET"],
+    "VaultAgentModel": os.environ["VAULT_AGENT_MODEL"],
+    "VaultAgentReasoningEffort": os.environ["VAULT_AGENT_REASONING_EFFORT"],
+}
+allowed = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
+if allowed:
+    overrides["TelegramAllowedChatIds"] = allowed
+
+parameter_overrides = " ".join(f"{key}={value!r}" for key, value in overrides.items())
+receiver_ecr_uri = os.environ["RECEIVER_ECR_URI"]
+processor_ecr_uri = os.environ["PROCESSOR_ECR_URI"]
+
+content = f"""version = 0.1
+[default.deploy.parameters]
+stack_name = {toml_string(os.environ["STACK_NAME"])}
+region = {toml_string(os.environ["AWS_REGION"])}
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+confirm_changeset = false
+image_repositories = [
+  "ReceiverFunction={receiver_ecr_uri}",
+  "ProcessorFunction={processor_ecr_uri}",
+]
+parameter_overrides = {toml_string(parameter_overrides)}
+"""
+
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write(content)
+PY
+
+sam deploy --config-file "$SAM_CONFIG_FILE"
 
 WEBHOOK_URL="$(
   aws cloudformation describe-stacks \
     --stack-name "$STACK_NAME" \
     --region "$AWS_REGION" \
     --query "Stacks[0].Outputs[?OutputKey=='ReceiverFunctionUrl'].OutputValue" \
+    --cli-connect-timeout 5 \
+    --cli-read-timeout 20 \
     --output text
 )"
 
@@ -59,10 +140,32 @@ if [ -z "$WEBHOOK_URL" ] || [ "$WEBHOOK_URL" = "None" ]; then
   exit 1
 fi
 
-curl -fsS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-  -d "url=${WEBHOOK_URL}" \
-  -d "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
-  -d 'allowed_updates=["message","edited_message","channel_post","edited_channel_post"]'
+export WEBHOOK_URL
+python3 - <<'PY'
+import json
+import os
+import urllib.parse
+import urllib.request
+
+payload = urllib.parse.urlencode(
+    {
+        "url": os.environ["WEBHOOK_URL"],
+        "secret_token": os.environ["TELEGRAM_WEBHOOK_SECRET"],
+        "allowed_updates": json.dumps(
+            ["message", "edited_message", "channel_post", "edited_channel_post"]
+        ),
+    }
+).encode("utf-8")
+request = urllib.request.Request(
+    f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/setWebhook",
+    data=payload,
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    body = json.loads(response.read().decode("utf-8"))
+if not body.get("ok"):
+    raise SystemExit(f"Telegram setWebhook failed: {body}")
+PY
 
 printf "\nTelegram webhook installed: %s\n" "$WEBHOOK_URL"
 printf "State bucket: "
@@ -70,5 +173,7 @@ aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
   --region "$AWS_REGION" \
   --query "Stacks[0].Outputs[?OutputKey=='VaultStateBucketName'].OutputValue" \
+  --cli-connect-timeout 5 \
+  --cli-read-timeout 20 \
   --output text
 printf "\n"
