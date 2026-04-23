@@ -133,6 +133,14 @@ Resources:
       FunctionUrlAuthType: NONE
       Principal: "*"
 
+  ReceiverFunctionUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ReceiverFunction
+      InvokedViaFunctionUrl: true
+      Principal: "*"
+
 Outputs:
   ReceiverFunctionUrl:
     Description: Telegram webhook endpoint. Use this URL in setWebhook.
