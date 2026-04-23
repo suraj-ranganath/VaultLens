@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Cost-effective Telegram webhook deployment for My Vault.
+
+Parameters:
+  OpenAIApiKey:
+    Type: String
+    NoEcho: true
+    Description: OpenAI API key used by the Codex SDK agent.
+  TelegramBotToken:
+    Type: String
+    NoEcho: true
+    Description: Telegram bot token.
+  TelegramWebhookSecret:
+    Type: String
+    NoEcho: true
+    Description: Random secret passed to Telegram setWebhook and validated on every webhook call.
+  TelegramAllowedChatIds:
+    Type: String
+    Default: ""
+    Description: Optional comma-separated Telegram chat IDs allowed to use the bot.
+  VaultAgentModel:
+    Type: String
+    Default: gpt-5.4
+    Description: Model used by the Telegram routing and query agents.
+  VaultAgentReasoningEffort:
+    Type: String
+    Default: medium
+    AllowedValues:
+      - low
+      - medium
+      - high
+      - xhigh
+  ProcessorMemoryMb:
+    Type: Number
+    Default: 1024
+    MinValue: 512
+    MaxValue: 4096
+  ReceiverMemoryMb:
+    Type: Number
+    Default: 512
+    MinValue: 128
+    MaxValue: 1024
+
+Globals:
+  Function:
+    PackageType: Image
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        OPENAI_API_KEY: !Ref OpenAIApiKey
+        TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
+        TELEGRAM_ALLOWED_CHAT_IDS: !Ref TelegramAllowedChatIds
+        TELEGRAM_WEBHOOK_SECRET: !Ref TelegramWebhookSecret
+        VAULT_AGENT_MODEL: !Ref VaultAgentModel
+        VAULT_AGENT_REASONING_EFFORT: !Ref VaultAgentReasoningEffort
+        VAULT_STATE_BUCKET: !Ref VaultStateBucket
+        VAULT_STATE_PREFIX: state
+        VAULT_WEBHOOK_EVENTS_PREFIX: webhook-events
+        TELEGRAM_SESSION_NAME: telegram-live
+
+Resources:
+  VaultStateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireWebhookEventBackups
+            Status: Enabled
+            Prefix: webhook-events/
+            ExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ReceiverFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      Dockerfile: cloud/Dockerfile
+      DockerContext: ..
+      DockerTag: vault-telegram-webhook
+    Properties:
+      Timeout: 15
+      MemorySize: !Ref ReceiverMemoryMb
+      Environment:
+        Variables:
+          VAULT_LAMBDA_MODE: receiver
+          VAULT_PROCESSOR_FUNCTION_NAME: !Ref ProcessorFunction
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref VaultStateBucket
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ProcessorFunction
+
+  ProcessorFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      Dockerfile: cloud/Dockerfile
+      DockerContext: ..
+      DockerTag: vault-telegram-processor
+    Properties:
+      Timeout: 900
+      MemorySize: !Ref ProcessorMemoryMb
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          VAULT_LAMBDA_MODE: processor
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref VaultStateBucket
+
+  ReceiverFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt ReceiverFunction.Arn
+
+  ReceiverFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: !Ref ReceiverFunction
+      FunctionUrlAuthType: NONE
+      Principal: "*"
+
+Outputs:
+  ReceiverFunctionUrl:
+    Description: Telegram webhook endpoint. Use this URL in setWebhook.
+    Value: !GetAtt ReceiverFunctionUrl.FunctionUrl
+  VaultStateBucketName:
+    Description: S3 bucket that stores ignored vault data for the cloud worker.
+    Value: !Ref VaultStateBucket
+  ProcessorFunctionName:
+    Description: Single-concurrency worker that runs the Codex-backed vault pipeline.
+    Value: !Ref ProcessorFunction

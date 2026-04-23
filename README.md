@@ -112,6 +112,17 @@ npm run telegram:run
 
 The Telegram receiver stores raw updates locally, appends a normalized inbox stream, lets a local Codex agent decide how to classify or file each message, and acknowledges successful ingestion with `👍`. If the machine is down, the next sync catches up from Telegram history.
 
+### 4b. Deploy Telegram ingestion to AWS webhooks
+
+For always-on cloud ingestion without an always-on server:
+
+```bash
+npm run cloud:deploy
+npm run cloud:sync-state
+```
+
+See [cloud/README.md](cloud/README.md) for the AWS Lambda Function URL + S3 state architecture. The cloud path uses Telegram webhooks, validates a Telegram webhook secret, invokes a single-concurrency processor, and runs the same Codex-backed Telegram agent used locally.
+
 ### 5. Run a health check directly
 
 ```bash

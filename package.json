@@ -10,7 +10,10 @@
     "rebuild:dashboards": "python3 tools/rebuild_dashboards.py",
     "enrich:browser:recent": "node tools/enrich_with_browser.mjs . 120 4 30",
     "telegram:sync": "python3 tools/telegram_inbox.py sync --vault-root .",
-    "telegram:run": "python3 tools/telegram_inbox.py run --vault-root ."
+    "telegram:run": "python3 tools/telegram_inbox.py run --vault-root .",
+    "telegram:webhook:test": "python3 tools/telegram_inbox.py webhook --vault-root . --session-name telegram-webhook-test",
+    "cloud:deploy": "bash cloud/deploy_telegram_webhook.sh",
+    "cloud:sync-state": "bash cloud/sync_state_to_s3.sh"
   },
   "keywords": [],
   "author": "suraj <suraj.ranganath@gmail.com> (http://surajr.com/)",

@@ -3,6 +3,7 @@
 *.env
 
 node_modules/
+.aws-sam/
 tools/__pycache__/
 *.pyc
 

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -620,17 +621,46 @@ def sync_once(
     agent_model: str,
     agent_reasoning_effort: str,
     openai_api_key: str,
+    mode: str = "sync",
+) -> dict[str, Any]:
+    inbox_dir, raw_updates_dir = ensure_directories(vault_root)
+    state = load_state(inbox_dir)
+    offset = state.get("last_update_id")
+    if offset is not None:
+        offset = int(offset) + 1
+
+    updates = get_updates(token, offset=offset, poll_timeout=poll_timeout)
+    return process_update_batch(
+        vault_root=vault_root,
+        token=token,
+        session_name=session_name,
+        allowed_chat_ids=allowed_chat_ids,
+        ingest_after_sync=ingest_after_sync,
+        agent_model=agent_model,
+        agent_reasoning_effort=agent_reasoning_effort,
+        openai_api_key=openai_api_key,
+        updates=updates,
+        mode=mode,
+    )
+
+
+def process_update_batch(
+    vault_root: Path,
+    token: str,
+    session_name: str,
+    allowed_chat_ids: set[int],
+    ingest_after_sync: bool,
+    agent_model: str,
+    agent_reasoning_effort: str,
+    openai_api_key: str,
+    updates: list[dict[str, Any]],
+    mode: str,
 ) -> dict[str, Any]:
     inbox_dir, raw_updates_dir = ensure_directories(vault_root)
     state = load_state(inbox_dir)
     processed_updates_file = processed_updates_path(inbox_dir, session_name)
     decisions_file = agent_decisions_path(inbox_dir, session_name)
     processed_update_ids = load_processed_update_ids(processed_updates_file)
-    offset = state.get("last_update_id")
-    if offset is not None:
-        offset = int(offset) + 1
-
-    updates = get_updates(token, offset=offset, poll_timeout=poll_timeout)
     raw_file = raw_updates_path(raw_updates_dir, session_name)
     accepted = 0
     acked = 0
@@ -771,6 +801,7 @@ def sync_once(
     save_state(inbox_dir, state)
 
     return {
+        "mode": mode,
         "updates_seen": len(updates),
         "accepted_messages": accepted,
         "agent_runs": agent_runs,
@@ -808,8 +839,9 @@ def run_loop(
             agent_model=agent_model,
             agent_reasoning_effort=agent_reasoning_effort,
             openai_api_key=openai_api_key,
+            mode="run",
         )
-        print(json.dumps({"mode": "run", **result}, indent=2), flush=True)
+        print(json.dumps(result, indent=2), flush=True)
         time.sleep(loop_interval)
 
 
@@ -842,6 +874,17 @@ def main() -> None:
     run_parser = subparsers.add_parser("run", parents=[common], help="Continuously poll Telegram and ingest new messages.")
     run_parser.add_argument("--loop-interval", type=int, default=DEFAULT_LOOP_INTERVAL_SECONDS)
 
+    webhook_parser = subparsers.add_parser(
+        "webhook",
+        parents=[common],
+        help="Process one or more Telegram webhook updates from stdin without polling Telegram.",
+    )
+    webhook_parser.add_argument(
+        "--update-json",
+        default="",
+        help="Telegram update JSON. If omitted, JSON is read from stdin.",
+    )
+
     args = parser.parse_args()
     vault_root = args.vault_root.resolve()
     load_local_env(vault_root)
@@ -866,6 +909,27 @@ def main() -> None:
             agent_model=args.agent_model,
             agent_reasoning_effort=args.agent_reasoning_effort,
             openai_api_key=openai_api_key,
+        )
+        print(json.dumps(result, indent=2))
+        return
+
+    if args.command == "webhook":
+        raw_update = str(args.update_json or sys.stdin.read() or "").strip()
+        if not raw_update:
+            raise SystemExit("Missing webhook update JSON on --update-json or stdin.")
+        payload = json.loads(raw_update)
+        updates = payload if isinstance(payload, list) else [payload]
+        result = process_update_batch(
+            vault_root=vault_root,
+            token=token,
+            session_name=args.session_name,
+            allowed_chat_ids=allowed_chat_ids,
+            ingest_after_sync=ingest_after_sync,
+            agent_model=args.agent_model,
+            agent_reasoning_effort=args.agent_reasoning_effort,
+            openai_api_key=openai_api_key,
+            updates=updates,
+            mode="webhook",
         )
         print(json.dumps(result, indent=2))
         return
