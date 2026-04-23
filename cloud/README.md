@@ -41,6 +41,31 @@ STACK_NAME=my-vault-telegram
 
 `TELEGRAM_ALLOWED_CHAT_IDS` is optional, but strongly recommended so only your Telegram chat can use the bot.
 
+## Google Calendar Actions
+
+Calendar writes use the Google Workspace CLI (`gws`) bundled through npm. The Telegram worker always asks for clarification or confirmation before calling `gws`.
+
+Local setup:
+
+```bash
+gws auth setup
+gws auth login --scopes calendar
+```
+
+Cloud setup:
+
+```bash
+gws auth export --unmasked > /tmp/gws-credentials.json
+```
+
+Then put the one-line JSON value into `.env.local`:
+
+```bash
+GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON='{"...":"..."}'
+```
+
+The deploy script passes this as a no-echo CloudFormation parameter. The Lambda writes it to `/tmp/my-vault/.runtime/google-workspace-credentials.json` at runtime and points `gws` at that file. Do not commit this value.
+
 ## Deploy
 
 ```bash

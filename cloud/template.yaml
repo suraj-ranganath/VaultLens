@@ -19,6 +19,11 @@ Parameters:
     Type: String
     Default: ""
     Description: Optional comma-separated Telegram chat IDs allowed to use the bot.
+  GoogleWorkspaceCliCredentialsJson:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Optional exported Google Workspace CLI credentials JSON used by calendar actions.
   VaultAgentModel:
     Type: String
     Default: gpt-5.4
@@ -52,6 +57,7 @@ Globals:
         TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
         TELEGRAM_ALLOWED_CHAT_IDS: !Ref TelegramAllowedChatIds
         TELEGRAM_WEBHOOK_SECRET: !Ref TelegramWebhookSecret
+        GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON: !Ref GoogleWorkspaceCliCredentialsJson
         VAULT_AGENT_MODEL: !Ref VaultAgentModel
         VAULT_AGENT_REASONING_EFFORT: !Ref VaultAgentReasoningEffort
         VAULT_STATE_BUCKET: !Ref VaultStateBucket

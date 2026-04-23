@@ -112,6 +112,8 @@ npm run telegram:run
 
 The Telegram receiver stores raw updates locally, appends a normalized inbox stream, lets a local Codex agent decide how to classify or file each message, and acknowledges successful ingestion with `👍`. If the machine is down, the next sync catches up from Telegram history.
 
+Calendar requests sent to Telegram use a separate confirmation-first flow. The agent can extract event details from text or image context, ask for missing details, ask you to confirm the final event plan, and then call Google Calendar through `gws`. Created event IDs are logged so follow-up messages like "move the previous event" have concrete history to work from.
+
 ### 4b. Deploy Telegram ingestion to AWS webhooks
 
 For always-on cloud ingestion without an always-on server:

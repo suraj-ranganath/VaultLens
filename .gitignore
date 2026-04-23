@@ -5,6 +5,7 @@
 
 node_modules/
 .aws-sam/
+.runtime/
 tools/__pycache__/
 *.pyc
 

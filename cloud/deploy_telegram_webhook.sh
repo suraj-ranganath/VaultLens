@@ -96,6 +96,9 @@ overrides = {
 allowed = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
 if allowed:
     overrides["TelegramAllowedChatIds"] = allowed
+credentials_json = os.environ.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON", "").strip()
+if credentials_json:
+    overrides["GoogleWorkspaceCliCredentialsJson"] = credentials_json
 
 parameter_overrides = " ".join(f"{key}={value!r}" for key, value in overrides.items())
 ecr_uri = os.environ["ECR_URI"]

@@ -32,9 +32,18 @@ STATE_FILE_NAME = ".telegram_state.json"
 RAW_UPDATES_FILE_NAME = "telegram-updates.jsonl"
 PROCESSED_UPDATES_FILE_NAME = ".telegram_processed_updates.jsonl"
 AGENT_DECISIONS_FILE_NAME = "telegram-agent-decisions.jsonl"
+CALENDAR_ACTIONS_FILE_NAME = "telegram-calendar-actions.jsonl"
 DEFAULT_AGENT_MODEL = "gpt-5.4"
 ATTACHMENT_ANALYSIS_MAX_BYTES = 8 * 1024 * 1024
 ATTACHMENT_ANALYSIS_TIMEOUT_SECONDS = 90
+DEFAULT_CALENDAR_ID = "primary"
+DEFAULT_TIMEZONE = "America/Los_Angeles"
+CALENDAR_INTENT_RE = re.compile(
+    r"\b(calendar|cal|gcal|schedule|scheduled|save (?:this )?(?:event|class|meeting)|add (?:this )?(?:event|class|meeting)|"
+    r"put (?:this )?on (?:my )?calendar|reschedule|move (?:the )?(?:event|class|meeting)|modify (?:the )?(?:event|class|meeting)|"
+    r"update (?:the )?(?:event|class|meeting)|cancel (?:the )?(?:event|class|meeting)|delete (?:the )?(?:event|class|meeting))\b",
+    re.IGNORECASE,
+)
 
 
 def read_json(path: Path, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -578,6 +587,8 @@ def load_state(inbox_dir: Path) -> dict[str, Any]:
             "stream_file": "",
             "agent_threads": {},
             "query_threads": {},
+            "calendar_pending": {},
+            "calendar_history": [],
         },
     )
 
@@ -620,6 +631,10 @@ def processed_updates_path(inbox_dir: Path, session_name: str) -> Path:
 
 def agent_decisions_path(inbox_dir: Path, session_name: str) -> Path:
     return inbox_dir / f"{session_name} {AGENT_DECISIONS_FILE_NAME}"
+
+
+def calendar_actions_path(inbox_dir: Path, session_name: str) -> Path:
+    return inbox_dir / f"{session_name} {CALENDAR_ACTIONS_FILE_NAME}"
 
 
 def load_processed_update_ids(path: Path) -> set[int]:
@@ -677,6 +692,210 @@ def normalize_agent_decision(decision: dict[str, Any]) -> dict[str, Any]:
         normalized["acknowledgement"] = str(normalized.get("acknowledgement") or "").strip()
 
     return normalized
+
+
+def has_calendar_pending(state: dict[str, Any], chat_id: int) -> bool:
+    return bool((state.get("calendar_pending") or {}).get(str(chat_id)))
+
+
+def should_run_calendar_agent(normalized_message: dict[str, Any], state: dict[str, Any]) -> bool:
+    chat_id = int(normalized_message["chat_id"])
+    if has_calendar_pending(state, chat_id):
+        return True
+    return bool(CALENDAR_INTENT_RE.search(str(normalized_message.get("raw_text") or "")))
+
+
+def recent_calendar_history(state: dict[str, Any], chat_id: int, limit: int = 8) -> list[dict[str, Any]]:
+    records = []
+    for record in state.get("calendar_history") or []:
+        if int(record.get("chat_id") or 0) == int(chat_id):
+            records.append(record)
+    return records[-limit:]
+
+
+def invoke_calendar_agent(
+    vault_root: Path,
+    openai_api_key: str,
+    message: dict[str, Any],
+    pending_request: dict[str, Any] | None,
+    history: list[dict[str, Any]],
+    model: str,
+    reasoning_effort: str,
+) -> dict[str, Any]:
+    script_path = vault_root / "tools" / "telegram_calendar_agent.mjs"
+    payload = {
+        "model": model,
+        "reasoningEffort": reasoning_effort,
+        "workingDirectory": str(vault_root),
+        "message": message,
+        "pendingCalendarRequest": pending_request,
+        "recentCalendarHistory": history,
+        "timezone": os.environ.get("VAULT_DEFAULT_TIMEZONE", DEFAULT_TIMEZONE),
+        "currentDate": CURRENT_DATE.isoformat(),
+    }
+    env = os.environ.copy()
+    env["OPENAI_API_KEY"] = openai_api_key
+    result = subprocess.run(
+        ["node", str(script_path)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        cwd=vault_root,
+        env=env,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Calendar agent process failed")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Calendar agent returned invalid JSON: {exc}") from exc
+
+
+def gws_command(vault_root: Path) -> list[str]:
+    local = vault_root / "node_modules" / ".bin" / "gws"
+    if local.exists():
+        return [str(local)]
+    return ["gws"]
+
+
+def calendar_event_body(event: dict[str, Any]) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "summary": str(event.get("summary") or "Untitled event").strip(),
+        "location": str(event.get("location") or "").strip(),
+        "description": str(event.get("description") or "").strip(),
+    }
+    timezone = str(event.get("timeZone") or os.environ.get("VAULT_DEFAULT_TIMEZONE") or DEFAULT_TIMEZONE).strip()
+    if event.get("allDay"):
+        body["start"] = {"date": str(event.get("start") or "")[:10]}
+        body["end"] = {"date": str(event.get("end") or "")[:10]}
+    else:
+        body["start"] = {"dateTime": str(event.get("start") or "").strip(), "timeZone": timezone}
+        body["end"] = {"dateTime": str(event.get("end") or "").strip(), "timeZone": timezone}
+    recurrence = [str(item).strip() for item in event.get("recurrence") or [] if str(item).strip()]
+    if recurrence:
+        body["recurrence"] = recurrence
+    attendees = [str(item).strip() for item in event.get("attendees") or [] if str(item).strip()]
+    if attendees:
+        body["attendees"] = [{"email": email} for email in attendees]
+    return {key: value for key, value in body.items() if value not in {"", [], {}}}
+
+
+def configure_gws_credentials(vault_root: Path, env: dict[str, str]) -> None:
+    credentials_json = os.environ.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON", "").strip()
+    if credentials_json and "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE" not in env:
+        path = vault_root / ".runtime" / "google-workspace-credentials.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(credentials_json)
+        env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(path)
+
+
+def run_gws(vault_root: Path, args: list[str], payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    env = os.environ.copy()
+    configure_gws_credentials(vault_root, env)
+    command = gws_command(vault_root) + args
+    if payload is not None:
+        command.extend(["--json", json.dumps(payload)])
+    result = subprocess.run(command, text=True, capture_output=True, cwd=vault_root, env=env, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "gws command failed"
+        raise RuntimeError(detail)
+    stdout = result.stdout.strip()
+    if not stdout:
+        return {}
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        return {"raw": stdout}
+
+
+def execute_calendar_plan(vault_root: Path, plan: dict[str, Any]) -> list[dict[str, Any]]:
+    calendar_id = str(plan.get("targetCalendarId") or DEFAULT_CALENDAR_ID).strip() or DEFAULT_CALENDAR_ID
+    operation = str(plan.get("operation") or "none").strip()
+    results: list[dict[str, Any]] = []
+
+    if operation == "create":
+        for event in plan.get("events") or []:
+            created = run_gws(
+                vault_root,
+                ["calendar", "events", "insert", "--params", json.dumps({"calendarId": calendar_id})],
+                calendar_event_body(event),
+            )
+            results.append({"operation": "create", "calendar_id": calendar_id, "event": created, "input": event})
+        return results
+
+    if operation == "update":
+        event_id = str(plan.get("targetEventId") or "").strip()
+        if not event_id:
+            raise RuntimeError("Calendar update requested without targetEventId")
+        events = plan.get("events") or []
+        if not events:
+            raise RuntimeError("Calendar update requested without event details")
+        updated = run_gws(
+            vault_root,
+            ["calendar", "events", "patch", "--params", json.dumps({"calendarId": calendar_id, "eventId": event_id})],
+            calendar_event_body(events[0]),
+        )
+        results.append({"operation": "update", "calendar_id": calendar_id, "event_id": event_id, "event": updated, "input": events[0]})
+        return results
+
+    if operation == "delete":
+        event_id = str(plan.get("targetEventId") or "").strip()
+        if not event_id:
+            raise RuntimeError("Calendar delete requested without targetEventId")
+        deleted = run_gws(vault_root, ["calendar", "events", "delete", "--params", json.dumps({"calendarId": calendar_id, "eventId": event_id})])
+        results.append({"operation": "delete", "calendar_id": calendar_id, "event_id": event_id, "event": deleted})
+        return results
+
+    raise RuntimeError(f"Unsupported calendar operation: {operation}")
+
+
+def format_calendar_confirmation(plan: dict[str, Any]) -> str:
+    explicit = str(plan.get("confirmationText") or "").strip()
+    if explicit:
+        return explicit
+    events = plan.get("events") or []
+    if not events:
+        return "I need a bit more detail before I can add this to your calendar."
+    lines = ["Please confirm these calendar details:"]
+    for index, event in enumerate(events, start=1):
+        summary = str(event.get("summary") or "Untitled event").strip()
+        start = str(event.get("start") or "").strip()
+        end = str(event.get("end") or "").strip()
+        location = str(event.get("location") or "").strip()
+        lines.append(f"{index}. {summary}")
+        lines.append(f"   When: {start} to {end}")
+        if location:
+            lines.append(f"   Where: {location}")
+        recurrence = ", ".join(event.get("recurrence") or [])
+        if recurrence:
+            lines.append(f"   Repeats: {recurrence}")
+    lines.append("Reply yes to save, or send corrections.")
+    return "\n".join(lines)
+
+
+def format_calendar_success(results: list[dict[str, Any]]) -> str:
+    if not results:
+        return "Calendar updated."
+    lines = []
+    for result in results:
+        operation = result.get("operation")
+        event = result.get("event") or {}
+        title = event.get("summary") or (result.get("input") or {}).get("summary") or "event"
+        if operation == "create":
+            lines.append(f"Added: {title}")
+        elif operation == "update":
+            lines.append(f"Updated: {title}")
+        elif operation == "delete":
+            lines.append("Deleted the calendar event.")
+    return "\n".join(lines)
+
+
+def extract_event_id(result: dict[str, Any]) -> str:
+    event = result.get("event") or {}
+    if isinstance(event, dict):
+        return str(event.get("id") or "").strip()
+    return ""
 
 
 def invoke_vault_query_agent(
@@ -941,6 +1160,126 @@ def execute_agent_actions(
     return results
 
 
+def handle_calendar_flow(
+    *,
+    vault_root: Path,
+    token: str,
+    session_name: str,
+    normalized_message: dict[str, Any],
+    state: dict[str, Any],
+    openai_api_key: str,
+    agent_model: str,
+    agent_reasoning_effort: str,
+) -> dict[str, Any] | None:
+    if not should_run_calendar_agent(normalized_message, state):
+        return None
+
+    inbox_dir, _ = ensure_directories(vault_root)
+    chat_id = int(normalized_message["chat_id"])
+    pending_by_chat = state.setdefault("calendar_pending", {})
+    pending_request = pending_by_chat.get(str(chat_id))
+    calendar_result = invoke_calendar_agent(
+        vault_root=vault_root,
+        openai_api_key=openai_api_key,
+        message=normalized_message,
+        pending_request=pending_request,
+        history=recent_calendar_history(state, chat_id),
+        model=agent_model,
+        reasoning_effort=agent_reasoning_effort,
+    )
+    plan = calendar_result.get("plan") or {}
+    if not plan.get("calendarIntent") and not pending_request:
+        return None
+
+    action_log: dict[str, Any] = {
+        "logged_at": datetime.now().isoformat(),
+        "chat_id": chat_id,
+        "message_id": normalized_message["message_id"],
+        "update_id": normalized_message["update_id"],
+        "message": normalized_message,
+        "pending_before": pending_request,
+        "plan": plan,
+        "thread_id": calendar_result.get("threadId"),
+        "results": [],
+    }
+
+    operation = str(plan.get("operation") or "none")
+    if operation == "cancel":
+        pending_by_chat.pop(str(chat_id), None)
+        telegram_send_message(token, chat_id=chat_id, text="Cancelled the pending calendar request.", reply_to_message_id=normalized_message["message_id"])
+        action_log["status"] = "cancelled"
+        append_jsonl(calendar_actions_path(inbox_dir, session_name), [action_log])
+        return {"status": "cancelled", "operation": operation, "answered": True, "acked": False}
+
+    if plan.get("needsClarification"):
+        question = str(plan.get("clarificationQuestion") or "What date and time should I use?").strip()
+        pending_by_chat[str(chat_id)] = {
+            "created_at": datetime.now().isoformat(),
+            "source_message": normalized_message,
+            "plan": plan,
+        }
+        telegram_send_message(token, chat_id=chat_id, text=question, reply_to_message_id=normalized_message["message_id"])
+        action_log["status"] = "clarification_requested"
+        append_jsonl(calendar_actions_path(inbox_dir, session_name), [action_log])
+        return {"status": "clarification_requested", "operation": operation, "answered": True, "acked": False}
+
+    if plan.get("needsConfirmation") or not plan.get("userConfirmed"):
+        pending_by_chat[str(chat_id)] = {
+            "created_at": datetime.now().isoformat(),
+            "source_message": normalized_message,
+            "plan": plan,
+        }
+        telegram_send_message(token, chat_id=chat_id, text=format_calendar_confirmation(plan), reply_to_message_id=normalized_message["message_id"])
+        action_log["status"] = "confirmation_requested"
+        append_jsonl(calendar_actions_path(inbox_dir, session_name), [action_log])
+        return {"status": "confirmation_requested", "operation": operation, "answered": True, "acked": False}
+
+    try:
+        results = execute_calendar_plan(vault_root, plan)
+    except Exception as exc:
+        pending_by_chat[str(chat_id)] = {
+            "created_at": datetime.now().isoformat(),
+            "source_message": normalized_message,
+            "plan": plan,
+            "last_error": f"{type(exc).__name__}: {exc}",
+        }
+        message = (
+            "I could not update Google Calendar yet.\n"
+            f"Reason: {type(exc).__name__}: {exc}\n"
+            "The request is still pending, so you can retry after calendar auth is fixed or send corrections."
+        )
+        telegram_send_message(token, chat_id=chat_id, text=message, reply_to_message_id=normalized_message["message_id"])
+        action_log["status"] = "execution_failed"
+        action_log["error"] = f"{type(exc).__name__}: {exc}"
+        append_jsonl(calendar_actions_path(inbox_dir, session_name), [action_log])
+        return {"status": "execution_failed", "operation": operation, "answered": True, "acked": False}
+
+    pending_by_chat.pop(str(chat_id), None)
+    history = state.setdefault("calendar_history", [])
+    for result in results:
+        event_id = extract_event_id(result)
+        input_event = result.get("input") or {}
+        history.append(
+            {
+                "created_at": datetime.now().isoformat(),
+                "chat_id": chat_id,
+                "operation": result.get("operation"),
+                "calendar_id": result.get("calendar_id") or plan.get("targetCalendarId") or DEFAULT_CALENDAR_ID,
+                "event_id": event_id or result.get("event_id") or "",
+                "summary": (result.get("event") or {}).get("summary") or input_event.get("summary") or "",
+                "start": (result.get("event") or {}).get("start") or input_event.get("start") or "",
+                "end": (result.get("event") or {}).get("end") or input_event.get("end") or "",
+                "source_update_id": normalized_message["update_id"],
+            }
+        )
+    state["calendar_history"] = history[-50:]
+    telegram_send_message(token, chat_id=chat_id, text=format_calendar_success(results), reply_to_message_id=normalized_message["message_id"])
+    action_log["status"] = "executed"
+    action_log["results"] = results
+    append_jsonl(calendar_actions_path(inbox_dir, session_name), [action_log])
+    return {"status": "executed", "operation": operation, "answered": True, "acked": True, "results": results}
+
+
 def append_stream(path: Path, lines: list[str]) -> None:
     if not lines:
         return
@@ -1041,6 +1380,45 @@ def process_update_batch(
 
         accepted += 1
         append_jsonl(raw_file, [update])
+
+        calendar_result = handle_calendar_flow(
+            vault_root=vault_root,
+            token=token,
+            session_name=session_name,
+            normalized_message=normalized,
+            state=state,
+            openai_api_key=openai_api_key,
+            agent_model=agent_model,
+            agent_reasoning_effort=agent_reasoning_effort,
+        )
+        if calendar_result is not None:
+            answered += 1 if calendar_result.get("answered") else 0
+            acked += 1 if calendar_result.get("acked") else 0
+            append_processed_update(
+                processed_updates_file,
+                {
+                    "processed_at": datetime.now().isoformat(),
+                    "update_id": update_id,
+                    "chat_id": chat_id,
+                    "message_id": normalized["message_id"],
+                    "stored": False,
+                    "acked": bool(calendar_result.get("acked")),
+                    "calendar_status": calendar_result.get("status"),
+                },
+            )
+            processed_update_ids.add(update_id)
+            state["last_update_id"] = update_id
+            action_records.append(
+                {
+                    "update_id": update_id,
+                    "classification": "calendar_request",
+                    "stored": False,
+                    "acked": bool(calendar_result.get("acked")),
+                    "answered": True,
+                    "actions": [f"calendar_{calendar_result.get('status')}"],
+                }
+            )
+            continue
 
         prior_thread_id = (state.get("agent_threads") or {}).get(str(chat_id))
         agent_result = invoke_codex_agent(
