@@ -67,7 +67,7 @@ LOW_SIGNAL_BLOCK_PATTERNS = (
 
 
 def load_note(path: Path) -> tuple[dict[str, Any], str]:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8", errors="ignore")
     if not text.startswith("---\n"):
         raise ValueError(f"{path} does not start with frontmatter")
     _, rest = text.split("---\n", 1)
@@ -78,6 +78,10 @@ def load_note(path: Path) -> tuple[dict[str, Any], str]:
 
 def dump_frontmatter(data: dict[str, Any]) -> str:
     return yaml.safe_dump(data, sort_keys=False, allow_unicode=True).strip()
+
+
+def iter_note_paths(folder: Path) -> list[Path]:
+    return [path for path in sorted(folder.glob("*.md")) if not path.name.startswith("._")]
 
 
 def normalize_url(url: str) -> str:
@@ -797,8 +801,11 @@ def collect_notes(vault_root: Path, cutoff: date, mode: str) -> list[Path]:
     if mode == "jobs_recent":
         folders = ["items/jobs", "items/opportunities", "items/misc"]
         for folder in folders:
-            for path in sorted((vault_root / folder).glob("*.md")):
-                data, _ = load_note(path)
+            for path in iter_note_paths(vault_root / folder):
+                try:
+                    data, _ = load_note(path)
+                except Exception:
+                    continue
                 if not (data.get("url") and is_recent(data, cutoff)):
                     continue
                 if data.get("type") == "job":
@@ -810,8 +817,11 @@ def collect_notes(vault_root: Path, cutoff: date, mode: str) -> list[Path]:
     elif mode == "knowledge_all":
         folders = ["items/articles", "items/resources", "items/events", "items/opportunities"]
         for folder in folders:
-            for path in sorted((vault_root / folder).glob("*.md")):
-                data, _ = load_note(path)
+            for path in iter_note_paths(vault_root / folder):
+                try:
+                    data, _ = load_note(path)
+                except Exception:
+                    continue
                 if not data.get("url"):
                     continue
                 if data.get("type") == "opportunity" and "job-search" in set(data.get("topics") or []):
@@ -824,8 +834,11 @@ def refresh_dashboards(vault_root: Path) -> None:
     def load_items(folders: list[str]) -> list[tuple[dict[str, Any], Path]]:
         items = []
         for folder in folders:
-            for path in sorted((vault_root / folder).glob("*.md")):
-                data, _ = load_note(path)
+            for path in iter_note_paths(vault_root / folder):
+                try:
+                    data, _ = load_note(path)
+                except Exception:
+                    continue
                 items.append((data, path))
         return items
 
@@ -1037,7 +1050,7 @@ def enrich(vault_root: Path, cutoff: date, mode: str) -> None:
             fetched_records[result["path"]] = result
 
     for path in notes:
-        original_text = path.read_text()
+        original_text = path.read_text(encoding="utf-8", errors="ignore")
         data, body = load_note(path)
         url = data.get("url") or ""
         record = fetched_records[path.relative_to(vault_root).as_posix()]
@@ -1091,7 +1104,7 @@ def enrich(vault_root: Path, cutoff: date, mode: str) -> None:
     out = write_output_summary(vault_root, records, mode)
 
     log_path = vault_root / "log.md"
-    existing = log_path.read_text()
+    existing = log_path.read_text(encoding="utf-8", errors="ignore")
     entry = (
         f"\n## [{CURRENT_DATE.isoformat()}] enrichment | Live metadata refresh ({mode})\n\n"
         f"- Checked {len(records)} notes against live pages.\n"
