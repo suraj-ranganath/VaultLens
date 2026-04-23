@@ -1,6 +1,6 @@
 FROM public.ecr.aws/lambda/python:3.12
 
-RUN dnf install -y nodejs npm && dnf clean all
+RUN dnf install -y nodejs npm tar gzip && dnf clean all
 
 WORKDIR ${LAMBDA_TASK_ROOT}
 
