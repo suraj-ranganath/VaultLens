@@ -332,6 +332,13 @@ def summarize_attachment_with_openai(
         "Return strict JSON with keys: summary, extracted_text, urls, qr_values, event_clues, job_clues, "
         "reminder_clues, needs_manual_review.\n"
         "Use short strings. event_clues, job_clues, reminder_clues must be arrays of short bullet-like strings.\n"
+        "The Telegram message context is user intent, not background noise. Let it decide what details matter most.\n"
+        "If the caption asks to create, save, add, schedule, or modify a calendar event, prioritize calendar extraction: "
+        "title, exact dates, start/end times, timezone clues, recurrence rules, class schedules, location, organizer, "
+        "registration/check-in URLs, and ambiguity that requires confirmation.\n"
+        "If the caption asks about recurring classes, extract every date/time pattern and whether a single recurrence rule or "
+        "multiple separate events is more appropriate.\n"
+        "If the caption asks to remember, revisit, summarize, apply, or follow up, prioritize the fields needed for that task.\n"
         "If this looks like a screenshot of a job post or application status, extract role/company/status/date clues.\n"
         "If this looks like an event screenshot or flyer, extract event/date/time/location/registration clues.\n"
         "If there is a QR code, decode it if possible and include the resolved text or URL in qr_values.\n"
@@ -342,7 +349,12 @@ def summarize_attachment_with_openai(
     user_parts: list[dict[str, Any]] = [
         {
             "type": "input_text",
-            "text": f"Telegram message context:\n{context or '(no caption or text supplied)'}",
+            "text": (
+                "Telegram message context / user instruction:\n"
+                f"{context or '(no caption or text supplied)'}\n\n"
+                "Extract image details that best satisfy this instruction. If the instruction is calendar-related, make "
+                "event_clues maximally useful for creating accurate calendar events."
+            ),
         },
         {
             "type": "input_image",
