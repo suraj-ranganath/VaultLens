@@ -44,6 +44,11 @@ CALENDAR_INTENT_RE = re.compile(
     r"update (?:the )?(?:event|class|meeting)|cancel (?:the )?(?:event|class|meeting)|delete (?:the )?(?:event|class|meeting))\b",
     re.IGNORECASE,
 )
+CALENDAR_CONFIRM_RE = re.compile(
+    r"^\s*(yes|yes please|yep|yeah|yup|confirm|confirmed|looks good|correct|save it|do it|add it|please save it)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
+CALENDAR_CANCEL_RE = re.compile(r"^\s*(no|nope|cancel|stop|never mind|nevermind|discard|don't|do not)\s*[.!]?\s*$", re.IGNORECASE)
 
 
 def read_json(path: Path, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -767,8 +772,15 @@ def calendar_event_body(event: dict[str, Any]) -> dict[str, Any]:
     }
     timezone = str(event.get("timeZone") or os.environ.get("VAULT_DEFAULT_TIMEZONE") or DEFAULT_TIMEZONE).strip()
     if event.get("allDay"):
-        body["start"] = {"date": str(event.get("start") or "")[:10]}
-        body["end"] = {"date": str(event.get("end") or "")[:10]}
+        start_date = str(event.get("start") or "")[:10]
+        end_date = str(event.get("end") or "")[:10]
+        if start_date and end_date and end_date <= start_date:
+            try:
+                end_date = (datetime.strptime(start_date, "%Y-%m-%d").date() + timedelta(days=1)).isoformat()
+            except ValueError:
+                pass
+        body["start"] = {"date": start_date}
+        body["end"] = {"date": end_date}
     else:
         body["start"] = {"dateTime": str(event.get("start") or "").strip(), "timeZone": timezone}
         body["end"] = {"dateTime": str(event.get("end") or "").strip(), "timeZone": timezone}
@@ -778,7 +790,7 @@ def calendar_event_body(event: dict[str, Any]) -> dict[str, Any]:
     attendees = [str(item).strip() for item in event.get("attendees") or [] if str(item).strip()]
     if attendees:
         body["attendees"] = [{"email": email} for email in attendees]
-    return {key: value for key, value in body.items() if value not in {"", [], {}}}
+    return {key: value for key, value in body.items() if value != "" and value != [] and value != {}}
 
 
 def configure_gws_credentials(vault_root: Path, env: dict[str, str]) -> None:
@@ -896,6 +908,15 @@ def extract_event_id(result: dict[str, Any]) -> str:
     if isinstance(event, dict):
         return str(event.get("id") or "").strip()
     return ""
+
+
+def confirmed_calendar_plan_from_pending(pending_request: dict[str, Any]) -> dict[str, Any]:
+    plan = dict((pending_request or {}).get("plan") or {})
+    plan["calendarIntent"] = True
+    plan["needsClarification"] = False
+    plan["needsConfirmation"] = False
+    plan["userConfirmed"] = True
+    return plan
 
 
 def invoke_vault_query_agent(
@@ -1178,16 +1199,43 @@ def handle_calendar_flow(
     chat_id = int(normalized_message["chat_id"])
     pending_by_chat = state.setdefault("calendar_pending", {})
     pending_request = pending_by_chat.get(str(chat_id))
-    calendar_result = invoke_calendar_agent(
-        vault_root=vault_root,
-        openai_api_key=openai_api_key,
-        message=normalized_message,
-        pending_request=pending_request,
-        history=recent_calendar_history(state, chat_id),
-        model=agent_model,
-        reasoning_effort=agent_reasoning_effort,
-    )
-    plan = calendar_result.get("plan") or {}
+    raw_text = str(normalized_message.get("raw_text") or "").strip()
+    calendar_result: dict[str, Any] = {}
+    if pending_request and CALENDAR_CANCEL_RE.match(raw_text):
+        pending_by_chat.pop(str(chat_id), None)
+        telegram_send_message(token, chat_id=chat_id, text="Cancelled the pending calendar request.", reply_to_message_id=normalized_message["message_id"])
+        append_jsonl(
+            calendar_actions_path(inbox_dir, session_name),
+            [
+                {
+                    "logged_at": datetime.now().isoformat(),
+                    "chat_id": chat_id,
+                    "message_id": normalized_message["message_id"],
+                    "update_id": normalized_message["update_id"],
+                    "message": normalized_message,
+                    "pending_before": pending_request,
+                    "status": "cancelled",
+                    "reason": "deterministic_cancel_reply",
+                    "results": [],
+                }
+            ],
+        )
+        return {"status": "cancelled", "operation": "cancel", "answered": True, "acked": False}
+
+    if pending_request and CALENDAR_CONFIRM_RE.match(raw_text):
+        plan = confirmed_calendar_plan_from_pending(pending_request)
+        calendar_result = {"threadId": "", "plan": plan, "deterministic": "confirm_reply"}
+    else:
+        calendar_result = invoke_calendar_agent(
+            vault_root=vault_root,
+            openai_api_key=openai_api_key,
+            message=normalized_message,
+            pending_request=pending_request,
+            history=recent_calendar_history(state, chat_id),
+            model=agent_model,
+            reasoning_effort=agent_reasoning_effort,
+        )
+        plan = calendar_result.get("plan") or {}
     if not plan.get("calendarIntent") and not pending_request:
         return None
 
