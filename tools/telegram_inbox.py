@@ -798,8 +798,33 @@ def configure_gws_credentials(vault_root: Path, env: dict[str, str]) -> None:
     if credentials_json and "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE" not in env:
         path = vault_root / ".runtime" / "google-workspace-credentials.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(credentials_json)
+        path.write_text(normalize_gws_credentials_json(credentials_json))
         env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(path)
+
+
+def normalize_gws_credentials_json(raw: str) -> str:
+    text = str(raw or "").strip()
+    candidates = [text]
+    try:
+        candidates.append(bytes(text, "utf-8").decode("unicode_escape"))
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        current = candidate.strip()
+        for _ in range(3):
+            try:
+                parsed = json.loads(current)
+            except json.JSONDecodeError:
+                break
+            if isinstance(parsed, dict):
+                return json.dumps(parsed, separators=(",", ":"))
+            if isinstance(parsed, str):
+                current = parsed.strip()
+                continue
+            break
+
+    raise RuntimeError("GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON could not be parsed as credentials JSON")
 
 
 def run_gws(vault_root: Path, args: list[str], payload: dict[str, Any] | None = None) -> dict[str, Any]:
