@@ -17,6 +17,7 @@ import yaml
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 import warnings
 
+from x_content import fetch_x_post, is_x_post_url
 
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
@@ -522,6 +523,11 @@ def apply_host_specific_context(meta: dict[str, Any], url: str) -> None:
 
 
 def extract_from_page(url: str, note: dict[str, Any]) -> dict[str, Any]:
+    if is_x_post_url(url):
+        post = fetch_x_post(url)
+        if post:
+            return post.to_meta()
+
     response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS, headers=HEADERS, allow_redirects=True)
     final_url = normalize_url(response.url)
     html = response.text
@@ -704,6 +710,10 @@ def update_generic_fields(data: dict[str, Any], meta: dict[str, Any]) -> list[st
     if meta.get("closed_hint") and data.get("status") == "open":
         data["status"] = "closed"
         changes.append("closed")
+    for field in ("source_platform", "author", "author_handle", "tweet_id"):
+        if meta.get(field) and meta[field] != data.get(field):
+            data[field] = meta[field]
+            changes.append(field)
     return changes
 
 
@@ -1130,6 +1140,8 @@ def enrich(vault_root: Path, cutoff: date, mode: str, target_paths: list[str] | 
             enrichment_lines.append(f"Page title: {meta['page_title']}")
         if meta.get("page_description"):
             enrichment_lines.append(f"Page description: {meta['page_description'][:220]}")
+        if meta.get("x_extraction_source"):
+            enrichment_lines.append(f"X extraction source: {meta['x_extraction_source']}")
         if "closed" in changes:
             enrichment_lines.append("The live page appeared closed or unavailable during enrichment.")
         if context_summary:

@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
 
+from x_content import is_x_post_url, normalize_x_url
+
 
 CURRENT_DATE = date.today()
 MESSAGE_RE = re.compile(
@@ -341,6 +343,8 @@ def normalize_url(url: str) -> str:
     if "instagram.com" in parsed.netloc and parsed.path == "/" and "u" in parse_qs(parsed.query):
         target = parse_qs(parsed.query)["u"][0]
         return normalize_url(unquote(target))
+    if is_x_post_url(url):
+        return normalize_x_url(url)
 
     netloc = parsed.netloc.lower().replace("www.", "")
     query = parse_qs(parsed.query, keep_blank_values=False)

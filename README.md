@@ -118,6 +118,8 @@ The Telegram receiver stores raw updates locally, appends a normalized inbox str
 
 Calendar requests sent to Telegram use a separate confirmation-first flow. The agent can extract event details from text or image context, ask for missing details, ask you to confirm the final event plan, and then call Google Calendar through `gws`. Created event IDs are logged so follow-up messages like "move the previous event" have concrete history to work from.
 
+X/Twitter links are normalized to stable `x.com/<handle>/status/<id>` URLs and enriched through `tools/x_content.py`. The adapter uses local `xurl` when available, otherwise falls back to Twitter's public oEmbed endpoint, so Telegram/cloud ingestion can usually recover post text, author, published date, source links, and retrieval context without Playwright.
+
 ### 4b. Deploy Telegram ingestion to AWS webhooks
 
 For always-on cloud ingestion without an always-on server:
@@ -137,6 +139,7 @@ To receive the focused daily 8am Telegram brief from the AWS-canonical vault, se
 npm run vault:health
 npm run vault:search -- "technical AI safety"
 npm run vault:heartbeat -- --dry-run
+npm run x:fetch -- https://x.com/example/status/123
 ```
 
 ### 6. Run the local web Q&A interface

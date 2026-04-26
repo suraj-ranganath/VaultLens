@@ -212,21 +212,22 @@ When the user provides a new export:
 5. When live pages are blocked, dynamic, or low-signal, prefer adding a first-party supporting artifact into `raw/` instead of trusting the URL alone.
 6. Supporting artifacts include saved web clips, pasted job descriptions, screenshots, PDFs, copied article text, transcripts, and profile captures.
 7. Attach supporting artifacts back to canonical notes so retrieval does not depend on the external website remaining accessible.
-8. When simple HTTP fetching is not enough, use browser automation agentically before giving up.
-9. Preferred browser fallback tools are Playwright or Selenium, especially for dynamic social sites and client-rendered pages.
-10. X posts are a priority case for browser fallback because plain fetches are often weak, blocked, or incomplete.
-11. Never invent `posted_on` or `deadline`.
-12. If the website does not expose a date, leave the field blank and set `date_confidence: unknown`.
-13. Assign topics, tags, `why_saved`, and `timeliness` based on the likely reason the item is worth revisiting.
-14. Create or update the canonical note for the item.
-15. If the source contains a judgment, preference, or repeated policy, create or update a `decision` or `system` note rather than burying it inside another note.
-16. Update relevant project pages when an item materially affects active work.
-17. Create backlinks between source items, topics, decisions, systems, and projects when the connection is durable.
-18. Refresh impacted dashboards, including relevance-oriented dashboards, not just deadline-oriented ones.
-19. Append an entry to `log.md`.
-20. Update `index.md` if a new durable page type or topic page was created.
-21. If the ingest reveals a reusable question answer, brief, or synthesis, write it to `outputs/` and link it back into the wiki.
-22. Maintain an artifact capture queue for notes whose live context is too weak for reliable retrieval.
+8. X posts should first go through the lightweight `tools/x_content.py` adapter, which normalizes X/Twitter status URLs, uses local `xurl` when available, and falls back to Twitter oEmbed for cloud-safe post text, author, and date extraction.
+9. When simple HTTP fetching is not enough, use browser automation agentically before giving up.
+10. Preferred browser fallback tools are Playwright or Selenium, especially for dynamic social sites and client-rendered pages.
+11. X posts remain a priority case for local browser fallback when `x_content` cannot recover enough context because plain fetches are often weak, blocked, or incomplete.
+12. Never invent `posted_on` or `deadline`.
+13. If the website does not expose a date, leave the field blank and set `date_confidence: unknown`.
+14. Assign topics, tags, `why_saved`, and `timeliness` based on the likely reason the item is worth revisiting.
+15. Create or update the canonical note for the item.
+16. If the source contains a judgment, preference, or repeated policy, create or update a `decision` or `system` note rather than burying it inside another note.
+17. Update relevant project pages when an item materially affects active work.
+18. Create backlinks between source items, topics, decisions, systems, and projects when the connection is durable.
+19. Refresh impacted dashboards, including relevance-oriented dashboards, not just deadline-oriented ones.
+20. Append an entry to `log.md`.
+21. Update `index.md` if a new durable page type or topic page was created.
+22. If the ingest reveals a reusable question answer, brief, or synthesis, write it to `outputs/` and link it back into the wiki.
+23. Maintain an artifact capture queue for notes whose live context is too weak for reliable retrieval.
 
 ## Cloud-First Development Rules
 

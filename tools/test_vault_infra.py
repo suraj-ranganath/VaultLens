@@ -231,6 +231,63 @@ tags: [misc]
             self.assertNotIn("Already Applied Role", payload["text"])
             self.assertNotIn("Low Signal Reading", payload["text"])
 
+    def test_x_oembed_payload_becomes_agent_friendly_metadata(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import x_content  # type: ignore
+
+        payload = {
+            "url": "https://twitter.com/PeterHndrsn/status/2019063646425694648",
+            "author_name": "Peter Henderson",
+            "author_url": "https://twitter.com/PeterHndrsn",
+            "html": """
+            <blockquote class="twitter-tweet">
+              <p lang="en" dir="ltr">I am collecting applications for a visiting fellow position.<br>
+              Especially interested in embodied RL <a href="https://t.co/demo">https://t.co/demo</a></p>
+              &mdash; Peter Henderson (@PeterHndrsn)
+              <a href="https://twitter.com/PeterHndrsn/status/2019063646425694648">February 4, 2026</a>
+            </blockquote>
+            """,
+        }
+
+        post = x_content.parse_oembed_payload(payload, payload["url"])
+        meta = post.to_meta()
+
+        self.assertEqual(post.tweet_id, "2019063646425694648")
+        self.assertEqual(post.url, "https://x.com/PeterHndrsn/status/2019063646425694648")
+        self.assertEqual(post.author_handle, "@PeterHndrsn")
+        self.assertEqual(post.published_on, "2026-02-04")
+        self.assertIn("visiting fellow", meta["context_summary"][0])
+        self.assertIn("Author handle: @PeterHndrsn", meta["context_highlights"])
+        self.assertEqual(meta["source_platform"], "X")
+
+    def test_live_metadata_uses_x_adapter_without_browser(self) -> None:
+        import sys
+        from unittest import mock
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import enrich_live_metadata  # type: ignore
+        import x_content  # type: ignore
+
+        post = x_content.XPost(
+            url="https://x.com/example/status/12345",
+            tweet_id="12345",
+            author_name="Example Author",
+            author_handle="@example",
+            text="A useful thread about local-first agent knowledge bases.",
+            published_on="2026-04-26",
+            source="twitter_oembed",
+        )
+
+        with mock.patch.object(enrich_live_metadata, "fetch_x_post", return_value=post):
+            meta = enrich_live_metadata.extract_from_page("https://twitter.com/example/status/12345?ref_src=twsrc", {"type": "tweet"})
+
+        self.assertEqual(meta["final_url"], "https://x.com/example/status/12345")
+        self.assertEqual(meta["published_on"], "2026-04-26")
+        self.assertEqual(meta["author_handle"], "@example")
+        self.assertIn("local-first agent", meta["context_summary"][0])
+
     def _telegram_update(self, update_id: int, timestamp: int, text: str) -> dict:
         return {
             "update_id": update_id,

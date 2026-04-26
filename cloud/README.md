@@ -11,6 +11,7 @@ This deploys the vault Telegram agent as a webhook-first AWS path.
 - The processor waits briefly, collects pending webhook events from S3, then runs `tools/telegram_inbox.py webhook` with a small batch so rapid Telegram messages can be coalesced instead of forcing separate agent turns.
 - The Telegram worker uses preview-message edits for progress, then edits that same preview into the final answer or acknowledgement when possible.
 - The query path compiles `.vault/cache/`, runs local SQLite FTS retrieval, and only then calls the Codex-backed answer agent.
+- X/Twitter links use the lightweight `tools/x_content.py` adapter during metadata enrichment. In cloud this normally uses public oEmbed; locally it can use `xurl` first when installed and authenticated.
 - After processing, the processor writes one compressed state bundle back to S3.
 
 The processor has `ReservedConcurrentExecutions: 1` so two Telegram messages cannot race while writing the same vault files. The short S3 pending-event sweep reduces redundant runs during bursts.
@@ -133,4 +134,5 @@ npm run telegram:webhook:test < /tmp/telegram-update.json
 - CloudWatch Logs for the processor show the Codex and ingest failures if a message fails.
 - Telegram retries failed webhook deliveries, and the local processed-update ledger prevents duplicate processing once state has been synced.
 - Playwright browser enrichment is intentionally not bundled with browsers in this Lambda image. Browser-heavy enrichment should stay local or move to a separate scheduled worker if it becomes essential in the cloud.
+- X/Twitter post text does not require Playwright in the common case: the cloud worker first tries the `x_content` adapter through live metadata enrichment. Browser enrichment remains the local fallback for posts that oEmbed/live adapters cannot recover.
 - `.vault/events/agent-events.jsonl` is the cross-surface event log for web queries, Telegram processing, costs, and future diagnostics.
