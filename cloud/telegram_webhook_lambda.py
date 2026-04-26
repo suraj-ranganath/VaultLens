@@ -454,7 +454,7 @@ def run_heartbeat(*, dry_run: bool = False) -> dict[str, Any]:
         capture_output=True,
         cwd=WORK_ROOT,
         env=env,
-        timeout=120,
+        timeout=int(os.environ.get("VAULT_HEARTBEAT_TIMEOUT_SECONDS", "420")),
         check=False,
     )
     if result.returncode != 0:

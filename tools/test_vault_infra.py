@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -126,7 +127,7 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
         self.assertTrue(captured["key"].startswith("webhook-events/2026/04/26/"))
         self.assertNotIn("webhook-events//", captured["key"])
 
-    def test_daily_brief_stays_focused_on_urgent_and_high_value_items(self) -> None:
+    def test_daily_brief_delegates_final_selection_to_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "items" / "jobs").mkdir(parents=True)
@@ -207,6 +208,36 @@ tags: [misc]
                 encoding="utf-8",
             )
 
+            mock_agent_result = {
+                "should_send": True,
+                "telegram_text": "Morning brief\n1. Submit scholarship form\n2. Apply to AI Lab - Research Engineer\nReading: Agent Systems Design",
+                "selected_actions": [
+                    {
+                        "title": "Submit scholarship form",
+                        "kind": "deadline",
+                        "date": "2026-04-27",
+                        "source": "items/reminders/2026-04-27 submit form.md",
+                        "why_today": "Deadline is tomorrow.",
+                        "suggested_next_step": "Submit it today.",
+                    },
+                    {
+                        "title": "AI Lab - Research Engineer",
+                        "kind": "apply_early",
+                        "date": "2026-04-25",
+                        "source": "https://example.com/job",
+                        "why_today": "Fresh high-fit role.",
+                        "suggested_next_step": "Review and apply.",
+                    },
+                ],
+                "recommended_reading": {
+                    "title": "Agent Systems Design",
+                    "source": "https://example.com/agents",
+                    "why_this_matters": "Useful for vault agent design.",
+                },
+                "rationale": "Selected urgent reminder, fresh high-fit job, and one high-impact reading.",
+            }
+            env = os.environ.copy()
+            env["VAULT_MORNING_BRIEF_AGENT_MOCK_JSON"] = json.dumps(mock_agent_result)
             proc = subprocess.run(
                 [
                     "python3",
@@ -220,14 +251,19 @@ tags: [misc]
                 text=True,
                 capture_output=True,
                 check=False,
+                env=env,
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             payload = json.loads(proc.stdout)
             self.assertTrue(payload["should_send"])
+            self.assertEqual(payload["mode"], "agentic_daily_brief")
             self.assertEqual(payload["action_count"], 2)
             self.assertEqual(payload["recommended_reading"]["title"], "Agent Systems Design")
             self.assertIn("Submit scholarship form", payload["text"])
             self.assertIn("AI Lab - Research Engineer", payload["text"])
+            self.assertIn("Selected urgent reminder", payload["agent_rationale"])
+            self.assertGreaterEqual(payload["candidate_action_count"], 2)
+            self.assertGreaterEqual(payload["candidate_reading_count"], 1)
             self.assertNotIn("Already Applied Role", payload["text"])
             self.assertNotIn("Low Signal Reading", payload["text"])
 

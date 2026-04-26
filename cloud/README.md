@@ -119,7 +119,7 @@ HEARTBEAT_ENABLED=true TELEGRAM_HEARTBEAT_CHAT_ID=123456789 npm run cloud:deploy
 
 The schedule defaults to `cron(0 8 * * ? *)` in `America/Los_Angeles`. Override with `HEARTBEAT_SCHEDULE` and `HEARTBEAT_SCHEDULE_TIMEZONE` if needed.
 
-The heartbeat path reuses the processor function, runs `tools/vault_heartbeat.py`, and avoids an LLM call. It sends a Telegram message only when the canonical vault has urgent next-7-day deadlines/reminders, fresh high-impact jobs/opportunities, or one high-value recent reading. If there is no meaningful brief, it exits after a cheap local scan without messaging you.
+The heartbeat path reuses the processor function and runs `tools/vault_heartbeat.py`. That script cheaply builds a candidate pack from deadlines, reminders, jobs, opportunities, recent saves, profile context, dashboards, and hot context, then calls `tools/vault_morning_brief_agent.mjs` to choose and write the actual brief. The deterministic layer is only a shortlist; the agent decides what is relevant and personalized enough to send. Web search is disabled for the scheduled brief by default to keep it cheap and grounded in the canonical vault.
 
 ## Local Webhook Test
 

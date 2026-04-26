@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -73,18 +74,30 @@ def main() -> None:
     vault_root = args.vault_root.resolve()
     today = parse_date(args.today) or date.today()
     notes = load_notes(vault_root)
-    actions = collect_action_items(notes, today=today, max_items=args.max_actions)
-    reading = pick_recommended_reading(notes, today=today)
-    should_send = bool(actions or reading)
-    text = render_daily_brief(actions, reading, today=today)
+    candidate_actions = collect_action_items(notes, today=today, max_items=max(args.max_actions * 3, 12))
+    candidate_readings = collect_recommended_readings(notes, today=today, max_items=8)
+    agent_result = run_morning_brief_agent(
+        vault_root=vault_root,
+        today=today,
+        candidate_actions=candidate_actions,
+        candidate_readings=candidate_readings,
+        max_actions=args.max_actions,
+    )
+    should_send = bool(agent_result.get("should_send"))
+    text = clean_scalar(agent_result.get("telegram_text"))
     payload = {
         "ok": True,
-        "mode": "daily_brief",
+        "mode": "agentic_daily_brief",
         "date": today.isoformat(),
         "should_send": should_send,
-        "action_count": len(actions),
-        "recommended_reading": reading,
-        "actions": actions,
+        "action_count": len(agent_result.get("selected_actions") or []),
+        "recommended_reading": agent_result.get("recommended_reading"),
+        "actions": agent_result.get("selected_actions") or [],
+        "agent_rationale": agent_result.get("rationale"),
+        "candidate_action_count": len(candidate_actions),
+        "candidate_reading_count": len(candidate_readings),
+        "candidate_actions": candidate_actions,
+        "candidate_readings": candidate_readings,
         "text": text,
     }
 
@@ -173,7 +186,7 @@ def collect_action_items(notes: list[Note], *, today: date, max_items: int) -> l
     return deduped[: max(1, max_items)]
 
 
-def pick_recommended_reading(notes: list[Note], *, today: date) -> dict[str, Any] | None:
+def collect_recommended_readings(notes: list[Note], *, today: date, max_items: int) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for note in notes:
         if is_done(note) or note.note_type not in READING_TYPES:
@@ -202,9 +215,66 @@ def pick_recommended_reading(notes: list[Note], *, today: date) -> dict[str, Any
             }
         )
     if not candidates:
-        return None
+        return []
     candidates.sort(key=lambda item: (-int(item["score"]), -date_sort_value(item.get("date"))))
-    return candidates[0]
+    return candidates[: max(1, max_items)]
+
+
+def pick_recommended_reading(notes: list[Note], *, today: date) -> dict[str, Any] | None:
+    readings = collect_recommended_readings(notes, today=today, max_items=1)
+    return readings[0] if readings else None
+
+
+def run_morning_brief_agent(
+    *,
+    vault_root: Path,
+    today: date,
+    candidate_actions: list[dict[str, Any]],
+    candidate_readings: list[dict[str, Any]],
+    max_actions: int,
+) -> dict[str, Any]:
+    mock_json = os.environ.get("VAULT_MORNING_BRIEF_AGENT_MOCK_JSON", "").strip()
+    if mock_json:
+        parsed = json.loads(mock_json)
+        if not isinstance(parsed, dict):
+            raise RuntimeError("VAULT_MORNING_BRIEF_AGENT_MOCK_JSON must be a JSON object")
+        return parsed
+
+    script = vault_root / "tools" / "vault_morning_brief_agent.mjs"
+    if not script.exists():
+        raise RuntimeError(f"Missing morning brief agent script: {script}")
+
+    payload = {
+        "workingDirectory": str(vault_root),
+        "today": today.isoformat(),
+        "maxActions": max_actions,
+        "candidateActions": candidate_actions,
+        "candidateReadings": candidate_readings,
+        "model": os.environ.get("VAULT_MORNING_BRIEF_MODEL") or os.environ.get("VAULT_AGENT_MODEL") or "gpt-5.4",
+        "reasoningEffort": os.environ.get("VAULT_MORNING_BRIEF_REASONING_EFFORT")
+        or os.environ.get("VAULT_AGENT_REASONING_EFFORT")
+        or "medium",
+    }
+    env = os.environ.copy()
+    result = subprocess.run(
+        ["node", str(script)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        cwd=vault_root,
+        env=env,
+        timeout=int(os.environ.get("VAULT_MORNING_BRIEF_TIMEOUT_SECONDS", "240")),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "morning brief agent failed")
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"morning brief agent returned invalid JSON: {result.stdout[:500]}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("morning brief agent returned a non-object JSON payload")
+    return parsed
 
 
 def action_payload(note: Note, *, kind: str, date_value: date, score: int, reason: str) -> dict[str, Any]:
