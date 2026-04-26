@@ -94,6 +94,38 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
         self.assertIn("second thought", merged["raw_text"])
         self.assertEqual(merged["collected_update_ids"], [101, 102])
 
+    def test_webhook_event_prefixes_are_replayable(self) -> None:
+        import sys
+        import types
+        from datetime import datetime, timezone
+        from unittest import mock
+
+        sys.path.insert(0, str(REPO_ROOT))
+        sys.modules.setdefault("boto3", types.SimpleNamespace(client=lambda *_args, **_kwargs: None))
+        from cloud import telegram_webhook_lambda as webhook  # type: ignore
+
+        update = self._telegram_update(201, 1_777_000_020, "queued message")
+        captured: dict[str, str] = {}
+
+        class FakeS3:
+            def put_object(self, **kwargs):
+                captured["key"] = kwargs["Key"]
+
+        with mock.patch.dict(
+            webhook.os.environ,
+            {"VAULT_STATE_BUCKET": "bucket", "VAULT_WEBHOOK_EVENTS_PREFIX": "webhook-events"},
+            clear=False,
+        ), mock.patch.object(webhook.boto3, "client", return_value=FakeS3()), mock.patch.object(
+            webhook.time, "time", return_value=1234
+        ), mock.patch.object(
+            webhook, "datetime", wraps=webhook.datetime
+        ) as fake_datetime:
+            fake_datetime.now.return_value = datetime(2026, 4, 26, tzinfo=timezone.utc)
+            webhook.put_raw_update(update, "201")
+
+        self.assertTrue(captured["key"].startswith("webhook-events/2026/04/26/"))
+        self.assertNotIn("webhook-events//", captured["key"])
+
     def _telegram_update(self, update_id: int, timestamp: int, text: str) -> dict:
         return {
             "update_id": update_id,

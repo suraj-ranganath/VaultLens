@@ -146,6 +146,10 @@ def collect_pending_cloud_updates(seed_update: dict[str, Any]) -> list[dict[str,
     prefixes = {
         f"{prefix}{now:%Y/%m/%d}/",
         f"{prefix}{(now - timedelta(days=1)):%Y/%m/%d}/",
+        # Older receiver builds accidentally wrote a double slash after the prefix.
+        # Keep reading that shape so failed queued updates can be replayed.
+        f"{prefix}/{now:%Y/%m/%d}/",
+        f"{prefix}/{(now - timedelta(days=1)):%Y/%m/%d}/",
     }
     max_pending = int(os.environ.get("VAULT_PROCESSOR_MAX_PENDING_UPDATES", "8"))
     for day_prefix in sorted(prefixes):
@@ -289,7 +293,7 @@ def put_raw_update(update: dict[str, Any], update_id: str) -> str:
     bucket = required_env("VAULT_STATE_BUCKET")
     prefix = clean_prefix(os.environ.get("VAULT_WEBHOOK_EVENTS_PREFIX", "_webhook-events"))
     now = datetime.now(timezone.utc)
-    key = f"{prefix}/{now:%Y/%m/%d}/{update_id}-{int(time.time() * 1000)}.json"
+    key = f"{prefix}{now:%Y/%m/%d}/{update_id}-{int(time.time() * 1000)}.json"
     boto3.client("s3").put_object(
         Bucket=bucket,
         Key=key,

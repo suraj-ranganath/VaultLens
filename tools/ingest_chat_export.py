@@ -309,8 +309,9 @@ def parse_messages(path: Path) -> list[Message]:
             if current:
                 current.text = clean_text(current.text)
                 messages.append(current)
+            message_time = match.group("time").replace("\u202f", " ")
             dt = datetime.strptime(
-                f"{match.group('date')} {match.group('time').replace('\u202f', ' ')}",
+                f"{match.group('date')} {message_time}",
                 "%m/%d/%y %I:%M:%S %p",
             )
             current = Message(
