@@ -81,6 +81,7 @@ Globals:
         VAULT_STATE_BUCKET: !Ref VaultStateBucket
         VAULT_STATE_PREFIX: state
         VAULT_WEBHOOK_EVENTS_PREFIX: webhook-events
+        TELEGRAM_HEARTBEAT_CHAT_ID: !Ref TelegramHeartbeatChatId
         TELEGRAM_SESSION_NAME: telegram-live
 
 Resources:
@@ -143,30 +144,26 @@ Resources:
         - S3CrudPolicy:
             BucketName: !Ref VaultStateBucket
 
-  HeartbeatFunction:
-    Type: AWS::Serverless::Function
+  HeartbeatScheduleRule:
+    Type: AWS::Events::Rule
     Condition: EnableHeartbeat
-    Metadata:
-      Dockerfile: cloud/Dockerfile
-      DockerContext: ..
-      DockerTag: vault-heartbeat
     Properties:
-      PackageType: Image
-      Timeout: 180
-      MemorySize: 512
-      Environment:
-        Variables:
-          VAULT_LAMBDA_MODE: heartbeat
-          TELEGRAM_HEARTBEAT_CHAT_ID: !Ref TelegramHeartbeatChatId
-      Events:
-        VaultHeartbeatSchedule:
-          Type: Schedule
-          Properties:
-            Schedule: !Ref HeartbeatSchedule
-            Enabled: true
-      Policies:
-        - S3CrudPolicy:
-            BucketName: !Ref VaultStateBucket
+      Description: Low-cost optional vault heartbeat surfacing check.
+      ScheduleExpression: !Ref HeartbeatSchedule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ProcessorFunction.Arn
+          Id: VaultHeartbeatProcessor
+          Input: '{"vaultHeartbeat": true}'
+
+  HeartbeatScheduleInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: EnableHeartbeat
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ProcessorFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HeartbeatScheduleRule.Arn
 
   ReceiverFunctionUrl:
     Type: AWS::Lambda::Url

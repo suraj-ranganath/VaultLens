@@ -124,7 +124,6 @@ confirm_changeset = false
 image_repositories = [
   "ReceiverFunction={ecr_uri}",
   "ProcessorFunction={ecr_uri}",
-  "HeartbeatFunction={ecr_uri}",
 ]
 parameter_overrides = {toml_string(parameter_overrides)}
 """

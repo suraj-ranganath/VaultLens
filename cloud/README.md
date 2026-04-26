@@ -22,7 +22,7 @@ The processor has `ReservedConcurrentExecutions: 1` so two Telegram messages can
 - S3 stores the ignored vault data cheaply.
 - S3 request cost stays low because the ignored vault state is stored as one compressed bundle instead of thousands of tiny objects.
 - Lambda runs only when Telegram sends a message.
-- Scheduled heartbeat surfacing is disabled by default. If enabled, it uses a low-frequency EventBridge rule and a small Lambda.
+- Scheduled heartbeat surfacing is disabled by default. If enabled, a low-frequency EventBridge rule invokes the existing processor instead of deploying another image.
 - Secrets use encrypted Lambda environment variables rather than Secrets Manager, avoiding a recurring Secrets Manager charge.
 
 This is optimized for a personal bot with occasional bursts. If usage becomes heavy, the next upgrade is SQS FIFO between receiver and processor, but that is intentionally not the default.
@@ -116,7 +116,7 @@ Heartbeat checks are off by default to keep costs down. To enable them, deploy w
 HEARTBEAT_ENABLED=true TELEGRAM_HEARTBEAT_CHAT_ID=123456789 npm run cloud:deploy
 ```
 
-The heartbeat worker runs `tools/vault_heartbeat.py`, sends a Telegram message only when there are timely alerts, and otherwise exits after a cheap local scan.
+The heartbeat path reuses the processor function, runs `tools/vault_heartbeat.py`, sends a Telegram message only when there are timely alerts, and otherwise exits after a cheap local scan.
 
 ## Local Webhook Test
 
