@@ -113,6 +113,13 @@ configure_ecr_lifecycle() {
 
 ensure_ecr_repo "$ECR_REPO"
 configure_ecr_lifecycle "$ECR_REPO"
+aws ecr get-login-password \
+  --region "$AWS_REGION" \
+  --cli-connect-timeout 5 \
+  --cli-read-timeout 20 \
+  --no-cli-pager | docker login \
+    --username AWS \
+    --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" >/dev/null
 
 SAM_CONFIG_FILE="$(mktemp -t my-vault-sam-config).toml"
 cleanup() {
