@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,13 +99,15 @@ def process_event(event: dict[str, Any]) -> dict[str, Any]:
         else:
             raise ValueError("Processor event did not include update or rawUpdateKey")
 
-    send_typing_for_update(update)
-    prepare_work_root()
-    send_typing_for_update(update)
-    download_state()
-    send_typing_for_update(update)
-    result = run_telegram_webhook(update)
-    upload_state()
+    typing = TelegramTypingHeartbeat(update)
+    typing.start()
+    try:
+        prepare_work_root()
+        download_state()
+        result = run_telegram_webhook(update)
+        upload_state()
+    finally:
+        typing.stop()
 
     return {
         "ok": True,
@@ -143,13 +146,39 @@ def send_typing_for_update(update: dict[str, Any]) -> None:
     if not token:
         return
     try:
-        requests.get(
+        response = requests.post(
             f"https://api.telegram.org/bot{token}/sendChatAction",
             params={"chat_id": chat_id, "action": "typing"},
-            timeout=3,
+            timeout=5,
         )
-    except Exception:
-        pass
+        if not response.ok:
+            print(f"sendChatAction failed: status={response.status_code} body={response.text[:200]}", flush=True)
+    except Exception as exc:
+        print(f"sendChatAction failed: {type(exc).__name__}: {exc}", flush=True)
+
+
+class TelegramTypingHeartbeat:
+    def __init__(self, update: dict[str, Any], interval_seconds: float = 3.5) -> None:
+        self.update = update
+        self.interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        send_typing_for_update(self.update)
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            send_typing_for_update(self.update)
 
 
 def extract_chat_id(update: dict[str, Any]) -> int | None:

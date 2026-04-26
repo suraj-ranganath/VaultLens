@@ -573,7 +573,7 @@ def telegram_send_chat_action(token: str, chat_id: int, action: str = "typing") 
 
 
 class TelegramTypingHeartbeat:
-    def __init__(self, token: str, chat_id: int, interval_seconds: float = 4.0) -> None:
+    def __init__(self, token: str, chat_id: int, interval_seconds: float = 3.5) -> None:
         self.token = token
         self.chat_id = chat_id
         self.interval_seconds = interval_seconds
@@ -581,6 +581,10 @@ class TelegramTypingHeartbeat:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        try:
+            telegram_send_chat_action(self.token, self.chat_id, "typing")
+        except Exception:
+            pass
         if self._thread is not None:
             return
         self._thread = threading.Thread(target=self._run, daemon=True)
