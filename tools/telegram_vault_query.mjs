@@ -4,8 +4,11 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { Codex } from "@openai/codex-sdk";
 
+const execFileAsync = promisify(execFile);
 const MODEL_PRICING = {
   "gpt-5.4": {
     inputPer1M: 2.5,
@@ -265,6 +268,12 @@ function calculateCost(model, usage) {
 async function buildVaultContextPack(vaultRoot, question) {
   const terms = queryTerms(question);
   const sections = [];
+  await compileVaultCache(vaultRoot);
+
+  const digestContext = await readDigestContext(vaultRoot);
+  if (digestContext) {
+    sections.push(renderContextSection(".vault/cache/agent-digest.json", digestContext));
+  }
 
   for (const relativePath of CORE_CONTEXT_FILES) {
     const text = await readTextIfExists(path.join(vaultRoot, relativePath));
@@ -291,21 +300,121 @@ async function buildVaultContextPack(vaultRoot, question) {
     sections.push(renderContextSection(item.relativePath, item.snippet));
   }
 
+  const searchResults = await searchVaultCache(vaultRoot, question, 16);
+  for (const result of searchResults) {
+    const body = [
+      `title: ${result.title || ""}`,
+      `type: ${result.type || ""}`,
+      result.url ? `url: ${result.url}` : "",
+      result.published_on ? `published_on: ${result.published_on}` : "",
+      result.discovered_on ? `discovered_on: ${result.discovered_on}` : "",
+      result.deadline ? `deadline: ${result.deadline}` : "",
+      Array.isArray(result.tags) && result.tags.length ? `tags: ${result.tags.join(", ")}` : "",
+      Array.isArray(result.topics) && result.topics.length ? `topics: ${result.topics.join(", ")}` : "",
+      `retrieval_score: ${Number(result.score || 0).toFixed(4)}`,
+      result.snippet ? `snippet: ${result.snippet}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    sections.push(renderContextSection(result.path, body));
+  }
+
   const candidates = await collectMarkdownCandidates(vaultRoot);
+  const alreadyIncluded = new Set(searchResults.map((result) => result.path));
   const ranked = candidates
     .map((candidate) => ({
       ...candidate,
       score: scoreCandidate(candidate.relativePath, candidate.text, terms, question),
     }))
-    .filter((candidate) => candidate.score > 0)
+    .filter((candidate) => candidate.score > 0 && !alreadyIncluded.has(candidate.relativePath))
     .sort((a, b) => b.score - a.score || a.relativePath.localeCompare(b.relativePath))
-    .slice(0, 18);
+    .slice(0, 8);
 
   for (const candidate of ranked) {
     sections.push(renderContextSection(candidate.relativePath, summarizeMarkdown(candidate.text)));
   }
 
-  return sections.join("\n\n").slice(0, 50_000);
+  return sections.join("\n\n").slice(0, 34_000);
+}
+
+async function compileVaultCache(vaultRoot) {
+  const script = path.join(vaultRoot, "tools", "vault_compile_cache.py");
+  if (!(await fileExists(script))) {
+    return;
+  }
+  try {
+    await execFileAsync("python3", [script, "--vault-root", vaultRoot, "--quiet"], {
+      cwd: vaultRoot,
+      timeout: 45_000,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch {
+    // The query path can still work from direct markdown reads if cache compile fails.
+  }
+}
+
+async function searchVaultCache(vaultRoot, question, limit) {
+  const script = path.join(vaultRoot, "tools", "vault_search.py");
+  if (!(await fileExists(script))) {
+    return [];
+  }
+  try {
+    const { stdout } = await execFileAsync(
+      "python3",
+      [script, "search", "--vault-root", vaultRoot, "--query", question, "--limit", String(limit)],
+      {
+        cwd: vaultRoot,
+        timeout: 30_000,
+        maxBuffer: 2 * 1024 * 1024,
+      },
+    );
+    const parsed = JSON.parse(stdout);
+    return Array.isArray(parsed.results) ? parsed.results : [];
+  } catch {
+    return [];
+  }
+}
+
+async function readDigestContext(vaultRoot) {
+  const digestPath = path.join(vaultRoot, ".vault", "cache", "agent-digest.json");
+  const text = await readTextIfExists(digestPath, 10_000_000);
+  if (!text) {
+    return "";
+  }
+  try {
+    const digest = JSON.parse(text);
+    const pages = Array.isArray(digest.pages) ? digest.pages : [];
+    const recent = pages
+      .slice()
+      .sort((a, b) =>
+        String(b.discovered_on || b.published_on || "").localeCompare(String(a.discovered_on || a.published_on || "")),
+      )
+      .slice(0, 24);
+    return JSON.stringify(
+      {
+        generated_at: digest.generated_at,
+        page_count: digest.page_count,
+        claim_count: digest.claim_count,
+        source_count: digest.source_count,
+        recent_pages: recent.map((page) => ({
+          path: page.path,
+          title: page.title,
+          type: page.type,
+          summary: page.summary,
+          url: page.url,
+          discovered_on: page.discovered_on,
+          published_on: page.published_on,
+          deadline: page.deadline,
+          tags: page.tags,
+          topics: page.topics,
+        })),
+      },
+      null,
+      2,
+    );
+  } catch {
+    return trimForContext(text, 5000);
+  }
 }
 
 async function relationshipContextItems(vaultRoot, question) {

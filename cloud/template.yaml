@@ -46,6 +46,24 @@ Parameters:
     Default: 512
     MinValue: 128
     MaxValue: 1024
+  HeartbeatEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Enable scheduled vault heartbeat surfacing.
+  TelegramHeartbeatChatId:
+    Type: String
+    Default: ""
+    Description: Telegram chat ID that should receive heartbeat alerts when enabled.
+  HeartbeatSchedule:
+    Type: String
+    Default: rate(6 hours)
+    Description: EventBridge schedule expression for low-cost surfacing checks.
+
+Conditions:
+  EnableHeartbeat: !Equals [!Ref HeartbeatEnabled, "true"]
 
 Globals:
   Function:
@@ -121,6 +139,31 @@ Resources:
       Environment:
         Variables:
           VAULT_LAMBDA_MODE: processor
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref VaultStateBucket
+
+  HeartbeatFunction:
+    Type: AWS::Serverless::Function
+    Condition: EnableHeartbeat
+    Metadata:
+      Dockerfile: cloud/Dockerfile
+      DockerContext: ..
+      DockerTag: vault-heartbeat
+    Properties:
+      PackageType: Image
+      Timeout: 180
+      MemorySize: 512
+      Environment:
+        Variables:
+          VAULT_LAMBDA_MODE: heartbeat
+          TELEGRAM_HEARTBEAT_CHAT_ID: !Ref TelegramHeartbeatChatId
+      Events:
+        VaultHeartbeatSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref HeartbeatSchedule
+            Enabled: true
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref VaultStateBucket

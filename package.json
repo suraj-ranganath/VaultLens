@@ -6,6 +6,10 @@
   "scripts": {
     "vault:setup": "bash bin/setup-vault.sh",
     "vault:health": "python3 tools/vault_health.py",
+    "vault:compile": "python3 tools/vault_compile_cache.py --vault-root .",
+    "vault:search": "python3 tools/vault_search.py search --vault-root . --query",
+    "vault:heartbeat": "python3 tools/vault_heartbeat.py --vault-root .",
+    "test:vault-infra": "python3 -m unittest tools/test_vault_infra.py",
     "vault:web": "node tools/vault_query_server.mjs",
     "rebuild:dashboards": "python3 tools/rebuild_dashboards.py",
     "enrich:browser:recent": "node tools/enrich_with_browser.mjs . 120 4 30",

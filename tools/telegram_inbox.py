@@ -12,7 +12,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ RAW_UPDATES_FILE_NAME = "telegram-updates.jsonl"
 PROCESSED_UPDATES_FILE_NAME = ".telegram_processed_updates.jsonl"
 AGENT_DECISIONS_FILE_NAME = "telegram-agent-decisions.jsonl"
 CALENDAR_ACTIONS_FILE_NAME = "telegram-calendar-actions.jsonl"
+AGENT_EVENTS_FILE_NAME = "agent-events.jsonl"
 DEFAULT_AGENT_MODEL = "gpt-5.4"
 ATTACHMENT_ANALYSIS_MAX_BYTES = 8 * 1024 * 1024
 ATTACHMENT_ANALYSIS_TIMEOUT_SECONDS = 90
@@ -580,6 +581,10 @@ def telegram_send_message(token: str, chat_id: int, text: str, reply_to_message_
     return telegram_api(token, "sendMessage", **params)
 
 
+def telegram_edit_message_text(token: str, chat_id: int, message_id: int, text: str) -> dict[str, Any]:
+    return telegram_api(token, "editMessageText", chat_id=chat_id, message_id=message_id, text=text)
+
+
 def telegram_send_chat_action(token: str, chat_id: int, action: str = "typing") -> dict[str, Any]:
     return telegram_api(token, "sendChatAction", chat_id=chat_id, action=action)
 
@@ -616,10 +621,82 @@ class TelegramTypingHeartbeat:
             self._stop.wait(self.interval_seconds)
 
 
+class TelegramPreviewMessage:
+    def __init__(self, token: str, chat_id: int, reply_to_message_id: int | None = None) -> None:
+        self.token = token
+        self.chat_id = chat_id
+        self.reply_to_message_id = reply_to_message_id
+        self.message_id: int | None = None
+        self.last_text = ""
+        self.last_update = 0.0
+
+    def update(self, text: str, *, force: bool = False) -> None:
+        if os.environ.get("VAULT_TELEGRAM_PREVIEW", "1").strip() in {"0", "false", "False"}:
+            return
+        clean = str(text or "").strip()
+        if not clean or clean == self.last_text:
+            return
+        now = time.time()
+        if not force and self.message_id is not None and now - self.last_update < 1.0:
+            return
+        self.last_text = clean
+        self.last_update = now
+        try:
+            if self.message_id is None:
+                response = telegram_send_message(
+                    self.token,
+                    chat_id=self.chat_id,
+                    text=clean,
+                    reply_to_message_id=self.reply_to_message_id,
+                )
+                message = response.get("result") or {}
+                if isinstance(message, dict) and isinstance(message.get("message_id"), int):
+                    self.message_id = int(message["message_id"])
+                return
+            telegram_edit_message_text(self.token, self.chat_id, self.message_id, clean[:4000])
+        except Exception:
+            pass
+
+    def finish(self, text: str) -> bool:
+        clean = str(text or "").strip()
+        if not clean or self.message_id is None:
+            return False
+        try:
+            telegram_edit_message_text(self.token, self.chat_id, self.message_id, clean[:4000])
+            self.last_text = clean[:4000]
+            return True
+        except Exception:
+            return False
+
+
 def telegram_send_long_message(token: str, chat_id: int, text: str, reply_to_message_id: int | None = None) -> list[dict[str, Any]]:
     chunks = split_message_chunks(text)
     responses: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks):
+        responses.append(
+            telegram_send_message(
+                token,
+                chat_id=chat_id,
+                text=chunk,
+                reply_to_message_id=reply_to_message_id if index == 0 else None,
+            )
+        )
+    return responses
+
+
+def telegram_deliver_long_message(
+    token: str,
+    chat_id: int,
+    text: str,
+    reply_to_message_id: int | None = None,
+    preview: TelegramPreviewMessage | None = None,
+) -> list[dict[str, Any]]:
+    chunks = split_message_chunks(text)
+    responses: list[dict[str, Any]] = []
+    start_index = 0
+    if preview is not None and chunks and preview.finish(chunks[0]):
+        start_index = 1
+    for index, chunk in enumerate(chunks[start_index:], start=start_index):
         responses.append(
             telegram_send_message(
                 token,
@@ -1131,6 +1208,104 @@ def split_message_chunks(text: str, limit: int = 3500) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
+def append_agent_event(vault_root: Path, event: dict[str, Any]) -> None:
+    target = vault_root / ".vault" / "events" / AGENT_EVENTS_FILE_NAME
+    payload = {"logged_at": datetime.now(timezone.utc).isoformat(), **event}
+    append_jsonl(target, [payload])
+
+
+def run_vault_cache_compile(vault_root: Path) -> None:
+    script = vault_root / "tools" / "vault_compile_cache.py"
+    if not script.exists():
+        return
+    proc = subprocess.run(
+        ["python3", str(script), "--vault-root", str(vault_root), "--quiet"],
+        text=True,
+        capture_output=True,
+        cwd=vault_root,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "vault cache compile failed")
+
+
+def coalesce_update_groups(updates: list[dict[str, Any]], processed_update_ids: set[int]) -> list[list[dict[str, Any]]]:
+    window_seconds = int(os.environ.get("VAULT_TELEGRAM_COLLECT_WINDOW_SECONDS", "45"))
+    max_group = int(os.environ.get("VAULT_TELEGRAM_COLLECT_MAX", "6"))
+    if window_seconds <= 0:
+        return [[update] for update in updates]
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for update in sorted(updates, key=lambda item: int(item.get("update_id") or 0)):
+        try:
+            update_id = int(update["update_id"])
+        except Exception:
+            groups.append([update])
+            continue
+        if update_id in processed_update_ids:
+            groups.append([update])
+            continue
+        normalized = normalize_message(update)
+        if normalized is None or not is_collectable_update(update, normalized):
+            if current:
+                groups.append(current)
+                current = []
+            groups.append([update])
+            continue
+        if not current:
+            current = [update]
+            continue
+        previous = normalize_message(current[-1])
+        if (
+            previous
+            and int(previous["chat_id"]) == int(normalized["chat_id"])
+            and abs(parse_timestamp_seconds(normalized) - parse_timestamp_seconds(previous)) <= window_seconds
+            and len(current) < max_group
+        ):
+            current.append(update)
+        else:
+            groups.append(current)
+            current = [update]
+    if current:
+        groups.append(current)
+    return groups
+
+
+def is_collectable_update(update: dict[str, Any], normalized: dict[str, Any]) -> bool:
+    message = update.get("message") or update.get("edited_message") or update.get("channel_post") or update.get("edited_channel_post") or {}
+    if collect_message_attachments(message):
+        return False
+    raw_text = str(normalized.get("raw_text") or "")
+    if CALENDAR_INTENT_RE.search(raw_text) or CALENDAR_CONFIRM_RE.search(raw_text) or CALENDAR_CANCEL_RE.search(raw_text):
+        return False
+    return True
+
+
+def parse_timestamp_seconds(normalized: dict[str, Any]) -> int:
+    try:
+        return int(datetime.fromisoformat(str(normalized["timestamp_iso"])).timestamp())
+    except Exception:
+        return 0
+
+
+def merge_normalized_message_group(update_group: list[dict[str, Any]], latest_normalized: dict[str, Any]) -> dict[str, Any]:
+    parts: list[dict[str, Any]] = []
+    for update in update_group:
+        normalized = normalize_message(update)
+        if normalized:
+            parts.append(normalized)
+    if len(parts) <= 1:
+        return latest_normalized
+    merged = dict(latest_normalized)
+    merged["raw_text"] = "\n\n".join(
+        f"[Message {idx + 1} at {part.get('timestamp_iso')}]\n{part.get('raw_text')}"
+        for idx, part in enumerate(parts)
+    )
+    merged["export_line"] = "\n".join(str(part.get("export_line") or "").strip() for part in parts if str(part.get("export_line") or "").strip())
+    merged["collected_update_ids"] = [int(update["update_id"]) for update in update_group]
+    return merged
+
+
 def invoke_codex_agent(
     vault_root: Path,
     session_name: str,
@@ -1320,6 +1495,22 @@ def execute_agent_actions(
             continue
 
         raise RuntimeError(f"Unsupported agent tool: {tool}")
+
+    if any(
+        result.get("status") == "ok"
+        and result.get("tool")
+        in {
+            "append_message_to_stream",
+            "run_vault_ingest",
+            "rebuild_artifact_capture_queue",
+            "refresh_live_metadata_jobs_recent",
+            "refresh_live_metadata_knowledge_all",
+            "refresh_live_metadata_current_links",
+        }
+        for result in results
+    ):
+        run_vault_cache_compile(vault_root)
+        results.append({"tool": "compile_vault_cache", "status": "ok", "reason": "Refresh machine-facing digest, claims, source index, and search index."})
 
     return results
 
@@ -1537,9 +1728,11 @@ def process_update_batch(
     ingested = 0
     answered = 0
     action_records: list[dict[str, Any]] = []
-    for update in updates:
+    for update_group in coalesce_update_groups(updates, processed_update_ids):
+        update = update_group[-1]
+        update_ids = [int(item["update_id"]) for item in update_group]
         update_id = int(update["update_id"])
-        if update_id in processed_update_ids:
+        if all(item_id in processed_update_ids for item_id in update_ids):
             state["last_update_id"] = update_id
             continue
 
@@ -1547,6 +1740,8 @@ def process_update_batch(
         if normalized is None:
             state["last_update_id"] = update_id
             continue
+        if len(update_group) > 1:
+            normalized = merge_normalized_message_group(update_group, normalized)
 
         chat_id = int(normalized["chat_id"])
         state.setdefault("known_chats", {})
@@ -1564,6 +1759,16 @@ def process_update_batch(
         accepted += 1
         typing = TelegramTypingHeartbeat(token, chat_id)
         typing.start()
+        append_agent_event(
+            vault_root,
+            {
+                "event": "telegram.update.accepted",
+                "update_id": update_id,
+                "chat_id": chat_id,
+                "message_id": normalized["message_id"],
+                "mode": mode,
+            },
+        )
         normalized = enrich_message_attachments(
             vault_root=vault_root,
             token=token,
@@ -1572,7 +1777,7 @@ def process_update_batch(
             update=update,
             normalized_message=normalized,
         )
-        append_jsonl(raw_file, [update])
+        append_jsonl(raw_file, update_group)
 
         calendar_result = handle_calendar_flow(
             vault_root=vault_root,
@@ -1587,23 +1792,26 @@ def process_update_batch(
         if calendar_result is not None:
             answered += 1 if calendar_result.get("answered") else 0
             acked += 1 if calendar_result.get("acked") else 0
-            append_processed_update(
-                processed_updates_file,
-                {
-                    "processed_at": datetime.now().isoformat(),
-                    "update_id": update_id,
-                    "chat_id": chat_id,
-                    "message_id": normalized["message_id"],
-                    "stored": False,
-                    "acked": bool(calendar_result.get("acked")),
-                    "calendar_status": calendar_result.get("status"),
-                },
-            )
-            processed_update_ids.add(update_id)
-            state["last_update_id"] = update_id
+            for item_id in update_ids:
+                append_processed_update(
+                    processed_updates_file,
+                    {
+                        "processed_at": datetime.now().isoformat(),
+                        "update_id": item_id,
+                        "chat_id": chat_id,
+                        "message_id": normalized["message_id"],
+                        "stored": False,
+                        "acked": bool(calendar_result.get("acked")),
+                        "calendar_status": calendar_result.get("status"),
+                        "collected_update_ids": update_ids,
+                    },
+                )
+                processed_update_ids.add(item_id)
+            state["last_update_id"] = max(update_ids)
             action_records.append(
                 {
                     "update_id": update_id,
+                    "collected_update_ids": update_ids,
                     "classification": "calendar_request",
                     "stored": False,
                     "acked": bool(calendar_result.get("acked")),
@@ -1614,7 +1822,10 @@ def process_update_batch(
             typing.stop()
             continue
 
+        preview = TelegramPreviewMessage(token, chat_id, normalized["message_id"])
+        preview.update("Working on it — reading this and checking the vault…", force=True)
         prior_thread_id = (state.get("agent_threads") or {}).get(str(chat_id))
+        preview.update("Deciding whether to save, enrich, answer, or take an action…")
         agent_result = invoke_codex_agent(
             vault_root=vault_root,
             session_name=session_name,
@@ -1627,6 +1838,7 @@ def process_update_batch(
         )
         agent_runs += 1
         decision = normalize_agent_decision(agent_result.get("decision") or {})
+        preview.update("Plan decided. Updating the relevant vault pieces…")
         actions = ensure_action_order(
             [action for action in decision.get("actions", []) if isinstance(action, dict)],
             store_in_vault=bool(decision.get("storeInVault")),
@@ -1657,6 +1869,8 @@ def process_update_batch(
             )
         tool_results: list[dict[str, Any]] = []
         if decision.get("storeInVault") or any(action.get("tool") == "answer_vault_query" for action in actions):
+            if any(action.get("tool") == "answer_vault_query" for action in actions):
+                preview.update("Searching the compiled vault cache and building the answer…", force=True)
             tool_results = execute_agent_actions(
                 vault_root=vault_root,
                 session_name=session_name,
@@ -1683,6 +1897,7 @@ def process_update_batch(
                 {
                     "logged_at": datetime.now().isoformat(),
                     "update_id": update_id,
+                    "collected_update_ids": update_ids,
                     "chat_id": chat_id,
                     "message_id": normalized["message_id"],
                     "message": normalized,
@@ -1696,42 +1911,63 @@ def process_update_batch(
 
         query_result = next((result for result in tool_results if result.get("tool") == "answer_vault_query" and result.get("status") == "ok"), None)
         if query_result and str(query_result.get("reply_text") or "").strip():
-            telegram_send_long_message(
+            telegram_deliver_long_message(
                 token,
                 chat_id=chat_id,
                 text=str(query_result["reply_text"]),
                 reply_to_message_id=normalized["message_id"],
+                preview=preview,
             )
             answered += 1
 
         ack_allowed = bool(decision.get("storeInVault")) and bool(decision.get("sendAck", True)) and ingest_after_sync
         if ack_allowed:
             acknowledgement = str(decision.get("acknowledgement") or "👍")
-            telegram_send_message(token, chat_id=chat_id, text=acknowledgement, reply_to_message_id=normalized["message_id"])
+            if not query_result or not str(query_result.get("reply_text") or "").strip():
+                if not preview.finish(acknowledgement):
+                    telegram_send_message(token, chat_id=chat_id, text=acknowledgement, reply_to_message_id=normalized["message_id"])
             acked += 1
 
-        append_processed_update(
-            processed_updates_file,
-            {
-                "processed_at": datetime.now().isoformat(),
-                "update_id": update_id,
-                "chat_id": chat_id,
-                "message_id": normalized["message_id"],
-                "stored": bool(decision.get("storeInVault")),
-                "acked": ack_allowed,
-            },
-        )
-        processed_update_ids.add(update_id)
-        state["last_update_id"] = update_id
+        for item_id in update_ids:
+            append_processed_update(
+                processed_updates_file,
+                {
+                    "processed_at": datetime.now().isoformat(),
+                    "update_id": item_id,
+                    "chat_id": chat_id,
+                    "message_id": normalized["message_id"],
+                    "stored": bool(decision.get("storeInVault")),
+                    "acked": ack_allowed,
+                    "collected_update_ids": update_ids,
+                },
+            )
+            processed_update_ids.add(item_id)
+        state["last_update_id"] = max(update_ids)
         action_records.append(
             {
                 "update_id": update_id,
+                "collected_update_ids": update_ids,
                 "classification": decision.get("classification"),
                 "stored": bool(decision.get("storeInVault")),
                 "acked": ack_allowed,
                 "answered": bool(query_result),
                 "actions": [action["tool"] for action in actions],
             }
+        )
+        append_agent_event(
+            vault_root,
+            {
+                "event": "telegram.update.processed",
+                "update_id": update_id,
+                "collected_update_ids": update_ids,
+                "chat_id": chat_id,
+                "message_id": normalized["message_id"],
+                "classification": decision.get("classification"),
+                "stored": bool(decision.get("storeInVault")),
+                "answered": bool(query_result),
+                "actions": [action["tool"] for action in actions],
+                "cost": query_result.get("cost") if query_result else None,
+            },
         )
         typing.stop()
 

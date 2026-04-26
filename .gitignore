@@ -10,6 +10,7 @@ tools/__pycache__/
 *.pyc
 
 .obsidian/
+.vault/
 
 dashboards/
 imports/

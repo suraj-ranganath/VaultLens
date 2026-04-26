@@ -29,6 +29,7 @@ Tracked here:
 Ignored from Git:
 
 - `items/`, `topics/`, `projects/`, `dashboards/`, `raw/`, `imports/`, and `outputs/`
+- `.vault/` compiled cache, event log, search index, reports, and local runtime metadata
 - `.env.local` and any other secret-bearing env files
 - `hot.md`, `index.md`, and `log.md`
 - Obsidian local state and dependency directories
@@ -40,6 +41,8 @@ Ignored from Git:
 - browser fallback for weak pages: Playwright
 
 The browser fallback is intentionally focused on recent material. The current policy is to run Playwright enrichment only for notes discovered in the last 30 days, with special attention to X and other pages that are weak or blocked under plain HTTP fetches.
+
+The query path is cost-first: before calling GPT-5.4, the vault compiles a machine-facing cache under `.vault/cache/`, runs local SQLite FTS/BM25 search with recency/diversity ranking, and injects only the most relevant context into the Codex agent.
 
 Borrowed and adapted from the `claude-obsidian` pattern:
 
@@ -68,6 +71,7 @@ python3 tools/ingest_whatsapp_inbox.py --vault-root .
 
 ```bash
 npm run rebuild:dashboards
+npm run vault:compile
 ```
 
 This rebuild also refreshes:
@@ -129,6 +133,8 @@ See [cloud/README.md](cloud/README.md) for the AWS Lambda Function URL + S3 stat
 
 ```bash
 npm run vault:health
+npm run vault:search -- "technical AI safety"
+npm run vault:heartbeat -- --dry-run
 ```
 
 ### 6. Run the local web Q&A interface
@@ -142,7 +148,7 @@ Then open `http://localhost:4318`.
 The web interface runs a local Codex-backed query route over the vault. It is designed for retrieval-first answering:
 
 - local vault files are the primary source of truth
-- the agent starts from `hot.md`, dashboards, and canonical notes
+- the agent starts from the compiled `.vault/cache/agent-digest.json`, SQLite FTS retrieval, `hot.md`, dashboards, and canonical notes
 - answers return citations to vault files plus a live agent feed
 - the live feed shows reasoning summaries, plan updates, shell commands, web searches, MCP calls, and surfaced agent messages
 - useful answers can be filed back into `outputs/` directly from the UI
@@ -154,6 +160,18 @@ Environment knobs:
 - `VAULT_QUERY_DEFAULT_MODEL`
 - `OPENAI_API_KEY`
 
+## Runtime Cache And Observability
+
+Generated, ignored, and synced as vault state:
+
+- `.vault/cache/agent-digest.json`: compact machine-readable page catalog
+- `.vault/cache/claims.jsonl`: claim-level evidence, confidence, and freshness records
+- `.vault/cache/source-index.jsonl`: primary-source URL index for citations
+- `.vault/cache/search.sqlite`: local FTS search index used before model calls
+- `.vault/cache/browser-enrichment-queue.jsonl`: recent weak/browser-first links for local Playwright enrichment
+- `.vault/events/agent-events.jsonl`: unified web/Telegram/heartbeat event log
+- `.vault/reports/`: cache health reports for claims and open questions
+
 ## Knowledge Design Principles
 
 - explicit and inspectable over hidden memory
@@ -163,5 +181,6 @@ Environment knobs:
 - job notes should preserve website-posted date when known
 - decisions and systems should be first-class notes
 - recent context should be available through a compact hot cache
+- machine-facing cache should be refreshed after ingest so query agents avoid broad scans
 - maintenance should be explicit through a lint-style health page
 - outputs from future queries should be filed back into the wiki so the corpus compounds

@@ -19,6 +19,9 @@ AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
 VAULT_AGENT_MODEL="${VAULT_AGENT_MODEL:-gpt-5.4}"
 VAULT_AGENT_REASONING_EFFORT="${VAULT_AGENT_REASONING_EFFORT:-medium}"
 TELEGRAM_ALLOWED_CHAT_IDS="${TELEGRAM_ALLOWED_CHAT_IDS:-}"
+HEARTBEAT_ENABLED="${HEARTBEAT_ENABLED:-false}"
+TELEGRAM_HEARTBEAT_CHAT_ID="${TELEGRAM_HEARTBEAT_CHAT_ID:-}"
+HEARTBEAT_SCHEDULE="${HEARTBEAT_SCHEDULE:-rate(6 hours)}"
 AWS_ACCOUNT_ID="$(
   aws sts get-caller-identity \
     --query Account \
@@ -46,6 +49,9 @@ export TELEGRAM_WEBHOOK_SECRET
 export TELEGRAM_ALLOWED_CHAT_IDS
 export VAULT_AGENT_MODEL
 export VAULT_AGENT_REASONING_EFFORT
+export HEARTBEAT_ENABLED
+export TELEGRAM_HEARTBEAT_CHAT_ID
+export HEARTBEAT_SCHEDULE
 export STACK_NAME
 export AWS_REGION
 export ECR_URI
@@ -92,6 +98,8 @@ overrides = {
     "TelegramWebhookSecret": os.environ["TELEGRAM_WEBHOOK_SECRET"],
     "VaultAgentModel": os.environ["VAULT_AGENT_MODEL"],
     "VaultAgentReasoningEffort": os.environ["VAULT_AGENT_REASONING_EFFORT"],
+    "HeartbeatEnabled": os.environ["HEARTBEAT_ENABLED"],
+    "HeartbeatSchedule": os.environ["HEARTBEAT_SCHEDULE"],
 }
 allowed = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
 if allowed:
@@ -99,6 +107,9 @@ if allowed:
 credentials_json = os.environ.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON", "").strip()
 if credentials_json:
     overrides["GoogleWorkspaceCliCredentialsJson"] = credentials_json
+heartbeat_chat_id = os.environ.get("TELEGRAM_HEARTBEAT_CHAT_ID", "").strip()
+if heartbeat_chat_id:
+    overrides["TelegramHeartbeatChatId"] = heartbeat_chat_id
 
 parameter_overrides = " ".join(f"{key}={value!r}" for key, value in overrides.items())
 ecr_uri = os.environ["ECR_URI"]
@@ -113,6 +124,7 @@ confirm_changeset = false
 image_repositories = [
   "ReceiverFunction={ecr_uri}",
   "ProcessorFunction={ecr_uri}",
+  "HeartbeatFunction={ecr_uri}",
 ]
 parameter_overrides = {toml_string(parameter_overrides)}
 """

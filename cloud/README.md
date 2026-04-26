@@ -8,10 +8,12 @@ This deploys the vault Telegram agent as a webhook-first AWS path.
 - The receiver Lambda validates Telegram's `X-Telegram-Bot-Api-Secret-Token` header.
 - The receiver stores the raw update in S3 and asynchronously invokes a processor Lambda.
 - The processor Lambda restores the ignored vault state bundle from S3 into `/tmp/my-vault`.
-- The processor runs `tools/telegram_inbox.py webhook`, which uses the same Codex-backed decision, ingest, query, and acknowledgement path as local polling.
+- The processor waits briefly, collects pending webhook events from S3, then runs `tools/telegram_inbox.py webhook` with a small batch so rapid Telegram messages can be coalesced instead of forcing separate agent turns.
+- The Telegram worker uses preview-message edits for progress, then edits that same preview into the final answer or acknowledgement when possible.
+- The query path compiles `.vault/cache/`, runs local SQLite FTS retrieval, and only then calls the Codex-backed answer agent.
 - After processing, the processor writes one compressed state bundle back to S3.
 
-The processor has `ReservedConcurrentExecutions: 1` so two Telegram messages cannot race while writing the same vault files.
+The processor has `ReservedConcurrentExecutions: 1` so two Telegram messages cannot race while writing the same vault files. The short S3 pending-event sweep reduces redundant runs during bursts.
 
 ## Why This Is Cost Effective
 
@@ -20,6 +22,7 @@ The processor has `ReservedConcurrentExecutions: 1` so two Telegram messages can
 - S3 stores the ignored vault data cheaply.
 - S3 request cost stays low because the ignored vault state is stored as one compressed bundle instead of thousands of tiny objects.
 - Lambda runs only when Telegram sends a message.
+- Scheduled heartbeat surfacing is disabled by default. If enabled, it uses a low-frequency EventBridge rule and a small Lambda.
 - Secrets use encrypted Lambda environment variables rather than Secrets Manager, avoiding a recurring Secrets Manager charge.
 
 This is optimized for a personal bot with occasional bursts. If usage becomes heavy, the next upgrade is SQS FIFO between receiver and processor, but that is intentionally not the default.
@@ -91,6 +94,7 @@ npm run cloud:sync-state
 
 The script uploads one compressed `state/vault-state.tar.gz` bundle containing:
 
+- `.vault/`
 - `dashboards/`
 - `imports/`
 - `items/`
@@ -101,6 +105,18 @@ The script uploads one compressed `state/vault-state.tar.gz` bundle containing:
 - `hot.md`
 - `index.md`
 - `log.md`
+
+`.vault/` is included because AWS is the canonical vault state and the compiled cache/search/event surfaces are durable runtime state, but it remains ignored by Git.
+
+## Optional Heartbeat Surfacing
+
+Heartbeat checks are off by default to keep costs down. To enable them, deploy with:
+
+```bash
+HEARTBEAT_ENABLED=true TELEGRAM_HEARTBEAT_CHAT_ID=123456789 npm run cloud:deploy
+```
+
+The heartbeat worker runs `tools/vault_heartbeat.py`, sends a Telegram message only when there are timely alerts, and otherwise exits after a cheap local scan.
 
 ## Local Webhook Test
 
@@ -115,3 +131,4 @@ npm run telegram:webhook:test < /tmp/telegram-update.json
 - CloudWatch Logs for the processor show the Codex and ingest failures if a message fails.
 - Telegram retries failed webhook deliveries, and the local processed-update ledger prevents duplicate processing once state has been synced.
 - Playwright browser enrichment is intentionally not bundled with browsers in this Lambda image. Browser-heavy enrichment should stay local or move to a separate scheduled worker if it becomes essential in the cloud.
+- `.vault/events/agent-events.jsonl` is the cross-surface event log for web queries, Telegram processing, costs, and future diagnostics.

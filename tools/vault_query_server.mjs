@@ -7,6 +7,7 @@ import http from "node:http";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import { Codex } from "@openai/codex-sdk";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -14,6 +15,7 @@ const __dirname = path.dirname(__filename);
 const vaultRoot = path.resolve(__dirname, "..");
 const webRoot = path.join(vaultRoot, "web");
 const chatTraceRoot = path.join(vaultRoot, "outputs", "chat-traces");
+const agentEventsPath = path.join(vaultRoot, ".vault", "events", "agent-events.jsonl");
 
 loadEnvFile(path.join(vaultRoot, ".env.local"));
 
@@ -158,6 +160,7 @@ async function handleQuery(req, res) {
   }
 
   const startedAt = Date.now();
+  const vaultContext = await buildVaultContextPack(question);
   const threadOptions = {
     model,
     workingDirectory: vaultRoot,
@@ -170,7 +173,7 @@ async function handleQuery(req, res) {
   };
 
   const thread = threadId ? codex.resumeThread(threadId, threadOptions) : codex.startThread(threadOptions);
-  const turn = await thread.run(buildPrompt(question, includeWebSearch), { outputSchema: QUERY_SCHEMA });
+  const turn = await thread.run(buildPrompt(question, includeWebSearch, vaultContext), { outputSchema: QUERY_SCHEMA });
   const answer = await hydrateAnswer(parseJson(turn.finalResponse));
   const cost = calculateCost(model, turn.usage);
   const persisted = await persistChatTurn({
@@ -184,11 +187,22 @@ async function handleQuery(req, res) {
       model,
       reasoningEffort,
       includeWebSearch,
+      vaultContextBytes: Buffer.byteLength(vaultContext, "utf8"),
       durationMs: Date.now() - startedAt,
     },
     feed: [],
     startedAt: new Date(startedAt).toISOString(),
     completedAt: new Date().toISOString(),
+  });
+  await appendAgentEvent({
+    event: "web.query.completed",
+    thread_id: thread.id,
+    question,
+    model,
+    reasoning_effort: reasoningEffort,
+    include_web_search: includeWebSearch,
+    duration_ms: Date.now() - startedAt,
+    cost,
   });
 
   return json(res, 200, {
@@ -217,9 +231,10 @@ async function handleQueryStream(req, res) {
 
   const { question, threadId, reasoningEffort, includeWebSearch, model } = validated;
   const startedAt = Date.now();
+  const vaultContext = await buildVaultContextPack(question);
   const threadOptions = buildThreadOptions({ model, reasoningEffort, includeWebSearch });
   const thread = threadId ? codex.resumeThread(threadId, threadOptions) : codex.startThread(threadOptions);
-  const { events } = await thread.runStreamed(buildPrompt(question, includeWebSearch), { outputSchema: QUERY_SCHEMA });
+  const { events } = await thread.runStreamed(buildPrompt(question, includeWebSearch, vaultContext), { outputSchema: QUERY_SCHEMA });
 
   res.writeHead(200, {
     "Content-Type": "application/x-ndjson; charset=utf-8",
@@ -305,11 +320,22 @@ async function handleQueryStream(req, res) {
         model,
         reasoningEffort,
         includeWebSearch,
+        vaultContextBytes: Buffer.byteLength(vaultContext, "utf8"),
         durationMs: Date.now() - startedAt,
       },
       feed,
       startedAt: new Date(startedAt).toISOString(),
       completedAt: new Date().toISOString(),
+    });
+    await appendAgentEvent({
+      event: "web.query.completed",
+      thread_id: thread.id,
+      question,
+      model,
+      reasoning_effort: reasoningEffort,
+      include_web_search: includeWebSearch,
+      duration_ms: Date.now() - startedAt,
+      cost,
     });
     writeNdjson(res, {
       type: "result",
@@ -386,12 +412,15 @@ async function handleGetChat(chatId, res) {
   });
 }
 
-function buildPrompt(question, includeWebSearch) {
+function buildPrompt(question, includeWebSearch, vaultContext = "") {
   return `
 You are answering questions against a local-first personal vault.
 
 Primary objective:
 - answer the user's question from the vault as accurately and efficiently as possible
+- you have a guaranteed vault context pack below, generated from the compiled cache plus targeted retrieval
+- use the guaranteed context before spending tool calls on broad file scans
+- if shell/file tools fail, do not claim the vault is inaccessible when the guaranteed context has relevant evidence
 
 Search discipline:
 1. Read \`AGENTS.md\` first if you need the vault contract.
@@ -419,9 +448,80 @@ Answering rules:
 
 Return JSON only.
 
+Guaranteed vault context pack:
+${vaultContext || "(No preloaded vault context was found.)"}
+
 User question:
 ${question}
 `.trim();
+}
+
+async function buildVaultContextPack(question) {
+  const script = path.join(vaultRoot, "tools", "telegram_vault_query.mjs");
+  if (!(await fileExists(script))) {
+    return "";
+  }
+  const env = {
+    ...process.env,
+    VAULT_QUERY_CONTEXT_ONLY: "1",
+  };
+  try {
+    const stdout = await runWithInput({
+      command: "node",
+      args: [script],
+      cwd: vaultRoot,
+      env,
+      input: JSON.stringify({
+          workingDirectory: vaultRoot,
+          question,
+          includeWebSearch: false,
+          model: DEFAULT_MODEL,
+          reasoningEffort: "low",
+        }),
+      timeoutMs: 60_000,
+    });
+    const parsed = JSON.parse(stdout);
+    return String(parsed.vaultContext || "");
+  } catch {
+    return "";
+  }
+}
+
+function runWithInput({ command, args, cwd, env, input, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`${command} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (stdout.length > 3 * 1024 * 1024) {
+        child.kill("SIGTERM");
+        reject(new Error(`${command} stdout exceeded max buffer`));
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(stderr.trim() || `${command} exited with code ${code}`));
+      }
+    });
+    child.stdin.end(input);
+  });
 }
 
 function summarizeTrace(items) {
@@ -656,6 +756,20 @@ async function persistChatTurn({ threadId, question, answer, trace, usage, cost,
 
   await fsp.writeFile(targetPath, JSON.stringify(chat, null, 2), "utf8");
   return chat;
+}
+
+async function appendAgentEvent(event) {
+  try {
+    await fsp.mkdir(path.dirname(agentEventsPath), { recursive: true });
+    const payload = {
+      logged_at: new Date().toISOString(),
+      surface: "web",
+      ...event,
+    };
+    await fsp.appendFile(agentEventsPath, `${JSON.stringify(payload)}\n`, "utf8");
+  } catch {
+    // Event logging must never break user-facing answers.
+  }
 }
 
 async function listChatTraces() {

@@ -8,7 +8,7 @@ import subprocess
 import tarfile
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ TASK_ROOT = Path(os.environ.get("LAMBDA_TASK_ROOT", "/var/task")).resolve()
 WORK_ROOT = Path(os.environ.get("VAULT_WORK_ROOT", "/tmp/my-vault")).resolve()
 
 STATE_DIRS = [
+    ".vault",
     "dashboards",
     "imports",
     "items",
@@ -53,6 +54,8 @@ STATE_BUNDLE_NAME = "vault-state.tar.gz"
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     mode = os.environ.get("VAULT_LAMBDA_MODE", "receiver").strip().lower()
+    if mode == "heartbeat" or event.get("vaultHeartbeat"):
+        return process_heartbeat_event(event)
     if mode == "processor" or event.get("processTelegramUpdate"):
         return process_event(event)
     return receive_webhook(event)
@@ -102,9 +105,13 @@ def process_event(event: dict[str, Any]) -> dict[str, Any]:
     typing = TelegramTypingHeartbeat(update)
     typing.start()
     try:
+        debounce = float(os.environ.get("VAULT_PROCESSOR_DEBOUNCE_SECONDS", "1.5"))
+        if debounce > 0:
+            time.sleep(min(debounce, 10.0))
         prepare_work_root()
         download_state()
-        result = run_telegram_webhook(update)
+        updates = collect_pending_cloud_updates(update)
+        result = run_telegram_webhook(updates)
         upload_state()
     finally:
         typing.stop()
@@ -115,6 +122,87 @@ def process_event(event: dict[str, Any]) -> dict[str, Any]:
         "update_id": update.get("update_id"),
         "result": result,
     }
+
+
+def process_heartbeat_event(event: dict[str, Any]) -> dict[str, Any]:
+    prepare_work_root()
+    download_state()
+    result = run_heartbeat()
+    upload_state()
+    return {"ok": True, "mode": "heartbeat", "result": result}
+
+
+def collect_pending_cloud_updates(seed_update: dict[str, Any]) -> list[dict[str, Any]]:
+    bucket = required_env("VAULT_STATE_BUCKET")
+    prefix = clean_prefix(os.environ.get("VAULT_WEBHOOK_EVENTS_PREFIX", "_webhook-events"))
+    processed = load_cloud_processed_update_ids()
+    updates_by_id: dict[int, dict[str, Any]] = {}
+    seed_id = coerce_update_id(seed_update)
+    if seed_id is not None and seed_id not in processed:
+        updates_by_id[seed_id] = seed_update
+
+    client = boto3.client("s3")
+    now = datetime.now(timezone.utc)
+    prefixes = {
+        f"{prefix}{now:%Y/%m/%d}/",
+        f"{prefix}{(now - timedelta(days=1)):%Y/%m/%d}/",
+    }
+    max_pending = int(os.environ.get("VAULT_PROCESSOR_MAX_PENDING_UPDATES", "8"))
+    for day_prefix in sorted(prefixes):
+        continuation: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {"Bucket": bucket, "Prefix": day_prefix, "MaxKeys": 100}
+            if continuation:
+                kwargs["ContinuationToken"] = continuation
+            response = client.list_objects_v2(**kwargs)
+            for item in response.get("Contents", []):
+                key = item.get("Key")
+                if not key:
+                    continue
+                try:
+                    update = read_json_from_s3(str(key))
+                except Exception as exc:
+                    print(f"Skipping unreadable webhook event {key}: {exc}", flush=True)
+                    continue
+                update_id = coerce_update_id(update)
+                if update_id is None or update_id in processed:
+                    continue
+                updates_by_id.setdefault(update_id, update)
+            if not response.get("IsTruncated"):
+                break
+            continuation = response.get("NextContinuationToken")
+            if not continuation:
+                break
+
+    ordered = [updates_by_id[key] for key in sorted(updates_by_id)]
+    if seed_id is not None and seed_id in updates_by_id:
+        seed_index = sorted(updates_by_id).index(seed_id)
+        ordered = ordered[seed_index : seed_index + max_pending]
+    else:
+        ordered = ordered[:max_pending]
+    return ordered or [seed_update]
+
+
+def coerce_update_id(update: dict[str, Any]) -> int | None:
+    try:
+        return int(update.get("update_id"))
+    except Exception:
+        return None
+
+
+def load_cloud_processed_update_ids() -> set[int]:
+    session_name = os.environ.get("TELEGRAM_SESSION_NAME", "telegram-live")
+    path = WORK_ROOT / "imports" / "telegram-inbox" / f"{session_name} .telegram_processed_updates.jsonl"
+    ids: set[int] = set()
+    if not path.exists():
+        return ids
+    for line in path.read_text(errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+            ids.add(int(record["update_id"]))
+        except Exception:
+            continue
+    return ids
 
 
 def validate_secret(event: dict[str, Any]) -> None:
@@ -287,7 +375,7 @@ def iter_state_paths() -> list[Path]:
     return sorted(paths)
 
 
-def run_telegram_webhook(update: dict[str, Any]) -> dict[str, Any]:
+def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[str, Any]:
     home_dir = WORK_ROOT / ".home"
     codex_home = WORK_ROOT / ".codex"
     npm_cache = WORK_ROOT / ".npm"
@@ -336,6 +424,37 @@ def run_telegram_webhook(update: dict[str, Any]) -> dict[str, Any]:
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "telegram webhook processor failed")
+    return parse_json_output(result.stdout)
+
+
+def run_heartbeat() -> dict[str, Any]:
+    home_dir = WORK_ROOT / ".home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env.setdefault("TELEGRAM_BOT_TOKEN", required_env("TELEGRAM_BOT_TOKEN"))
+    env["HOME"] = str(home_dir)
+    command = [
+        "python3",
+        str(WORK_ROOT / "tools" / "vault_heartbeat.py"),
+        "--vault-root",
+        str(WORK_ROOT),
+    ]
+    chat_id = os.environ.get("TELEGRAM_HEARTBEAT_CHAT_ID", "").strip()
+    if chat_id:
+        command.extend(["--chat-id", chat_id])
+    else:
+        command.append("--dry-run")
+    result = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        cwd=WORK_ROOT,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "vault heartbeat failed")
     return parse_json_output(result.stdout)
 
 

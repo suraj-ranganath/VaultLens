@@ -27,7 +27,7 @@ cleanup() {
 trap cleanup EXIT
 
 INCLUDES=()
-for path in dashboards imports items outputs projects raw topics hot.md index.md log.md; do
+for path in .vault dashboards imports items outputs projects raw topics hot.md index.md log.md; do
   if [ -e "$path" ]; then
     INCLUDES+=("$path")
   fi
