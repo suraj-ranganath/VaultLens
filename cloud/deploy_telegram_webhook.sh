@@ -76,7 +76,43 @@ ensure_ecr_repo() {
     --no-cli-pager >/dev/null
 }
 
+configure_ecr_lifecycle() {
+  local repo_name="$1"
+  aws ecr put-lifecycle-policy \
+    --repository-name "$repo_name" \
+    --region "$AWS_REGION" \
+    --lifecycle-policy-text '{
+      "rules": [
+        {
+          "rulePriority": 1,
+          "description": "Expire untagged deployment layers quickly",
+          "selection": {
+            "tagStatus": "untagged",
+            "countType": "sinceImagePushed",
+            "countUnit": "days",
+            "countNumber": 1
+          },
+          "action": { "type": "expire" }
+        },
+        {
+          "rulePriority": 2,
+          "description": "Keep only the latest deployment images",
+          "selection": {
+            "tagStatus": "any",
+            "countType": "imageCountMoreThan",
+            "countNumber": 8
+          },
+          "action": { "type": "expire" }
+        }
+      ]
+    }' \
+    --cli-connect-timeout 5 \
+    --cli-read-timeout 20 \
+    --no-cli-pager >/dev/null
+}
+
 ensure_ecr_repo "$ECR_REPO"
+configure_ecr_lifecycle "$ECR_REPO"
 
 SAM_CONFIG_FILE="$(mktemp -t my-vault-sam-config).toml"
 cleanup() {
