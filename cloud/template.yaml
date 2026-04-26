@@ -59,8 +59,12 @@ Parameters:
     Description: Telegram chat ID that should receive heartbeat alerts when enabled.
   HeartbeatSchedule:
     Type: String
-    Default: rate(6 hours)
-    Description: EventBridge schedule expression for low-cost surfacing checks.
+    Default: cron(0 8 * * ? *)
+    Description: EventBridge Scheduler expression for the focused daily morning brief.
+  HeartbeatScheduleTimezone:
+    Type: String
+    Default: America/Los_Angeles
+    Description: Timezone used by the focused daily morning brief schedule.
 
 Conditions:
   EnableHeartbeat: !Equals [!Ref HeartbeatEnabled, "true"]
@@ -144,26 +148,40 @@ Resources:
         - S3CrudPolicy:
             BucketName: !Ref VaultStateBucket
 
-  HeartbeatScheduleRule:
-    Type: AWS::Events::Rule
+  HeartbeatSchedulerRole:
+    Type: AWS::IAM::Role
     Condition: EnableHeartbeat
     Properties:
-      Description: Low-cost optional vault heartbeat surfacing check.
-      ScheduleExpression: !Ref HeartbeatSchedule
-      State: ENABLED
-      Targets:
-        - Arn: !GetAtt ProcessorFunction.Arn
-          Id: VaultHeartbeatProcessor
-          Input: '{"vaultHeartbeat": true}'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeVaultMorningBriefProcessor
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ProcessorFunction.Arn
 
-  HeartbeatScheduleInvokePermission:
-    Type: AWS::Lambda::Permission
+  HeartbeatDailySchedule:
+    Type: AWS::Scheduler::Schedule
     Condition: EnableHeartbeat
     Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref ProcessorFunction
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt HeartbeatScheduleRule.Arn
+      Description: Focused daily vault morning brief.
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      ScheduleExpression: !Ref HeartbeatSchedule
+      ScheduleExpressionTimezone: !Ref HeartbeatScheduleTimezone
+      State: ENABLED
+      Target:
+        Arn: !GetAtt ProcessorFunction.Arn
+        RoleArn: !GetAtt HeartbeatSchedulerRole.Arn
+        Input: '{"vaultHeartbeat": true}'
 
   ReceiverFunctionUrl:
     Type: AWS::Lambda::Url

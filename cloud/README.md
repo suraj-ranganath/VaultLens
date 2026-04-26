@@ -21,8 +21,8 @@ The processor has `ReservedConcurrentExecutions: 1` so two Telegram messages can
 - No API Gateway bill: Lambda Function URL is used directly.
 - S3 stores the ignored vault data cheaply.
 - S3 request cost stays low because the ignored vault state is stored as one compressed bundle instead of thousands of tiny objects.
-- Lambda runs only when Telegram sends a message.
-- Scheduled heartbeat surfacing is disabled by default. If enabled, a low-frequency EventBridge rule invokes the existing processor instead of deploying another image.
+- Lambda runs only when Telegram sends a message or the daily brief schedule fires.
+- Scheduled morning brief surfacing is disabled by default. If enabled, EventBridge Scheduler invokes the existing processor once per day instead of deploying another image.
 - Secrets use encrypted Lambda environment variables rather than Secrets Manager, avoiding a recurring Secrets Manager charge.
 
 This is optimized for a personal bot with occasional bursts. If usage becomes heavy, the next upgrade is SQS FIFO between receiver and processor, but that is intentionally not the default.
@@ -108,15 +108,17 @@ The script uploads one compressed `state/vault-state.tar.gz` bundle containing:
 
 `.vault/` is included because AWS is the canonical vault state and the compiled cache/search/event surfaces are durable runtime state, but it remains ignored by Git.
 
-## Optional Heartbeat Surfacing
+## Optional Daily Morning Brief
 
-Heartbeat checks are off by default to keep costs down. To enable them, deploy with:
+Daily morning briefs are off by default to keep costs down. To enable the focused 8am Pacific Telegram brief, deploy with:
 
 ```bash
 HEARTBEAT_ENABLED=true TELEGRAM_HEARTBEAT_CHAT_ID=123456789 npm run cloud:deploy
 ```
 
-The heartbeat path reuses the processor function, runs `tools/vault_heartbeat.py`, sends a Telegram message only when there are timely alerts, and otherwise exits after a cheap local scan.
+The schedule defaults to `cron(0 8 * * ? *)` in `America/Los_Angeles`. Override with `HEARTBEAT_SCHEDULE` and `HEARTBEAT_SCHEDULE_TIMEZONE` if needed.
+
+The heartbeat path reuses the processor function, runs `tools/vault_heartbeat.py`, and avoids an LLM call. It sends a Telegram message only when the canonical vault has urgent next-7-day deadlines/reminders, fresh high-impact jobs/opportunities, or one high-value recent reading. If there is no meaningful brief, it exits after a cheap local scan without messaging you.
 
 ## Local Webhook Test
 

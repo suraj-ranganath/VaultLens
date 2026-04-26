@@ -21,7 +21,8 @@ VAULT_AGENT_REASONING_EFFORT="${VAULT_AGENT_REASONING_EFFORT:-medium}"
 TELEGRAM_ALLOWED_CHAT_IDS="${TELEGRAM_ALLOWED_CHAT_IDS:-}"
 HEARTBEAT_ENABLED="${HEARTBEAT_ENABLED:-false}"
 TELEGRAM_HEARTBEAT_CHAT_ID="${TELEGRAM_HEARTBEAT_CHAT_ID:-}"
-HEARTBEAT_SCHEDULE="${HEARTBEAT_SCHEDULE:-rate(6 hours)}"
+HEARTBEAT_SCHEDULE="${HEARTBEAT_SCHEDULE:-cron(0 8 * * ? *)}"
+HEARTBEAT_SCHEDULE_TIMEZONE="${HEARTBEAT_SCHEDULE_TIMEZONE:-${HEARTBEAT_TIMEZONE:-America/Los_Angeles}}"
 AWS_ACCOUNT_ID="$(
   aws sts get-caller-identity \
     --query Account \
@@ -52,6 +53,7 @@ export VAULT_AGENT_REASONING_EFFORT
 export HEARTBEAT_ENABLED
 export TELEGRAM_HEARTBEAT_CHAT_ID
 export HEARTBEAT_SCHEDULE
+export HEARTBEAT_SCHEDULE_TIMEZONE
 export STACK_NAME
 export AWS_REGION
 export ECR_URI
@@ -143,6 +145,7 @@ overrides = {
     "VaultAgentReasoningEffort": os.environ["VAULT_AGENT_REASONING_EFFORT"],
     "HeartbeatEnabled": os.environ["HEARTBEAT_ENABLED"],
     "HeartbeatSchedule": os.environ["HEARTBEAT_SCHEDULE"],
+    "HeartbeatScheduleTimezone": os.environ["HEARTBEAT_SCHEDULE_TIMEZONE"],
 }
 allowed = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
 if allowed:

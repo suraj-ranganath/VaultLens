@@ -126,6 +126,111 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
         self.assertTrue(captured["key"].startswith("webhook-events/2026/04/26/"))
         self.assertNotIn("webhook-events//", captured["key"])
 
+    def test_daily_brief_stays_focused_on_urgent_and_high_value_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "items" / "jobs").mkdir(parents=True)
+            (root / "items" / "articles").mkdir(parents=True)
+            (root / "items" / "reminders").mkdir(parents=True)
+
+            (root / "items" / "jobs" / "2026-04-25 ai lab - research engineer.md").write_text(
+                """---
+type: job
+title: AI Lab - Research Engineer
+url: https://example.com/job
+discovered_on: 2026-04-25
+posted_on: 2026-04-25
+status: open
+priority: high
+application_status: to_apply
+tags: [ai, research]
+topics: [job-search]
+why_saved: Strong fit and fresh role.
+---
+""",
+                encoding="utf-8",
+            )
+            (root / "items" / "jobs" / "2026-04-24 done job.md").write_text(
+                """---
+type: job
+title: Already Applied Role
+url: https://example.com/applied
+discovered_on: 2026-04-24
+posted_on: 2026-04-24
+status: open
+priority: high
+application_status: applied
+tags: [ai]
+---
+""",
+                encoding="utf-8",
+            )
+            (root / "items" / "reminders" / "2026-04-27 submit form.md").write_text(
+                """---
+type: reminder
+title: Submit scholarship form
+discovered_on: 2026-04-20
+deadline: 2026-04-27
+status: open
+priority: critical
+why_saved: Explicit reminder.
+---
+""",
+                encoding="utf-8",
+            )
+            (root / "items" / "articles" / "2026-04-26 agent systems.md").write_text(
+                """---
+type: article
+title: Agent Systems Design
+url: https://example.com/agents
+discovered_on: 2026-04-26
+status: open
+priority: high
+tags: [agents, systems]
+topics: [ai, coding]
+why_saved: High-impact ideas for vault agent design.
+---
+""",
+                encoding="utf-8",
+            )
+            (root / "items" / "articles" / "2026-04-01 low signal.md").write_text(
+                """---
+type: article
+title: Low Signal Reading
+url: https://example.com/low
+discovered_on: 2026-04-01
+status: open
+priority: low
+tags: [misc]
+---
+""",
+                encoding="utf-8",
+            )
+
+            proc = subprocess.run(
+                [
+                    "python3",
+                    str(REPO_ROOT / "tools" / "vault_heartbeat.py"),
+                    "--vault-root",
+                    str(root),
+                    "--today",
+                    "2026-04-26",
+                    "--dry-run",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertTrue(payload["should_send"])
+            self.assertEqual(payload["action_count"], 2)
+            self.assertEqual(payload["recommended_reading"]["title"], "Agent Systems Design")
+            self.assertIn("Submit scholarship form", payload["text"])
+            self.assertIn("AI Lab - Research Engineer", payload["text"])
+            self.assertNotIn("Already Applied Role", payload["text"])
+            self.assertNotIn("Low Signal Reading", payload["text"])
+
     def _telegram_update(self, update_id: int, timestamp: int, text: str) -> dict:
         return {
             "update_id": update_id,

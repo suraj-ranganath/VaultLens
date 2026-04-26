@@ -6,111 +6,302 @@ import argparse
 import json
 import os
 import re
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import requests
 
 try:
-    from vault_compile_cache import main as _compile_main  # noqa: F401
-except Exception:
-    _compile_main = None
+    import yaml
+except Exception:  # pragma: no cover - yaml is present in Lambda, fallback stays cheap locally.
+    yaml = None
 
 
 API_ROOT = "https://api.telegram.org"
+DONE_STATUSES = {"done", "closed", "archived", "applied", "rejected"}
+TIMELY_TYPES = {"job", "opportunity", "event", "reminder"}
+READING_TYPES = {"article", "resource", "tweet"}
+PRIORITY_SCORE = {"critical": 5, "high": 4, "medium": 2, "low": 1}
+DEFAULT_TIMEZONE_LABEL = "America/Los_Angeles"
+DISPLAY_TITLE_LIMIT = 120
+
+
+@dataclass
+class Note:
+    path: Path
+    rel_path: str
+    frontmatter: dict[str, Any]
+    body: str
+
+    @property
+    def title(self) -> str:
+        return clean_scalar(self.frontmatter.get("title")) or self.path.stem
+
+    @property
+    def note_type(self) -> str:
+        return clean_scalar(self.frontmatter.get("type")) or infer_type(self.rel_path)
+
+    @property
+    def status(self) -> str:
+        return clean_scalar(self.frontmatter.get("status")).lower()
+
+    @property
+    def priority(self) -> str:
+        return clean_scalar(self.frontmatter.get("priority")).lower() or "medium"
+
+    @property
+    def url(self) -> str:
+        return clean_scalar(self.frontmatter.get("url"))
+
+    @property
+    def why_saved(self) -> str:
+        return clean_scalar(self.frontmatter.get("why_saved"))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Surface time-sensitive vault items when useful.")
+    parser = argparse.ArgumentParser(description="Send a focused daily vault brief.")
     parser.add_argument("--vault-root", type=Path, default=Path.cwd())
     parser.add_argument("--telegram-token", default=os.environ.get("TELEGRAM_BOT_TOKEN", ""))
     parser.add_argument("--chat-id", default=os.environ.get("TELEGRAM_HEARTBEAT_CHAT_ID", ""))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--today", default=os.environ.get("VAULT_BRIEF_TODAY", ""))
+    parser.add_argument("--max-actions", type=int, default=int(os.environ.get("VAULT_BRIEF_MAX_ACTIONS", "5")))
     args = parser.parse_args()
 
     vault_root = args.vault_root.resolve()
-    alerts = collect_alerts(vault_root)
-    payload = {"ok": True, "alert_count": len(alerts), "alerts": alerts}
+    today = parse_date(args.today) or date.today()
+    notes = load_notes(vault_root)
+    actions = collect_action_items(notes, today=today, max_items=args.max_actions)
+    reading = pick_recommended_reading(notes, today=today)
+    should_send = bool(actions or reading)
+    text = render_daily_brief(actions, reading, today=today)
+    payload = {
+        "ok": True,
+        "mode": "daily_brief",
+        "date": today.isoformat(),
+        "should_send": should_send,
+        "action_count": len(actions),
+        "recommended_reading": reading,
+        "actions": actions,
+        "text": text,
+    }
 
-    if alerts and not args.dry_run and args.telegram_token and args.chat_id:
-        send_telegram(args.telegram_token, args.chat_id, render_alerts(alerts))
+    if should_send and not args.dry_run and args.telegram_token and args.chat_id:
+        send_telegram(args.telegram_token, args.chat_id, text)
 
     print(json.dumps(payload, indent=2))
 
 
-def collect_alerts(vault_root: Path) -> list[dict[str, Any]]:
-    today = date.today()
-    soon = today + timedelta(days=7)
-    alerts: list[dict[str, Any]] = []
-    for path in sorted((vault_root / "items").rglob("*.md")) if (vault_root / "items").exists() else []:
+def load_notes(vault_root: Path) -> list[Note]:
+    notes: list[Note] = []
+    items_root = vault_root / "items"
+    if not items_root.exists():
+        return notes
+    for path in sorted(items_root.rglob("*.md")):
         text = path.read_text(encoding="utf-8", errors="replace")
-        fm = parse_frontmatter(text)
-        note_type = str(fm.get("type") or infer_type(path, vault_root)).strip()
-        title = str(fm.get("title") or path.stem).strip()
-        deadline = parse_date(str(fm.get("deadline") or ""))
-        status = str(fm.get("status") or "").strip()
-        application_status = str(fm.get("application_status") or "").strip()
-        if deadline and today <= deadline <= soon and status not in {"done", "closed", "archived"}:
-            alerts.append(
-                {
-                    "kind": "deadline",
-                    "path": path.relative_to(vault_root).as_posix(),
-                    "title": title,
-                    "date": deadline.isoformat(),
-                    "type": note_type,
-                    "status": status or application_status or None,
-                }
+        frontmatter, body = parse_frontmatter(text)
+        notes.append(
+            Note(
+                path=path,
+                rel_path=path.relative_to(vault_root).as_posix(),
+                frontmatter=frontmatter,
+                body=body,
             )
-        if note_type == "job" and application_status in {"to_apply", "to_review"}:
-            posted = parse_date(str(fm.get("posted_on") or fm.get("published_on") or fm.get("discovered_on") or ""))
-            if posted and today - timedelta(days=14) <= posted <= today:
-                alerts.append(
-                    {
-                        "kind": "job_action",
-                        "path": path.relative_to(vault_root).as_posix(),
-                        "title": title,
-                        "date": posted.isoformat(),
-                        "type": note_type,
-                        "status": application_status,
-                    }
+        )
+    return notes
+
+
+def collect_action_items(notes: list[Note], *, today: date, max_items: int) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for note in notes:
+        if is_done(note):
+            continue
+        note_type = note.note_type
+        if note_type not in TIMELY_TYPES:
+            continue
+        deadline = parse_date(clean_scalar(note.frontmatter.get("deadline")))
+        revisit_after = parse_date(clean_scalar(note.frontmatter.get("revisit_after")))
+        discovered = parse_date(clean_scalar(note.frontmatter.get("discovered_on")))
+        posted = parse_date(clean_scalar(note.frontmatter.get("posted_on") or note.frontmatter.get("published_on")))
+        app_status = clean_scalar(note.frontmatter.get("application_status")).lower()
+
+        if deadline and today <= deadline <= today + timedelta(days=7):
+            candidates.append(
+                action_payload(
+                    note,
+                    kind="deadline",
+                    date_value=deadline,
+                    score=100 - (deadline - today).days * 8 + priority_points(note),
+                    reason=f"deadline in {(deadline - today).days} day(s)",
                 )
-    alerts.sort(key=lambda item: (item.get("date") or "9999", item.get("kind") or ""))
-    return alerts[:12]
+            )
+            continue
+
+        if revisit_after and today <= revisit_after <= today + timedelta(days=7):
+            candidates.append(
+                action_payload(
+                    note,
+                    kind="reminder",
+                    date_value=revisit_after,
+                    score=85 - (revisit_after - today).days * 6 + priority_points(note),
+                    reason="explicit reminder/revisit date",
+                )
+            )
+            continue
+
+        if note_type in {"job", "opportunity"} and app_status in {"to_apply", "to_review", "watching", ""}:
+            recency_date = posted or discovered
+            if not recency_date:
+                continue
+            age = (today - recency_date).days
+            high_impact = note.priority in {"high", "critical"} or has_interest_signal(note, {"ai", "agent", "research", "ml", "job-search"})
+            if 0 <= age <= 10 or (high_impact and 0 <= age <= 21):
+                candidates.append(
+                    action_payload(
+                        note,
+                        kind="apply_early",
+                        date_value=recency_date,
+                        score=70 - min(age, 21) * 2 + priority_points(note) + (10 if high_impact else 0),
+                        reason="fresh/high-impact opportunity; applying early matters",
+                    )
+                )
+
+    candidates.sort(key=lambda item: (-int(item["score"]), item.get("date") or "9999-99-99", item["title"]))
+    deduped = dedupe_by_path(candidates)
+    return deduped[: max(1, max_items)]
 
 
-def render_alerts(alerts: list[dict[str, Any]]) -> str:
-    lines = ["Vault heartbeat: things that may need attention now"]
-    for alert in alerts:
-        lines.append("")
-        lines.append(f"- {alert['kind']}: {alert['title']}")
-        lines.append(f"  date: {alert.get('date')}")
-        lines.append(f"  status: {alert.get('status') or 'unknown'}")
-        lines.append(f"  note: {alert['path']}")
+def pick_recommended_reading(notes: list[Note], *, today: date) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+    for note in notes:
+        if is_done(note) or note.note_type not in READING_TYPES:
+            continue
+        discovered = parse_date(clean_scalar(note.frontmatter.get("discovered_on")))
+        if not discovered:
+            continue
+        age = (today - discovered).days
+        if age < 0 or age > 30:
+            continue
+        interest_bonus = interest_points(note)
+        high_value = note.priority in {"critical", "high"} or interest_bonus >= 8
+        if not high_value:
+            continue
+        score = 50 - age + priority_points(note) + interest_bonus
+        candidates.append(
+            {
+                "kind": "recommended_reading",
+                "title": note.title,
+                "path": note.rel_path,
+                "url": note.url or None,
+                "date": discovered.isoformat(),
+                "priority": note.priority,
+                "score": score,
+                "reason": reading_reason(note, age),
+            }
+        )
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (-int(item["score"]), -date_sort_value(item.get("date"))))
+    return candidates[0]
+
+
+def action_payload(note: Note, *, kind: str, date_value: date, score: int, reason: str) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "title": note.title,
+        "path": note.rel_path,
+        "url": note.url or None,
+        "date": date_value.isoformat(),
+        "type": note.note_type,
+        "status": note.status or clean_scalar(note.frontmatter.get("application_status")) or None,
+        "priority": note.priority,
+        "score": score,
+        "reason": reason,
+    }
+
+
+def render_daily_brief(actions: list[dict[str, Any]], reading: dict[str, Any] | None, *, today: date) -> str:
+    title = today.strftime("%a, %b %-d") if os.name != "nt" else today.strftime("%a, %b %#d")
+    lines = [
+        f"Morning vault brief - {title}",
+        "Only urgent or high-impact items. No filler.",
+    ]
+    if actions:
+        lines.extend(["", "Must do / decide this week:"])
+        for idx, item in enumerate(actions, start=1):
+            lines.append(f"{idx}. {brief_title(item['title'])}")
+            lines.append(f"   Why: {item['reason']} ({item['type']}, {item.get('priority')})")
+            lines.append(f"   Date: {item.get('date')} | Status: {item.get('status') or 'unknown'}")
+            source = item.get("url") or item.get("path")
+            lines.append(f"   Source: {source}")
+    if reading:
+        lines.extend(["", "Recommended reading:"])
+        lines.append(f"- {brief_title(reading['title'])}")
+        lines.append(f"  Why: {reading['reason']}")
+        lines.append(f"  Source: {reading.get('url') or reading.get('path')}")
+    if not actions and not reading:
+        lines.extend(["", "No urgent next-7-day items or high-value recent reading found."])
     return "\n".join(lines)
 
 
 def send_telegram(token: str, chat_id: str, text: str) -> None:
-    response = requests.post(f"{API_ROOT}/bot{token}/sendMessage", data={"chat_id": chat_id, "text": text}, timeout=30)
+    response = requests.post(
+        f"{API_ROOT}/bot{token}/sendMessage",
+        data={
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": "true",
+        },
+        timeout=30,
+    )
     response.raise_for_status()
 
 
-def parse_frontmatter(text: str) -> dict[str, Any]:
+def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     if not text.startswith("---\n"):
-        return {}
+        return {}, text
     end = text.find("\n---\n", 4)
     if end == -1:
-        return {}
+        return {}, text
+    raw = text[4:end]
+    body = text[end + 5 :]
+    if yaml is not None:
+        try:
+            loaded = yaml.safe_load(raw) or {}
+            if isinstance(loaded, dict):
+                return loaded, body
+        except Exception:
+            pass
     result: dict[str, Any] = {}
-    for line in text[4:end].splitlines():
+    for line in raw.splitlines():
         match = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
         if match:
             result[match.group(1)] = match.group(2).strip().strip("\"'")
-    return result
+    return result, body
+
+
+def clean_scalar(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(str(item) for item in value)
+    return str(value).strip().strip("\"'")
+
+
+def clean_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [clean_scalar(item) for item in value if clean_scalar(item)]
+    if isinstance(value, str):
+        return [part.strip().strip("\"'") for part in re.split(r"[,;]", value.strip("[]")) if part.strip()]
+    return [clean_scalar(value)]
 
 
 def parse_date(value: str) -> date | None:
-    match = re.match(r"^(\d{4}-\d{2}-\d{2})", value.strip())
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})", str(value or "").strip())
     if not match:
         return None
     try:
@@ -119,10 +310,81 @@ def parse_date(value: str) -> date | None:
         return None
 
 
-def infer_type(path: Path, vault_root: Path) -> str:
-    rel = path.relative_to(vault_root).as_posix()
-    parts = rel.split("/")
+def infer_type(rel_path: str) -> str:
+    parts = rel_path.split("/")
     return parts[1].rstrip("s") if len(parts) > 1 and parts[0] == "items" else "note"
+
+
+def priority_points(note: Note) -> int:
+    return PRIORITY_SCORE.get(note.priority, 2) * 4
+
+
+def interest_points(note: Note) -> int:
+    topics = " ".join(clean_list(note.frontmatter.get("topics"))).lower()
+    tags = " ".join(clean_list(note.frontmatter.get("tags"))).lower()
+    signals = " ".join(clean_list(note.frontmatter.get("interest_signals"))).lower()
+    haystack = " ".join([topics, tags, signals, note.title.lower(), note.why_saved.lower()])
+    score = 0
+    for keyword in ["agent", "llm", "ai", "ml", "research", "systems", "coding", "startup", "job-search"]:
+        if keyword in haystack:
+            score += 3
+    if "saved_2_times" in haystack or "high-impact" in haystack:
+        score += 4
+    return score
+
+
+def is_done(note: Note) -> bool:
+    statuses = {
+        note.status,
+        clean_scalar(note.frontmatter.get("application_status")).lower(),
+    }
+    return bool(statuses & DONE_STATUSES)
+
+
+def has_interest_signal(note: Note, keywords: set[str]) -> bool:
+    haystack = " ".join(
+        [
+            note.title,
+            note.why_saved,
+            clean_scalar(note.frontmatter.get("topics")),
+            clean_scalar(note.frontmatter.get("tags")),
+            clean_scalar(note.frontmatter.get("interest_signals")),
+        ]
+    ).lower()
+    return any(keyword.lower() in haystack for keyword in keywords)
+
+
+def reading_reason(note: Note, age: int) -> str:
+    if note.priority in {"critical", "high"}:
+        return f"recently saved {age} day(s) ago and marked {note.priority} priority"
+    return f"recently saved {age} day(s) ago and strongly matches recurring interests"
+
+
+def brief_title(value: Any) -> str:
+    title = clean_scalar(value)
+    title = re.sub(r"\s+", " ", title).strip()
+    if len(title) <= DISPLAY_TITLE_LIMIT:
+        return title
+    return title[: DISPLAY_TITLE_LIMIT - 3].rstrip() + "..."
+
+
+def dedupe_by_path(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    output: list[dict[str, Any]] = []
+    for item in items:
+        path = str(item.get("path") or "")
+        if path in seen:
+            continue
+        seen.add(path)
+        output.append(item)
+    return output
+
+
+def date_sort_value(value: Any) -> int:
+    parsed = parse_date(clean_scalar(value))
+    if not parsed:
+        return 0
+    return parsed.year * 10000 + parsed.month * 100 + parsed.day
 
 
 if __name__ == "__main__":

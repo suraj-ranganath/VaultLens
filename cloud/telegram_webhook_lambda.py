@@ -127,7 +127,7 @@ def process_event(event: dict[str, Any]) -> dict[str, Any]:
 def process_heartbeat_event(event: dict[str, Any]) -> dict[str, Any]:
     prepare_work_root()
     download_state()
-    result = run_heartbeat()
+    result = run_heartbeat(dry_run=bool(event.get("dryRun")))
     upload_state()
     return {"ok": True, "mode": "heartbeat", "result": result}
 
@@ -431,7 +431,7 @@ def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[
     return parse_json_output(result.stdout)
 
 
-def run_heartbeat() -> dict[str, Any]:
+def run_heartbeat(*, dry_run: bool = False) -> dict[str, Any]:
     home_dir = WORK_ROOT / ".home"
     home_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -444,7 +444,7 @@ def run_heartbeat() -> dict[str, Any]:
         str(WORK_ROOT),
     ]
     chat_id = os.environ.get("TELEGRAM_HEARTBEAT_CHAT_ID", "").strip()
-    if chat_id:
+    if chat_id and not dry_run:
         command.extend(["--chat-id", chat_id])
     else:
         command.append("--dry-run")

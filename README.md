@@ -129,6 +129,8 @@ npm run cloud:sync-state
 
 See [cloud/README.md](cloud/README.md) for the AWS Lambda Function URL + S3 state architecture. The cloud path uses Telegram webhooks, validates a Telegram webhook secret, invokes a single-concurrency processor, and runs the same Codex-backed Telegram agent used locally.
 
+To receive the focused daily 8am Telegram brief from the AWS-canonical vault, set `HEARTBEAT_ENABLED=true`, `TELEGRAM_HEARTBEAT_CHAT_ID=<your chat id>`, and redeploy. The brief is a deterministic, low-cost scan: it sends only urgent next-7-day deadlines/reminders, fresh high-impact jobs/opportunities, and at most one high-value recent reading.
+
 ### 5. Run a health check directly
 
 ```bash
