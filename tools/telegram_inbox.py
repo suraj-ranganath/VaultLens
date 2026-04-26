@@ -1034,9 +1034,12 @@ def format_telegram_query_response(query_result: dict[str, Any]) -> str:
     citations = []
     for citation in answer.get("citations") or []:
         source_url = str(citation.get("source_url") or "").strip()
-        if not source_url:
-            continue
-        citations.append((str(citation.get("title") or citation.get("path") or "Source").strip(), source_url))
+        path = str(citation.get("path") or "").strip()
+        title = str(citation.get("title") or path or "Source").strip()
+        if source_url:
+            citations.append((title, source_url))
+        elif path:
+            citations.append((title, f"vault:{path}"))
 
     lines = [body] if body else ["No answer available."]
     if citations:

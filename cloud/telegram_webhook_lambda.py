@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+import requests
 
 
 TASK_ROOT = Path(os.environ.get("LAMBDA_TASK_ROOT", "/var/task")).resolve()
@@ -70,6 +71,7 @@ def receive_webhook(event: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         return http_response(400, {"ok": False, "error": "invalid_body", "detail": str(exc)})
     update_id = str(update.get("update_id") or f"unknown-{int(time.time() * 1000)}")
+    send_typing_for_update(update)
     raw_key = put_raw_update(update, update_id)
 
     processor_name = required_env("VAULT_PROCESSOR_FUNCTION_NAME")
@@ -96,8 +98,11 @@ def process_event(event: dict[str, Any]) -> dict[str, Any]:
         else:
             raise ValueError("Processor event did not include update or rawUpdateKey")
 
+    send_typing_for_update(update)
     prepare_work_root()
+    send_typing_for_update(update)
     download_state()
+    send_typing_for_update(update)
     result = run_telegram_webhook(update)
     upload_state()
 
@@ -128,6 +133,39 @@ def parse_body(event: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("Telegram webhook body must be a JSON object")
     return payload
+
+
+def send_typing_for_update(update: dict[str, Any]) -> None:
+    chat_id = extract_chat_id(update)
+    if chat_id is None:
+        return
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        return
+    try:
+        requests.get(
+            f"https://api.telegram.org/bot{token}/sendChatAction",
+            params={"chat_id": chat_id, "action": "typing"},
+            timeout=3,
+        )
+    except Exception:
+        pass
+
+
+def extract_chat_id(update: dict[str, Any]) -> int | None:
+    message = (
+        update.get("message")
+        or update.get("edited_message")
+        or update.get("channel_post")
+        or update.get("edited_channel_post")
+        or {}
+    )
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    try:
+        return int(chat_id)
+    except Exception:
+        return None
 
 
 def put_raw_update(update: dict[str, Any], update_id: str) -> str:

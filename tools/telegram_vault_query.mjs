@@ -182,6 +182,8 @@ Answering rules:
 - treat the local vault as the source of truth
 - for ingestion-history questions, use stored ingest traces and decision logs rather than guessing
 - web search is ${includeWebSearch ? "allowed only when the vault is insufficient and external context materially helps" : "disabled for this turn"}
+- if a question asks about a person and the vault only has a relationship note plus a profile/linkedin reference, still use that as weak context and clearly label it as limited evidence
+- for compatibility/person-summary questions, combine what the vault knows about the user with any captured profile/person notes; if profile detail is thin and web search is enabled, you may look up public context from the provided profile URL, but distinguish searched public context from vault memory
 - cite the vault files you actually relied on in the structured \`citations\` array
 - cite paths relative to the vault root in the structured \`citations\` array
 - in \`answer_markdown\`, place inline markdown citations directly next to the claims they support
@@ -273,6 +275,10 @@ async function buildVaultContextPack(vaultRoot, question) {
     }
   }
 
+  for (const item of await relationshipContextItems(vaultRoot, question)) {
+    sections.push(renderContextSection(item.relativePath, item.snippet));
+  }
+
   for (const item of await profileContextItems(vaultRoot, terms)) {
     sections.push(renderContextSection(item.relativePath, item.snippet));
   }
@@ -292,6 +298,67 @@ async function buildVaultContextPack(vaultRoot, question) {
   }
 
   return sections.join("\n\n").slice(0, 50_000);
+}
+
+async function relationshipContextItems(vaultRoot, question) {
+  if (!/\bdating|relationship|partner|girlfriend|boyfriend|compatible|compatibility\b/i.test(question)) {
+    return [];
+  }
+
+  const textParts = [];
+  for (const relativePath of TELEGRAM_CONTEXT_FILES) {
+    const text = await readTextIfExists(path.join(vaultRoot, relativePath));
+    if (text) {
+      textParts.push(text);
+    }
+  }
+  const names = extractRelationshipNames(textParts.join("\n")).slice(0, 5);
+  if (!names.length) {
+    return [];
+  }
+
+  const files = await collectMarkdownCandidates(vaultRoot);
+  const items = [];
+  const seen = new Set();
+  for (const name of names) {
+    const parts = name.toLowerCase().split(/\s+/).filter(Boolean);
+    for (const candidate of files) {
+      const haystack = `${candidate.relativePath}\n${frontmatterAndHead(candidate.text)}`.toLowerCase();
+      if (parts.every((part) => haystack.includes(part)) && !seen.has(candidate.relativePath)) {
+        seen.add(candidate.relativePath);
+        items.push({
+          relativePath: candidate.relativePath,
+          snippet: summarizeMarkdown(candidate.text),
+        });
+      }
+    }
+  }
+  return items.slice(0, 8);
+}
+
+function extractRelationshipNames(text) {
+  const names = new Set();
+  const patterns = [
+    /\bdating\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/g,
+    /\brelationship-status memory:\s*they are dating\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/g,
+    /\bLinkedIn profile link for\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)/g,
+    /\blinkedin-profile-([a-z]+)-([a-z]+)/gi,
+  ];
+  for (const pattern of patterns) {
+    for (const match of String(text || "").matchAll(pattern)) {
+      if (match.length >= 3 && pattern.flags.includes("i")) {
+        names.add(`${capitalize(match[1])} ${capitalize(match[2])}`.trim());
+      } else if (match[1]) {
+        names.add(match[1].trim());
+      }
+    }
+  }
+  return [...names];
+}
+
+function capitalize(value) {
+  const text = String(value || "").trim();
+  return text ? `${text[0].toUpperCase()}${text.slice(1).toLowerCase()}` : "";
 }
 
 function queryTerms(question) {
@@ -328,7 +395,7 @@ async function collectMarkdownCandidates(vaultRoot) {
     files.push(...(await listFiles(path.join(vaultRoot, root), [".md"])));
   }
   const candidates = [];
-  for (const file of files.slice(0, 600)) {
+  for (const file of files.slice(0, 2500)) {
     const text = await readTextIfExists(file);
     if (!text) {
       continue;
@@ -501,7 +568,7 @@ function trimForContext(text, limit) {
 async function hydrateAnswer(answer, vaultRoot) {
   const citations = [];
   for (const citation of Array.isArray(answer.citations) ? answer.citations : []) {
-    const sourceUrl = citation.source_url || (await readPrimaryUrlForCitation(vaultRoot, citation.path));
+    const sourceUrl = await sourceUrlForCitation(vaultRoot, citation);
     const vaultUrl = buildVaultUrl(citation.path);
     citations.push({
       ...citation,
@@ -516,6 +583,14 @@ async function hydrateAnswer(answer, vaultRoot) {
     citations,
     answer_markdown: rewriteAnswerMarkdownLinks(String(answer.answer_markdown || ""), citations),
   };
+}
+
+async function sourceUrlForCitation(vaultRoot, citation) {
+  const relativePath = String(citation.path || "").trim();
+  if (!relativePath.startsWith("items/") && !relativePath.startsWith("topics/") && !relativePath.startsWith("projects/") && !relativePath.startsWith("outputs/")) {
+    return null;
+  }
+  return citation.source_url || (await readPrimaryUrlForCitation(vaultRoot, relativePath));
 }
 
 async function readPrimaryUrlForCitation(vaultRoot, relativePath) {
