@@ -39,6 +39,7 @@ ATTACHMENT_ANALYSIS_MAX_BYTES = 8 * 1024 * 1024
 ATTACHMENT_ANALYSIS_TIMEOUT_SECONDS = 90
 DEFAULT_CALENDAR_ID = "primary"
 DEFAULT_TIMEZONE = "America/Los_Angeles"
+URL_RE = re.compile(r"https?://\S+")
 CALENDAR_INTENT_RE = re.compile(
     r"\b(calendar|cal|gcal|schedule|scheduled|save (?:this )?(?:event|class|meeting)|add (?:this )?(?:event|class|meeting)|"
     r"put (?:this )?on (?:my )?calendar|reschedule|move (?:the )?(?:event|class|meeting)|modify (?:the )?(?:event|class|meeting)|"
@@ -404,6 +405,17 @@ def clean_attachment_list(value: Any, *, limit: int = 5, item_limit: int = 180) 
 def clean_attachment_text(value: Any, *, limit: int = 900) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     return text[:limit]
+
+
+def extract_message_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in URL_RE.findall(text or ""):
+        url = match.rstrip(".,;:!?)\"]}'>")
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
 
 
 def save_attachment_bytes(
@@ -1226,6 +1238,34 @@ def execute_agent_actions(
             results.append({"tool": tool, "status": "ok", "reason": reason})
             continue
 
+        if tool == "refresh_live_metadata_current_links":
+            urls = extract_message_urls(str(normalized_message.get("raw_text") or ""))
+            if not urls:
+                results.append({"tool": tool, "status": "skipped", "reason": "No URL found in message."})
+                continue
+            enrich_script = vault_root / "tools" / "enrich_live_metadata.py"
+            command = [
+                "python3",
+                str(enrich_script),
+                "--vault-root",
+                str(vault_root),
+                "--mode",
+                "targeted",
+            ]
+            for url in urls:
+                command.extend(["--url", url])
+            proc = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                cwd=vault_root,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "targeted live metadata enrichment failed")
+            results.append({"tool": tool, "status": "ok", "reason": reason, "urls": urls})
+            continue
+
         if tool == "answer_vault_query":
             prior_thread_id = (state.get("query_threads") or {}).get(str(normalized_message["chat_id"]))
             query_result = invoke_vault_query_agent(
@@ -1569,6 +1609,23 @@ def process_update_batch(
         if decision.get("classification") == "vault_query" and not any(action["tool"] == "answer_vault_query" for action in actions):
             actions = ensure_action_order(
                 actions + [{"tool": "answer_vault_query", "reason": "Answer the user's vault question directly in Telegram."}],
+                store_in_vault=bool(decision.get("storeInVault")),
+                include_ingest=ingest_after_sync,
+            )
+        if (
+            decision.get("storeInVault")
+            and ingest_after_sync
+            and extract_message_urls(str(normalized.get("raw_text") or ""))
+            and not any(str(action.get("tool") or "").startswith("refresh_live_metadata_") for action in actions)
+        ):
+            actions = ensure_action_order(
+                actions
+                + [
+                    {
+                        "tool": "refresh_live_metadata_current_links",
+                        "reason": "Try immediate lightweight metadata extraction for the exact link the user just saved.",
+                    }
+                ],
                 store_in_vault=bool(decision.get("storeInVault")),
                 include_ingest=ingest_after_sync,
             )

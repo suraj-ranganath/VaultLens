@@ -89,6 +89,11 @@ def normalize_url(url: str) -> str:
     return urlunparse((parsed.scheme or "https", parsed.netloc.lower(), parsed.path, "", parsed.query, ""))
 
 
+def url_match_key(url: str) -> str:
+    parsed = urlparse(normalize_url(url))
+    return urlunparse((parsed.scheme or "https", parsed.netloc.lower().removeprefix("www."), parsed.path.rstrip("/"), "", "", ""))
+
+
 def prettify_text(text: str) -> str:
     text = text.replace("_", " ").replace("-", " ")
     text = re.sub(r"\s+", " ", text).strip()
@@ -830,6 +835,40 @@ def collect_notes(vault_root: Path, cutoff: date, mode: str) -> list[Path]:
     return selected
 
 
+def collect_notes_for_targets(vault_root: Path, paths: list[str], urls: list[str]) -> list[Path]:
+    selected: list[Path] = []
+    seen: set[Path] = set()
+
+    for raw_path in paths:
+        candidate = (vault_root / raw_path).resolve()
+        try:
+            candidate.relative_to(vault_root)
+        except ValueError:
+            continue
+        if candidate.exists() and candidate.suffix == ".md" and candidate not in seen:
+            selected.append(candidate)
+            seen.add(candidate)
+
+    url_keys = {url_match_key(url) for url in urls if str(url or "").strip()}
+    if not url_keys:
+        return selected
+
+    folders = ["items/jobs", "items/opportunities", "items/articles", "items/resources", "items/events", "items/tweets", "items/misc"]
+    for folder in folders:
+        for path in iter_note_paths(vault_root / folder):
+            if path in seen:
+                continue
+            try:
+                data, _ = load_note(path)
+            except Exception:
+                continue
+            note_url = str(data.get("url") or "")
+            if note_url and url_match_key(note_url) in url_keys:
+                selected.append(path)
+                seen.add(path)
+    return selected
+
+
 def refresh_dashboards(vault_root: Path) -> None:
     def load_items(folders: list[str]) -> list[tuple[dict[str, Any], Path]]:
         items = []
@@ -1038,8 +1077,11 @@ def fetch_note_page(path: Path, vault_root: Path) -> dict[str, Any]:
     return record
 
 
-def enrich(vault_root: Path, cutoff: date, mode: str) -> None:
-    notes = collect_notes(vault_root, cutoff, mode)
+def enrich(vault_root: Path, cutoff: date, mode: str, target_paths: list[str] | None = None, target_urls: list[str] | None = None) -> None:
+    if target_paths or target_urls:
+        notes = collect_notes_for_targets(vault_root, target_paths or [], target_urls or [])
+    else:
+        notes = collect_notes(vault_root, cutoff, mode)
     records: list[dict[str, Any]] = []
 
     fetched_records: dict[str, dict[str, Any]] = {}
@@ -1132,10 +1174,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Enrich recent job-related notes from live web pages.")
     parser.add_argument("--vault-root", type=Path, default=Path.cwd())
     parser.add_argument("--cutoff", default="2026-01-01", help="Only check notes discovered on or after this date (YYYY-MM-DD).")
-    parser.add_argument("--mode", choices=["jobs_recent", "knowledge_all"], default="jobs_recent")
+    parser.add_argument("--mode", choices=["jobs_recent", "knowledge_all", "targeted"], default="jobs_recent")
+    parser.add_argument("--path", action="append", default=[], help="Specific vault-relative note path to enrich.")
+    parser.add_argument("--url", action="append", default=[], help="Specific canonical/source URL whose note should be enriched.")
     args = parser.parse_args()
     cutoff = datetime.strptime(args.cutoff, "%Y-%m-%d").date()
-    enrich(args.vault_root.resolve(), cutoff, args.mode)
+    enrich(args.vault_root.resolve(), cutoff, args.mode, target_paths=args.path, target_urls=args.url)
 
 
 if __name__ == "__main__":

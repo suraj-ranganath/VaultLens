@@ -63,7 +63,8 @@ Available local actions you may request:
 3. rebuild_artifact_capture_queue
 4. refresh_live_metadata_jobs_recent
 5. refresh_live_metadata_knowledge_all
-6. answer_vault_query
+6. refresh_live_metadata_current_links
+7. answer_vault_query
 
 Rules:
 - If the message should become part of the vault, set storeInVault=true.
@@ -75,6 +76,8 @@ Rules:
 - If an image contains technical notes, article screenshots, job details, event details, reminders, or generally useful reference information, usually store it in the vault.
 - Only ignore attachment-heavy messages when they are genuinely trivial, accidental, or non-informative.
 - Only request live metadata refresh when it is clearly worth the extra work.
+- For URL-bearing messages that are saved to the vault, prefer refresh_live_metadata_current_links over broad refreshes.
+- For LinkedIn profiles/posts, X posts, articles, job posts, event pages, and technical resources, usually request refresh_live_metadata_current_links after run_vault_ingest.
 - Only request rebuild_artifact_capture_queue when the message likely introduces a weak or blocked link that will need supporting artifacts later.
 - Preserve user-added context or instructions in your reasoning and summaries.
 - Prefer concise, high-signal action plans.
@@ -137,6 +140,7 @@ const schema = {
               "rebuild_artifact_capture_queue",
               "refresh_live_metadata_jobs_recent",
               "refresh_live_metadata_knowledge_all",
+              "refresh_live_metadata_current_links",
               "answer_vault_query",
             ],
           },
