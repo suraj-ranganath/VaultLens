@@ -139,8 +139,13 @@ To receive the focused daily 8am Telegram brief from the AWS-canonical vault, se
 npm run vault:health
 npm run vault:search -- "technical AI safety"
 npm run vault:heartbeat -- --dry-run
+npm run vault:trajectory -- <run-id>
 npm run x:fetch -- https://x.com/example/status/123
 ```
+
+The compiled cache is written atomically so Telegram/web queries never read half-built indexes. It also emits `.vault/reports/` health views for claim quality, stale claims, open questions, contradictions, and the memory-palace map. Optional semantic search is available by setting `VAULT_EMBEDDINGS_ENABLED=true`; embeddings are cached in `.vault/cache/embedding-cache.sqlite` and merged with BM25/MMR retrieval.
+
+Web, Telegram, and morning-brief agent runs write redacted trajectory sidecars under `.vault/trajectories/`. Export one with `npm run vault:trajectory -- <run-id>`. Telegram outbound messages use a durable local queue under `.vault/telegram-delivery-queue/` so failed sends can be retried on the next worker run.
 
 ### 6. Run the local web Q&A interface
 

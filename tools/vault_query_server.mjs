@@ -16,6 +16,7 @@ const vaultRoot = path.resolve(__dirname, "..");
 const webRoot = path.join(vaultRoot, "web");
 const chatTraceRoot = path.join(vaultRoot, "outputs", "chat-traces");
 const agentEventsPath = path.join(vaultRoot, ".vault", "events", "agent-events.jsonl");
+const trajectoryRoot = path.join(vaultRoot, ".vault", "trajectories");
 
 loadEnvFile(path.join(vaultRoot, ".env.local"));
 
@@ -755,6 +756,20 @@ async function persistChatTurn({ threadId, question, answer, trace, usage, cost,
   });
 
   await fsp.writeFile(targetPath, JSON.stringify(chat, null, 2), "utf8");
+  await appendTrajectoryEvent(safeId, {
+    surface: "web",
+    event: "web.query.turn",
+    threadId: safeId,
+    question,
+    answer,
+    trace,
+    usage,
+    cost,
+    meta,
+    feed,
+    startedAt,
+    completedAt,
+  });
   return chat;
 }
 
@@ -770,6 +785,44 @@ async function appendAgentEvent(event) {
   } catch {
     // Event logging must never break user-facing answers.
   }
+}
+
+async function appendTrajectoryEvent(runId, event) {
+  try {
+    await fsp.mkdir(trajectoryRoot, { recursive: true });
+    const safeId = sanitizeChatId(runId || randomId());
+    const payload = redactForTrajectory({
+      trace_schema: "my-vault-trajectory-v1",
+      logged_at: new Date().toISOString(),
+      run_id: safeId,
+      ...event,
+    });
+    await fsp.appendFile(path.join(trajectoryRoot, `${safeId}.jsonl`), `${JSON.stringify(payload)}\n`, "utf8");
+  } catch {
+    // Trajectory capture must not break chat.
+  }
+}
+
+function redactForTrajectory(value) {
+  if (Array.isArray(value)) {
+    return value.map(redactForTrajectory);
+  }
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (/(api[_-]?key|token|secret|credential|authorization|password)/i.test(key)) {
+        out[key] = "[redacted]";
+      } else {
+        out[key] = redactForTrajectory(item);
+      }
+    }
+    return out;
+  }
+  if (typeof value === "string") {
+    const home = process.env.HOME || "";
+    return home && home !== "/" ? value.split(home).join("$HOME") : value;
+  }
+  return value;
 }
 
 async function listChatTraces() {

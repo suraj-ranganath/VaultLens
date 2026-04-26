@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +54,10 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
             self.assertEqual(compile_proc.returncode, 0, compile_proc.stderr)
             self.assertTrue((root / ".vault" / "cache" / "agent-digest.json").exists())
             self.assertTrue((root / ".vault" / "cache" / "claims.jsonl").exists())
+            self.assertTrue((root / ".vault" / "cache" / "claim-health.json").exists())
             self.assertTrue((root / ".vault" / "cache" / "search.sqlite").exists())
+            self.assertTrue((root / ".vault" / "reports" / "claim-health.md").exists())
+            self.assertTrue((root / ".vault" / "reports" / "memory-palace.md").exists())
 
             search_proc = subprocess.run(
                 [
@@ -75,6 +79,31 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
             payload = json.loads(search_proc.stdout)
             self.assertTrue(payload["results"])
             self.assertEqual(payload["results"][0]["path"], "items/articles/2026-04-26 retrieval systems.md")
+
+    def test_telegram_delivery_queue_retries_failed_send(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_delivery_queue  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(telegram_delivery_queue, "send_telegram_payload", side_effect=RuntimeError("network down")):
+                queued = telegram_delivery_queue.send_or_queue_telegram_message(
+                    vault_root=root,
+                    token="token",
+                    chat_id=123,
+                    text="hello",
+                    idempotency_key="test-send",
+                )
+            self.assertTrue(queued["queued"])
+            pending = list((root / ".vault" / "telegram-delivery-queue").glob("*.json"))
+            self.assertEqual(len(pending), 1)
+
+            with mock.patch.object(telegram_delivery_queue, "send_telegram_payload", return_value={"ok": True}):
+                summary = telegram_delivery_queue.drain_telegram_delivery_queue(vault_root=root, token="token")
+            self.assertEqual(summary["sent"], 1)
+            self.assertFalse(pending[0].exists())
 
     def test_telegram_update_coalescing(self) -> None:
         import sys

@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sqlite3
 import subprocess
 import sys
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ from typing import Any
 CACHE_DIR = Path(".vault") / "cache"
 SEARCH_SQLITE = CACHE_DIR / "search.sqlite"
 DIGEST_JSON = CACHE_DIR / "agent-digest.json"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 def main() -> None:
@@ -60,23 +63,23 @@ def search_vault(vault_root: Path, query: str, limit: int) -> list[dict[str, Any
     if not db_path.exists():
         return fallback_digest_search(vault_root, query, limit)
 
-    fts_query = build_fts_query(query, "AND")
-    if not fts_query:
-        return []
-
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         row_limit = max(limit * 4, limit)
-        rows = query_fts(conn, fts_query, row_limit)
-        if len(rows) < row_limit:
-            seen_paths = {row["path"] for row in rows}
-            for row in query_fts(conn, build_fts_query(query, "OR"), row_limit):
-                if row["path"] not in seen_paths:
-                    rows.append(row)
-                    seen_paths.add(row["path"])
-                if len(rows) >= row_limit:
-                    break
+        rows = []
+        fts_query = build_fts_query(query, "AND")
+        if fts_query:
+            rows = query_fts(conn, fts_query, row_limit)
+            if len(rows) < row_limit:
+                seen_paths = {row["path"] for row in rows}
+                for row in query_fts(conn, build_fts_query(query, "OR"), row_limit):
+                    if row["path"] not in seen_paths:
+                        rows.append(row)
+                        seen_paths.add(row["path"])
+                    if len(rows) >= row_limit:
+                        break
+        vector_results = query_embeddings(conn, query, row_limit)
     except sqlite3.Error:
         return fallback_digest_search(vault_root, query, limit)
     finally:
@@ -86,7 +89,7 @@ def search_vault(vault_root: Path, query: str, limit: int) -> list[dict[str, Any
             pass
 
     terms = query_terms(query)
-    scored = []
+    scored_by_path: dict[str, dict[str, Any]] = {}
     for row in rows:
         raw_score = bm25_rank_to_score(float(row["rank"]))
         recency = temporal_multiplier(row["published_on"] or row["discovered_on"], row["type"])
@@ -95,8 +98,7 @@ def search_vault(vault_root: Path, query: str, limit: int) -> list[dict[str, Any
         title_hits = sum(1 for term in terms if term in title_path)
         title_boost = 1.0 + min(0.8, 0.18 * title_hits)
         score = raw_score * recency * priority * title_boost
-        scored.append(
-            {
+        scored_by_path[row["path"]] = {
                 "path": row["path"],
                 "title": row["title"],
                 "type": row["type"],
@@ -109,11 +111,115 @@ def search_vault(vault_root: Path, query: str, limit: int) -> list[dict[str, Any
                 "snippet": best_snippet(row["summary"] or row["body"] or "", terms),
                 "tags": parse_json_list(row["tags"]),
                 "topics": parse_json_list(row["topics"]),
+                "retrieval_sources": ["fts"],
             }
-        )
+
+    for item in vector_results:
+        existing = scored_by_path.get(item["path"])
+        if existing:
+            existing["score"] = max(float(existing.get("score") or 0), float(existing.get("score") or 0) * 0.65 + item["score"] * 0.55)
+            existing["vector_score"] = item["vector_score"]
+            existing.setdefault("retrieval_sources", []).append("embedding")
+            if not existing.get("snippet") and item.get("snippet"):
+                existing["snippet"] = item["snippet"]
+            continue
+        scored_by_path[item["path"]] = item
+
+    scored = list(scored_by_path.values())
 
     scored.sort(key=lambda item: item["score"], reverse=True)
     return mmr_rerank(scored, limit=limit, lambda_=0.72)
+
+
+def query_embeddings(conn: sqlite3.Connection, query: str, limit: int) -> list[dict[str, Any]]:
+    if os.environ.get("VAULT_EMBEDDINGS_ENABLED", "").strip().lower() not in {"1", "true", "yes"}:
+        return []
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY") or ""
+    if not api_key.strip() or not table_exists(conn, "document_embeddings"):
+        return []
+    model = os.environ.get("VAULT_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip() or DEFAULT_EMBEDDING_MODEL
+    query_vec = fetch_query_embedding(api_key=api_key, model=model, query=query)
+    if not query_vec:
+        return []
+    rows = conn.execute(
+        """
+        SELECT d.*, e.embedding
+        FROM document_embeddings e
+        JOIN documents d ON d.path = e.path
+        WHERE e.model = ?
+        """,
+        (model,),
+    ).fetchall()
+    results = []
+    for row in rows:
+        try:
+            doc_vec = [float(value) for value in json.loads(row["embedding"])]
+        except Exception:
+            continue
+        vector_score = cosine_similarity(query_vec, doc_vec)
+        if not math.isfinite(vector_score):
+            continue
+        recency = temporal_multiplier(row["published_on"] or row["discovered_on"], row["type"])
+        priority = priority_multiplier(row["priority"] if "priority" in row.keys() else "")
+        score = vector_score * recency * priority
+        results.append(
+            {
+                "path": row["path"],
+                "title": row["title"],
+                "type": row["type"],
+                "url": row["url"] or None,
+                "published_on": row["published_on"] or None,
+                "discovered_on": row["discovered_on"] or None,
+                "deadline": row["deadline"] or None,
+                "score": score,
+                "text_score": 0,
+                "vector_score": vector_score,
+                "snippet": best_snippet(row["summary"] or row["body"] or "", query_terms(query)),
+                "tags": parse_json_list(row["tags"]),
+                "topics": parse_json_list(row["topics"]),
+                "retrieval_sources": ["embedding"],
+            }
+        )
+    results.sort(key=lambda item: item["score"], reverse=True)
+    return results[:limit]
+
+
+def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)).fetchone()
+    return row is not None
+
+
+def fetch_query_embedding(*, api_key: str, model: str, query: str) -> list[float]:
+    payload = json.dumps({"model": model, "input": query}).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/embeddings",
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return []
+    data = body.get("data") or []
+    if not data or not isinstance(data[0], dict):
+        return []
+    return [float(value) for value in data[0].get("embedding", [])]
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
 
 
 def fallback_digest_search(vault_root: Path, query: str, limit: int) -> list[dict[str, Any]]:

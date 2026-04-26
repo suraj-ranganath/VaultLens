@@ -286,6 +286,11 @@ When answering questions:
 - When the user asks about a topic, look for both direct matches and adjacent topics that often co-occur in saved items.
 - When the user asks for advice or ideation, privilege pages that capture taste, preferences, prior inspirations, and explicit decisions.
 - Refresh `hot.md`, the native Bases dashboard, and the health report after substantial ingest or enrichment changes.
+- Treat `.vault/reports/claim-health.md`, `.vault/reports/contradictions.md`, `.vault/reports/low-confidence.md`, `.vault/reports/stale-claims.md`, and `.vault/reports/memory-palace.md` as first-pass diagnostic context when answer quality, freshness, or contradictions matter.
+- Cache/index writers should use atomic temp-file replacement. Do not leave half-written `agent-digest.json`, `claims.jsonl`, or `search.sqlite` artifacts.
+- Optional semantic search is controlled by `VAULT_EMBEDDINGS_ENABLED=true`; keep it off for cost-sensitive cloud paths unless deliberately enabled.
+- Web, Telegram, and morning-brief runs should leave redacted trajectory events under `.vault/trajectories/` so agent behavior is inspectable later.
+- Telegram outbound delivery should use the durable queue path, not raw one-shot sends, for user-facing messages that should not be silently lost.
 
 ## Project and Output Workflow
 

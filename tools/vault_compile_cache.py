@@ -8,6 +8,8 @@ import json
 import os
 import re
 import sqlite3
+import tempfile
+import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -24,8 +26,14 @@ SOURCE_INDEX_JSONL = CACHE_DIR / "source-index.jsonl"
 BROWSER_QUEUE_JSONL = CACHE_DIR / "browser-enrichment-queue.jsonl"
 SEARCH_SQLITE = CACHE_DIR / "search.sqlite"
 MANIFEST_JSON = CACHE_DIR / "manifest.json"
+EMBEDDING_CACHE_SQLITE = CACHE_DIR / "embedding-cache.sqlite"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 CLAIM_HEALTH_REPORT = REPORTS_DIR / "claim-health.md"
 OPEN_QUESTIONS_REPORT = REPORTS_DIR / "open-questions.md"
+CONTRADICTIONS_REPORT = REPORTS_DIR / "contradictions.md"
+LOW_CONFIDENCE_REPORT = REPORTS_DIR / "low-confidence.md"
+STALE_CLAIMS_REPORT = REPORTS_DIR / "stale-claims.md"
+MEMORY_PALACE_REPORT = REPORTS_DIR / "memory-palace.md"
 
 
 @dataclass
@@ -59,11 +67,12 @@ def main() -> None:
     vault_root = args.vault_root.resolve()
     pages = collect_pages(vault_root)
     claims = build_claims(pages)
+    claim_health = build_claim_health(pages, claims)
     sources = build_source_index(pages)
     browser_queue = build_browser_queue(pages)
-    write_cache(vault_root, pages, claims, sources, browser_queue)
+    write_cache(vault_root, pages, claims, sources, browser_queue, claim_health)
     build_search_index(vault_root, pages)
-    write_reports(vault_root, pages, claims)
+    write_reports(vault_root, pages, claims, claim_health)
 
     if not args.quiet:
         print(
@@ -74,6 +83,7 @@ def main() -> None:
                     "claims": len(claims),
                     "sources": len(sources),
                     "browser_queue": len(browser_queue),
+                    "claim_health": claim_health["summary"],
                     "cache_dir": str((vault_root / CACHE_DIR).relative_to(vault_root)),
                 },
                 indent=2,
@@ -181,10 +191,120 @@ def claim_record(
         "status": "active",
         "confidence": confidence,
         "evidence": evidence,
-        "source_field": source_field,
-        "last_touched": last_touched,
-        "freshness": freshness_label(last_touched),
+            "source_field": source_field,
+            "claim_key": claim_key(page, source_field, text),
+            "last_touched": last_touched,
+            "freshness": freshness_label(last_touched),
+            "evidence_count": len(evidence),
+        }
+
+
+def claim_key(page: Page, source_field: str, text: str) -> str:
+    if not source_field.startswith("body:"):
+        return f"{page.note_type}:{normalize_key(page.title)}:{source_field}"
+    return f"body:{normalize_key(text)[:80]}"
+
+
+def normalize_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def build_claim_health(pages: list[Page], claims: list[dict[str, Any]]) -> dict[str, Any]:
+    low_confidence = [claim for claim in claims if float(claim.get("confidence") or 0) < 0.6]
+    stale = [claim for claim in claims if claim.get("freshness") in {"stale", "unknown"}]
+    missing_evidence = [claim for claim in claims if int(claim.get("evidence_count") or 0) == 0]
+    open_questions = [{"path": path, "question": question} for path, question in collect_open_questions(pages)]
+    contradiction_clusters = build_contradiction_clusters(claims)
+    stale_pages = [
+        {
+            "path": page.path,
+            "title": page.title,
+            "type": page.note_type,
+            "freshness": freshness_label(newest_date(page.published_on, page.discovered_on) or ""),
+            "last_touched": newest_date(page.published_on, page.discovered_on) or None,
+        }
+        for page in pages
+        if page.note_type not in {"dashboard", "output"} and freshness_label(newest_date(page.published_on, page.discovered_on) or "") in {"stale", "unknown"}
+    ]
+    duplicate_urls = build_duplicate_url_clusters(pages)
+    return {
+        "schema": "my-vault-claim-health-v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "low_confidence_claims": len(low_confidence),
+            "stale_or_unknown_claims": len(stale),
+            "missing_evidence_claims": len(missing_evidence),
+            "open_questions": len(open_questions),
+            "contradiction_clusters": len(contradiction_clusters),
+            "stale_or_unknown_pages": len(stale_pages),
+            "duplicate_url_clusters": len(duplicate_urls),
+        },
+        "low_confidence": low_confidence,
+        "stale": stale,
+        "missing_evidence": missing_evidence,
+        "open_questions": open_questions,
+        "contradiction_clusters": contradiction_clusters,
+        "stale_pages": stale_pages,
+        "duplicate_urls": duplicate_urls,
     }
+
+
+def build_contradiction_clusters(claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_key: dict[str, list[dict[str, Any]]] = {}
+    for claim in claims:
+        key = str(claim.get("claim_key") or "")
+        if not key or key.startswith("body:"):
+            continue
+        by_key.setdefault(key, []).append(claim)
+    clusters = []
+    for key, entries in by_key.items():
+        values = {normalize_claim_value(str(entry.get("text") or "")) for entry in entries}
+        page_paths = {str(entry.get("page_path") or "") for entry in entries}
+        if len(entries) < 2 or len(values) < 2 or len(page_paths) < 2:
+            continue
+        clusters.append(
+            {
+                "key": key,
+                "claim_count": len(entries),
+                "page_count": len(page_paths),
+                "entries": [
+                    {
+                        "claim_id": entry.get("id"),
+                        "page_path": entry.get("page_path"),
+                        "page_title": entry.get("page_title"),
+                        "text": entry.get("text"),
+                        "confidence": entry.get("confidence"),
+                        "freshness": entry.get("freshness"),
+                    }
+                    for entry in entries[:12]
+                ],
+            }
+        )
+    return sorted(clusters, key=lambda item: (-int(item["claim_count"]), str(item["key"])))[:100]
+
+
+def normalize_claim_value(text: str) -> str:
+    text = re.sub(r"^[^:]+:\s+[^:]+ is\s+", "", text, flags=re.I)
+    return normalize_key(text)
+
+
+def build_duplicate_url_clusters(pages: list[Page]) -> list[dict[str, Any]]:
+    by_url: dict[str, list[Page]] = {}
+    for page in pages:
+        if page.url:
+            by_url.setdefault(page.url.strip().lower(), []).append(page)
+    clusters = []
+    for url, matches in by_url.items():
+        if len(matches) < 2:
+            continue
+        clusters.append(
+            {
+                "url": url,
+                "count": len(matches),
+                "pages": [{"path": page.path, "title": page.title, "type": page.note_type} for page in matches],
+            }
+        )
+    return sorted(clusters, key=lambda item: (-int(item["count"]), str(item["url"])))[:100]
 
 
 def build_source_index(pages: list[Page]) -> list[dict[str, Any]]:
@@ -252,6 +372,7 @@ def write_cache(
     claims: list[dict[str, Any]],
     sources: list[dict[str, Any]],
     browser_queue: list[dict[str, Any]],
+    claim_health: dict[str, Any],
 ) -> None:
     cache_dir = vault_root / CACHE_DIR
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -261,6 +382,7 @@ def write_cache(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "page_count": len(pages),
         "claim_count": len(claims),
+        "claim_health": claim_health["summary"],
         "source_count": len(sources),
         "browser_queue_count": len(browser_queue),
         "pages": [
@@ -289,6 +411,7 @@ def write_cache(
     write_jsonl(vault_root / CLAIMS_JSONL, claims)
     write_jsonl(vault_root / SOURCE_INDEX_JSONL, sources)
     write_jsonl(vault_root / BROWSER_QUEUE_JSONL, browser_queue)
+    write_json(cache_dir / "claim-health.json", claim_health)
     write_json(
         vault_root / MANIFEST_JSON,
         {
@@ -302,9 +425,12 @@ def write_cache(
 def build_search_index(vault_root: Path, pages: list[Page]) -> None:
     db_path = vault_root / SEARCH_SQLITE
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{db_path.name}.", suffix=".tmp", dir=db_path.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    conn = sqlite3.connect(tmp_path)
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("DROP TABLE IF EXISTS documents")
         conn.execute(
             """
@@ -329,6 +455,17 @@ def build_search_index(vault_root: Path, pages: list[Page]) -> None:
         conn.execute("DROP TABLE IF EXISTS documents_fts")
         conn.execute(
             "CREATE VIRTUAL TABLE documents_fts USING fts5(path UNINDEXED, title, summary, body, tags, topics)"
+        )
+        conn.execute("DROP TABLE IF EXISTS document_embeddings")
+        conn.execute(
+            """
+            CREATE TABLE document_embeddings (
+              path TEXT PRIMARY KEY,
+              model TEXT NOT NULL,
+              text_hash TEXT NOT NULL,
+              embedding TEXT NOT NULL
+            )
+            """
         )
         conn.execute("DELETE FROM documents")
         for page in pages:
@@ -361,19 +498,147 @@ def build_search_index(vault_root: Path, pages: list[Page]) -> None:
                 "INSERT INTO documents_fts(path, title, summary, body, tags, topics) VALUES (?, ?, ?, ?, ?, ?)",
                 (page.path, page.title, page.summary, body[:8000], " ".join(page.tags), " ".join(page.topics)),
             )
+        build_embedding_index(vault_root, conn, pages)
         conn.commit()
     finally:
         conn.close()
+    atomic_replace_sqlite(tmp_path, db_path)
 
 
-def write_reports(vault_root: Path, pages: list[Page], claims: list[dict[str, Any]]) -> None:
+def build_embedding_index(vault_root: Path, conn: sqlite3.Connection, pages: list[Page]) -> None:
+    if os.environ.get("VAULT_EMBEDDINGS_ENABLED", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY") or ""
+    if not api_key.strip():
+        return
+    model = os.environ.get("VAULT_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip() or DEFAULT_EMBEDDING_MODEL
+    cache_db = vault_root / EMBEDDING_CACHE_SQLITE
+    cache_db.parent.mkdir(parents=True, exist_ok=True)
+    cache_conn = sqlite3.connect(cache_db)
+    try:
+        cache_conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+              model TEXT NOT NULL,
+              text_hash TEXT NOT NULL,
+              embedding TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (model, text_hash)
+            )
+            """
+        )
+        entries = [
+            {
+                "path": page.path,
+                "text": embedding_text(page),
+            }
+            for page in pages
+        ]
+        entries = [{**entry, "hash": hashlib.sha256(entry["text"].encode("utf-8")).hexdigest()} for entry in entries if entry["text"]]
+        cached = load_embedding_cache(cache_conn, model, [entry["hash"] for entry in entries])
+        missing = [entry for entry in entries if entry["hash"] not in cached]
+        for batch in chunks(missing, 32):
+            try:
+                embeddings = fetch_openai_embeddings(api_key=api_key, model=model, inputs=[entry["text"] for entry in batch])
+            except Exception:
+                break
+            now = datetime.now(timezone.utc).isoformat()
+            for entry, embedding in zip(batch, embeddings):
+                cached[entry["hash"]] = embedding
+                cache_conn.execute(
+                    """
+                    INSERT INTO embedding_cache (model, text_hash, embedding, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(model, text_hash) DO UPDATE SET
+                      embedding=excluded.embedding,
+                      updated_at=excluded.updated_at
+                    """,
+                    (model, entry["hash"], json.dumps(embedding), now),
+                )
+            cache_conn.commit()
+        for entry in entries:
+            embedding = cached.get(entry["hash"])
+            if not embedding:
+                continue
+            conn.execute(
+                "INSERT INTO document_embeddings(path, model, text_hash, embedding) VALUES (?, ?, ?, ?)",
+                (entry["path"], model, entry["hash"], json.dumps(embedding)),
+            )
+    finally:
+        cache_conn.close()
+
+
+def embedding_text(page: Page) -> str:
+    body = strip_frontmatter(page.text)
+    text = "\n".join(
+        [
+            page.title,
+            f"type: {page.note_type}",
+            f"tags: {', '.join(page.tags)}",
+            f"topics: {', '.join(page.topics)}",
+            page.summary,
+            page.why_saved,
+            body[:2500],
+        ]
+    )
+    return truncate(text, 3600)
+
+
+def load_embedding_cache(conn: sqlite3.Connection, model: str, hashes: list[str]) -> dict[str, list[float]]:
+    if not hashes:
+        return {}
+    out: dict[str, list[float]] = {}
+    unique = list(dict.fromkeys(hashes))
+    for batch in chunks(unique, 400):
+        placeholders = ",".join("?" for _ in batch)
+        rows = conn.execute(
+            f"SELECT text_hash, embedding FROM embedding_cache WHERE model = ? AND text_hash IN ({placeholders})",
+            [model, *batch],
+        ).fetchall()
+        for text_hash, raw_embedding in rows:
+            try:
+                embedding = json.loads(raw_embedding)
+            except Exception:
+                continue
+            if isinstance(embedding, list):
+                out[str(text_hash)] = [float(value) for value in embedding]
+    return out
+
+
+def fetch_openai_embeddings(*, api_key: str, model: str, inputs: list[str]) -> list[list[float]]:
+    payload = json.dumps({"model": model, "input": inputs}).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/embeddings",
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    data = body.get("data") or []
+    by_index = sorted((item for item in data if isinstance(item, dict)), key=lambda item: int(item.get("index") or 0))
+    return [[float(value) for value in item.get("embedding", [])] for item in by_index]
+
+
+def chunks(items: list[Any], size: int) -> list[list[Any]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def write_reports(vault_root: Path, pages: list[Page], claims: list[dict[str, Any]], claim_health: dict[str, Any]) -> None:
     reports_dir = vault_root / REPORTS_DIR
     reports_dir.mkdir(parents=True, exist_ok=True)
 
-    low_conf = [claim for claim in claims if float(claim.get("confidence") or 0) < 0.6]
-    stale = [claim for claim in claims if claim.get("freshness") in {"stale", "unknown"}]
+    low_conf = list(claim_health.get("low_confidence") or [])
+    stale = list(claim_health.get("stale") or [])
     missing_url = [page for page in pages if page.note_type in {"article", "tweet", "job", "resource"} and not page.url]
-    open_questions = collect_open_questions(pages)
+    open_questions = [(item["path"], item["question"]) for item in claim_health.get("open_questions") or []]
+    contradictions = list(claim_health.get("contradiction_clusters") or [])
+    stale_pages = list(claim_health.get("stale_pages") or [])
+    duplicate_urls = list(claim_health.get("duplicate_urls") or [])
+    summary = claim_health.get("summary") or {}
 
     health_lines = [
         "# Claim Health",
@@ -381,8 +646,11 @@ def write_reports(vault_root: Path, pages: list[Page], claims: list[dict[str, An
         f"- Generated: {datetime.now(timezone.utc).isoformat()}",
         f"- Pages indexed: {len(pages)}",
         f"- Claims indexed: {len(claims)}",
-        f"- Low-confidence claims: {len(low_conf)}",
-        f"- Stale or unknown claims: {len(stale)}",
+        f"- Low-confidence claims: {summary.get('low_confidence_claims', len(low_conf))}",
+        f"- Stale or unknown claims: {summary.get('stale_or_unknown_claims', len(stale))}",
+        f"- Contradiction clusters: {summary.get('contradiction_clusters', len(contradictions))}",
+        f"- Open questions: {summary.get('open_questions', len(open_questions))}",
+        f"- Duplicate URL clusters: {summary.get('duplicate_url_clusters', len(duplicate_urls))}",
         f"- URL-backed item notes missing URL: {len(missing_url)}",
         "",
         "## Low Confidence",
@@ -401,7 +669,7 @@ def write_reports(vault_root: Path, pages: list[Page], claims: list[dict[str, An
         "" if missing_url else "- None.",
         "",
     ]
-    (vault_root / CLAIM_HEALTH_REPORT).write_text("\n".join(health_lines), encoding="utf-8")
+    atomic_write_text(vault_root / CLAIM_HEALTH_REPORT, "\n".join(health_lines) + "\n")
 
     question_lines = [
         "# Open Questions",
@@ -413,7 +681,92 @@ def write_reports(vault_root: Path, pages: list[Page], claims: list[dict[str, An
         "" if open_questions else "- None.",
         "",
     ]
-    (vault_root / OPEN_QUESTIONS_REPORT).write_text("\n".join(question_lines), encoding="utf-8")
+    atomic_write_text(vault_root / OPEN_QUESTIONS_REPORT, "\n".join(question_lines) + "\n")
+
+    contradiction_lines = [
+        "# Contradictions",
+        "",
+        f"- Generated: {datetime.now(timezone.utc).isoformat()}",
+        f"- Contradiction clusters: {len(contradictions)}",
+        f"- Duplicate URL clusters: {len(duplicate_urls)}",
+        "",
+        "## Claim Conflicts",
+        "",
+    ]
+    if contradictions:
+        for cluster in contradictions[:40]:
+            contradiction_lines.append(f"- `{cluster['key']}` ({cluster['claim_count']} claims across {cluster['page_count']} pages)")
+            for entry in cluster.get("entries", [])[:4]:
+                contradiction_lines.append(f"  - `{entry.get('page_path')}`: {entry.get('text')}")
+    else:
+        contradiction_lines.append("- None.")
+    contradiction_lines.extend(["", "## Duplicate URLs", ""])
+    if duplicate_urls:
+        for cluster in duplicate_urls[:40]:
+            contradiction_lines.append(f"- {cluster['url']} ({cluster['count']} notes)")
+            for page in cluster.get("pages", [])[:4]:
+                contradiction_lines.append(f"  - `{page.get('path')}`: {page.get('title')}")
+    else:
+        contradiction_lines.append("- None.")
+    atomic_write_text(vault_root / CONTRADICTIONS_REPORT, "\n".join(contradiction_lines) + "\n")
+
+    low_conf_lines = [
+        "# Low Confidence",
+        "",
+        f"- Generated: {datetime.now(timezone.utc).isoformat()}",
+        f"- Low-confidence claims: {len(low_conf)}",
+        "",
+        *[f"- `{claim['page_path']}` ({claim.get('confidence')}): {claim['text']}" for claim in low_conf[:100]],
+        "" if low_conf else "- None.",
+        "",
+    ]
+    atomic_write_text(vault_root / LOW_CONFIDENCE_REPORT, "\n".join(low_conf_lines) + "\n")
+
+    stale_lines = [
+        "# Stale Claims",
+        "",
+        f"- Generated: {datetime.now(timezone.utc).isoformat()}",
+        f"- Stale or unknown claims: {len(stale)}",
+        f"- Stale or unknown pages: {len(stale_pages)}",
+        "",
+        "## Claims",
+        "",
+        *[f"- `{claim['page_path']}` ({claim.get('freshness')}): {claim['text']}" for claim in stale[:100]],
+        "" if stale else "- None.",
+        "",
+        "## Pages",
+        "",
+        *[f"- `{page['path']}` ({page.get('freshness')}): {page['title']}" for page in stale_pages[:100]],
+        "" if stale_pages else "- None.",
+        "",
+    ]
+    atomic_write_text(vault_root / STALE_CLAIMS_REPORT, "\n".join(stale_lines) + "\n")
+
+    atomic_write_text(vault_root / MEMORY_PALACE_REPORT, render_memory_palace(pages, claims, claim_health))
+
+
+def render_memory_palace(pages: list[Page], claims: list[dict[str, Any]], claim_health: dict[str, Any]) -> str:
+    by_type: dict[str, list[Page]] = {}
+    for page in pages:
+        by_type.setdefault(page.note_type, []).append(page)
+    lines = [
+        "# Vault Memory Palace",
+        "",
+        f"- Generated: {datetime.now(timezone.utc).isoformat()}",
+        f"- Pages: {len(pages)}",
+        f"- Claims: {len(claims)}",
+        f"- Health: {json.dumps(claim_health.get('summary') or {}, sort_keys=True)}",
+        "",
+    ]
+    for note_type, matches in sorted(by_type.items(), key=lambda item: (-len(item[1]), item[0])):
+        claim_count = sum(1 for claim in claims if claim.get("page_type") == note_type)
+        lines.extend([f"## {note_type.title()} ({len(matches)})", "", f"- Claims: {claim_count}"])
+        for page in sorted(matches, key=lambda page: (page.discovered_on or page.published_on or "", page.title), reverse=True)[:12]:
+            date_label = page.deadline or page.discovered_on or page.published_on or "undated"
+            source = page.url or page.path
+            lines.append(f"- {date_label}: [{page.title}]({source})")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def split_frontmatter(text: str) -> tuple[str, str]:
@@ -585,15 +938,44 @@ def truncate(text: str, limit: int) -> str:
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    text = "".join(json.dumps(record, sort_keys=True) + "\n" for record in records)
+    atomic_write_text(path, text)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def atomic_replace_sqlite(tmp_path: Path, db_path: Path) -> None:
+    for suffix in ["-wal", "-shm"]:
+        try:
+            Path(f"{tmp_path}{suffix}").unlink()
+        except OSError:
+            pass
+    for suffix in ["-wal", "-shm"]:
+        try:
+            Path(f"{db_path}{suffix}").unlink()
+        except OSError:
+            pass
+    os.replace(tmp_path, db_path)
 
 
 if __name__ == "__main__":

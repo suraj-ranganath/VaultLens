@@ -9,6 +9,7 @@
     "vault:compile": "python3 tools/vault_compile_cache.py --vault-root .",
     "vault:search": "python3 tools/vault_search.py search --vault-root . --query",
     "vault:heartbeat": "python3 tools/vault_heartbeat.py --vault-root .",
+    "vault:trajectory": "python3 tools/vault_trajectory.py export --vault-root . --run-id",
     "x:fetch": "python3 tools/x_content.py",
     "test:vault-infra": "python3 -m unittest tools/test_vault_infra.py",
     "vault:web": "node tools/vault_query_server.mjs",

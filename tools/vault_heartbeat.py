@@ -14,6 +14,9 @@ from typing import Any
 
 import requests
 
+from vault_trajectory import append_trajectory_event
+from telegram_delivery_queue import drain_telegram_delivery_queue, send_or_queue_telegram_message
+
 try:
     import yaml
 except Exception:  # pragma: no cover - yaml is present in Lambda, fallback stays cheap locally.
@@ -100,9 +103,23 @@ def main() -> None:
         "candidate_readings": candidate_readings,
         "text": text,
     }
+    append_trajectory_event(
+        vault_root,
+        f"morning-brief-{today.isoformat()}",
+        {
+            "surface": "telegram",
+            "event": "morning_brief.completed",
+            "date": today.isoformat(),
+            "should_send": should_send,
+            "agent_result": agent_result,
+            "candidate_action_count": len(candidate_actions),
+            "candidate_reading_count": len(candidate_readings),
+        },
+    )
 
     if should_send and not args.dry_run and args.telegram_token and args.chat_id:
-        send_telegram(args.telegram_token, args.chat_id, text)
+        drain_telegram_delivery_queue(vault_root=vault_root, token=args.telegram_token, budget_seconds=8)
+        send_telegram(vault_root, args.telegram_token, args.chat_id, text)
 
     print(json.dumps(payload, indent=2))
 
@@ -316,17 +333,8 @@ def render_daily_brief(actions: list[dict[str, Any]], reading: dict[str, Any] | 
     return "\n".join(lines)
 
 
-def send_telegram(token: str, chat_id: str, text: str) -> None:
-    response = requests.post(
-        f"{API_ROOT}/bot{token}/sendMessage",
-        data={
-            "chat_id": chat_id,
-            "text": text,
-            "disable_web_page_preview": "true",
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
+def send_telegram(vault_root: Path, token: str, chat_id: str, text: str) -> None:
+    send_or_queue_telegram_message(vault_root=vault_root, token=token, chat_id=chat_id, text=text)
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:

@@ -397,6 +397,7 @@ def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[
     env["XDG_CONFIG_HOME"] = str(WORK_ROOT / ".config")
     env["XDG_DATA_HOME"] = str(WORK_ROOT / ".local" / "share")
     env["VAULT_DISABLE_CODEX_THREAD_RESUME"] = "1"
+    env["VAULT_ROOT"] = str(WORK_ROOT)
 
     command = [
         "python3",
@@ -437,6 +438,7 @@ def run_heartbeat(*, dry_run: bool = False) -> dict[str, Any]:
     env = os.environ.copy()
     env.setdefault("TELEGRAM_BOT_TOKEN", required_env("TELEGRAM_BOT_TOKEN"))
     env["HOME"] = str(home_dir)
+    env["VAULT_ROOT"] = str(WORK_ROOT)
     command = [
         "python3",
         str(WORK_ROOT / "tools" / "vault_heartbeat.py"),

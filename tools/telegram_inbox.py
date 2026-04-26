@@ -23,6 +23,16 @@ try:
 except ModuleNotFoundError:
     from tools.ingest_chat_export import ingest
 
+try:
+    from vault_trajectory import append_trajectory_event
+except ModuleNotFoundError:
+    from tools.vault_trajectory import append_trajectory_event
+
+try:
+    from telegram_delivery_queue import drain_telegram_delivery_queue, send_or_queue_telegram_message
+except ModuleNotFoundError:
+    from tools.telegram_delivery_queue import drain_telegram_delivery_queue, send_or_queue_telegram_message
+
 
 CURRENT_DATE = date.today()
 API_ROOT = "https://api.telegram.org"
@@ -575,10 +585,13 @@ def telegram_api(token: str, method: str, **params: Any) -> dict[str, Any]:
 
 
 def telegram_send_message(token: str, chat_id: int, text: str, reply_to_message_id: int | None = None) -> dict[str, Any]:
-    params: dict[str, Any] = {"chat_id": chat_id, "text": text}
-    if reply_to_message_id is not None:
-        params["reply_to_message_id"] = reply_to_message_id
-    return telegram_api(token, "sendMessage", **params)
+    return send_or_queue_telegram_message(
+        vault_root=Path(os.environ.get("VAULT_ROOT", Path.cwd())).resolve(),
+        token=token,
+        chat_id=chat_id,
+        text=text,
+        reply_to_message_id=reply_to_message_id,
+    )
 
 
 def telegram_edit_message_text(token: str, chat_id: int, message_id: int, text: str) -> dict[str, Any]:
@@ -1684,6 +1697,7 @@ def sync_once(
     mode: str = "sync",
 ) -> dict[str, Any]:
     inbox_dir, raw_updates_dir = ensure_directories(vault_root)
+    drain_telegram_delivery_queue(vault_root=vault_root, token=token, budget_seconds=8)
     state = load_state(inbox_dir)
     offset = state.get("last_update_id")
     if offset is not None:
@@ -1967,6 +1981,23 @@ def process_update_batch(
                 "answered": bool(query_result),
                 "actions": [action["tool"] for action in actions],
                 "cost": query_result.get("cost") if query_result else None,
+            },
+        )
+        append_trajectory_event(
+            vault_root,
+            f"telegram-{update_id}",
+            {
+                "surface": "telegram",
+                "event": "telegram.update.processed",
+                "update_id": update_id,
+                "collected_update_ids": update_ids,
+                "chat_id": chat_id,
+                "message_id": normalized["message_id"],
+                "message": normalized,
+                "decision": decision,
+                "actions": actions,
+                "tool_results": tool_results,
+                "thread_id": agent_result.get("threadId"),
             },
         )
         typing.stop()
