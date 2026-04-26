@@ -752,12 +752,33 @@ def normalize_agent_decision(decision: dict[str, Any]) -> dict[str, Any]:
     if store_in_vault:
         normalized["sendAck"] = True
         acknowledgement = str(normalized.get("acknowledgement") or "").strip()
-        normalized["acknowledgement"] = acknowledgement or "👍"
+        normalized["acknowledgement"] = acknowledgement or default_acknowledgement(normalized)
     else:
         normalized["sendAck"] = bool(normalized.get("sendAck", False))
         normalized["acknowledgement"] = str(normalized.get("acknowledgement") or "").strip()
 
     return normalized
+
+
+def default_acknowledgement(decision: dict[str, Any]) -> str:
+    classification = str(decision.get("classification") or "").strip()
+    if classification == "job_opportunity":
+        return "Saved this job lead 💼"
+    if classification == "technical_article":
+        return "Saved for the technical reading queue 🧠"
+    if classification == "social_link":
+        return "Saved the link, and I’ll keep the context attached 🔗"
+    if classification == "event":
+        return "Saved the event context 📅"
+    if classification == "reminder":
+        return "Saved the reminder ✅"
+    if classification == "thought_or_note":
+        return "Saved this to memory 🧠"
+    if classification == "resource":
+        return "Saved this resource 🔖"
+    if classification == "mixed":
+        return "Saved and filed the useful parts 🗂️"
+    return "Saved to the vault 👍"
 
 
 def has_calendar_pending(state: dict[str, Any], chat_id: int) -> bool:
@@ -1060,7 +1081,7 @@ def format_telegram_query_response(query_result: dict[str, Any]) -> str:
     lines = [body] if body else ["No answer available."]
     if citations:
         lines.append("")
-        lines.append("Sources:")
+        lines.append("Receipts 🔗")
         for index, (title, url) in enumerate(citations[:8], start=1):
             lines.append(f"{index}. {title}")
             lines.append(url)
@@ -1068,9 +1089,14 @@ def format_telegram_query_response(query_result: dict[str, Any]) -> str:
     gaps = [str(gap).strip() for gap in answer.get("gaps") or [] if str(gap).strip()]
     if gaps:
         lines.append("")
-        lines.append("Known gaps:")
+        lines.append("Caveats / gaps 🕳️")
         for gap in gaps[:3]:
             lines.append(f"- {gap}")
+
+    follow_ups = [str(item).strip() for item in answer.get("follow_up_questions") or [] if str(item).strip()]
+    if follow_ups:
+        lines.append("")
+        lines.append(f"If useful, ask me: {follow_ups[0]}")
 
     return "\n".join(lines).strip()
 
