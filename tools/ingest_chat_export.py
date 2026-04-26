@@ -601,6 +601,8 @@ def classify_text_message(message: Message) -> str | None:
             return "thought"
     if len(text) > 220:
         return "thought"
+    if recent and any(marker in lowered for marker in ["remember", "dating", "relationship", "girlfriend", "boyfriend", "partner"]):
+        return "thought"
     if recent and any(marker in lowered for marker in ["openai", "experian", "anthropic", "mats", "tax filing", "paper submission", "flight"]):
         return "reminder"
     return None

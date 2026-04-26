@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -565,6 +566,38 @@ def telegram_send_message(token: str, chat_id: int, text: str, reply_to_message_
     if reply_to_message_id is not None:
         params["reply_to_message_id"] = reply_to_message_id
     return telegram_api(token, "sendMessage", **params)
+
+
+def telegram_send_chat_action(token: str, chat_id: int, action: str = "typing") -> dict[str, Any]:
+    return telegram_api(token, "sendChatAction", chat_id=chat_id, action=action)
+
+
+class TelegramTypingHeartbeat:
+    def __init__(self, token: str, chat_id: int, interval_seconds: float = 4.0) -> None:
+        self.token = token
+        self.chat_id = chat_id
+        self.interval_seconds = interval_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                telegram_send_chat_action(self.token, self.chat_id, "typing")
+            except Exception:
+                pass
+            self._stop.wait(self.interval_seconds)
 
 
 def telegram_send_long_message(token: str, chat_id: int, text: str, reply_to_message_id: int | None = None) -> list[dict[str, Any]]:
@@ -1441,14 +1474,6 @@ def process_update_batch(
         if normalized is None:
             state["last_update_id"] = update_id
             continue
-        normalized = enrich_message_attachments(
-            vault_root=vault_root,
-            token=token,
-            openai_api_key=openai_api_key,
-            attachment_model=agent_model,
-            update=update,
-            normalized_message=normalized,
-        )
 
         chat_id = int(normalized["chat_id"])
         state.setdefault("known_chats", {})
@@ -1464,6 +1489,16 @@ def process_update_batch(
             continue
 
         accepted += 1
+        typing = TelegramTypingHeartbeat(token, chat_id)
+        typing.start()
+        normalized = enrich_message_attachments(
+            vault_root=vault_root,
+            token=token,
+            openai_api_key=openai_api_key,
+            attachment_model=agent_model,
+            update=update,
+            normalized_message=normalized,
+        )
         append_jsonl(raw_file, [update])
 
         calendar_result = handle_calendar_flow(
@@ -1503,6 +1538,7 @@ def process_update_batch(
                     "actions": [f"calendar_{calendar_result.get('status')}"],
                 }
             )
+            typing.stop()
             continue
 
         prior_thread_id = (state.get("agent_threads") or {}).get(str(chat_id))
@@ -1607,6 +1643,7 @@ def process_update_batch(
                 "actions": [action["tool"] for action in actions],
             }
         )
+        typing.stop()
 
     save_state(inbox_dir, state)
 

@@ -68,6 +68,59 @@ const QUERY_SCHEMA = {
   additionalProperties: false,
 };
 
+const SEARCH_ROOTS = ["items", "topics", "projects", "dashboards", "outputs"];
+const CORE_CONTEXT_FILES = ["hot.md", "index.md", "log.md"];
+const TELEGRAM_CONTEXT_FILES = [
+  "imports/telegram-inbox/telegram-live.txt",
+  "imports/telegram-inbox/telegram-live telegram-agent-decisions.jsonl",
+  "imports/telegram-inbox/telegram-live .telegram_processed_updates.jsonl",
+];
+const STOPWORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "and",
+  "are",
+  "based",
+  "because",
+  "been",
+  "being",
+  "can",
+  "could",
+  "does",
+  "for",
+  "from",
+  "give",
+  "have",
+  "how",
+  "who",
+  "anf",
+  "the",
+  "hi",
+  "hey",
+  "hello",
+  "iam",
+  "am",
+  "into",
+  "just",
+  "know",
+  "like",
+  "more",
+  "that",
+  "their",
+  "there",
+  "this",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "with",
+  "would",
+  "you",
+  "your",
+]);
+
 function readStdin() {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -104,12 +157,15 @@ function extractJson(text) {
   }
 }
 
-function buildPrompt(question, includeWebSearch) {
+function buildPrompt(question, includeWebSearch, vaultContext) {
   return `
 You are answering questions against a local-first personal vault.
 
 Primary objective:
 - answer the user's question from the vault as accurately and efficiently as possible
+- you have a guaranteed vault context pack below that was read directly from local vault files before this agent turn
+- if shell/file tools are unavailable or fail, use the guaranteed context pack instead of saying the vault is inaccessible
+- do not claim you cannot access the vault when relevant evidence appears in the guaranteed context pack
 
 Search discipline:
 1. Read \`AGENTS.md\` first if you need the vault contract.
@@ -137,6 +193,9 @@ Answering rules:
 
 Return JSON only.
 
+Guaranteed vault context pack:
+${vaultContext || "(No preloaded vault context was found.)"}
+
 User question:
 ${question}
 `.trim();
@@ -146,6 +205,15 @@ function buildThreadOptions({ model, reasoningEffort, includeWebSearch, workingD
   return {
     model,
     workingDirectory,
+    additionalDirectories: [
+      path.join(workingDirectory, "items"),
+      path.join(workingDirectory, "topics"),
+      path.join(workingDirectory, "projects"),
+      path.join(workingDirectory, "dashboards"),
+      path.join(workingDirectory, "outputs"),
+      path.join(workingDirectory, "imports"),
+      path.join(workingDirectory, "raw", "docs"),
+    ].filter((dir) => fs.existsSync(dir)),
     skipGitRepoCheck: true,
     approvalPolicy: "never",
     sandboxMode: "read-only",
@@ -182,6 +250,252 @@ function calculateCost(model, usage) {
     outputUsd: outputCost,
     totalUsd: inputCost + cachedInputCost + outputCost,
   };
+}
+
+async function buildVaultContextPack(vaultRoot, question) {
+  const terms = queryTerms(question);
+  const sections = [];
+
+  for (const relativePath of CORE_CONTEXT_FILES) {
+    const text = await readTextIfExists(path.join(vaultRoot, relativePath));
+    if (text) {
+      sections.push(renderContextSection(relativePath, trimForContext(text, 2400)));
+    }
+  }
+
+  for (const relativePath of TELEGRAM_CONTEXT_FILES) {
+    const text = await readTextIfExists(path.join(vaultRoot, relativePath));
+    if (text) {
+      const summary = relativePath.includes("telegram-agent-decisions")
+        ? summarizeTelegramDecisionLog(text)
+        : tailLines(text, relativePath.endsWith(".jsonl") ? 30 : 90);
+      sections.push(renderContextSection(relativePath, summary));
+    }
+  }
+
+  for (const item of await profileContextItems(vaultRoot, terms)) {
+    sections.push(renderContextSection(item.relativePath, item.snippet));
+  }
+
+  const candidates = await collectMarkdownCandidates(vaultRoot);
+  const ranked = candidates
+    .map((candidate) => ({
+      ...candidate,
+      score: scoreCandidate(candidate.relativePath, candidate.text, terms, question),
+    }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score || a.relativePath.localeCompare(b.relativePath))
+    .slice(0, 18);
+
+  for (const candidate of ranked) {
+    sections.push(renderContextSection(candidate.relativePath, summarizeMarkdown(candidate.text)));
+  }
+
+  return sections.join("\n\n").slice(0, 50_000);
+}
+
+function queryTerms(question) {
+  const words = String(question || "")
+    .toLowerCase()
+    .match(/[a-z0-9][a-z0-9_-]{2,}/g) || [];
+  return [...new Set(words.filter((word) => !STOPWORDS.has(word)))].slice(0, 24);
+}
+
+async function profileContextItems(vaultRoot, terms) {
+  const rawDocs = path.join(vaultRoot, "raw", "docs");
+  const files = await listFiles(rawDocs, [".md", ".txt"]);
+  const profileFiles = files.filter((file) => /handoff|profile|personal|suraj/i.test(path.basename(file)));
+  const personalQuery = /\b(who am i|about me|dating|compatible|compatibility|preference|values|personality|profile|know about me)\b/i.test(
+    terms.join(" "),
+  );
+  const selected = personalQuery ? profileFiles.slice(0, 8) : profileFiles.slice(0, 3);
+  const items = [];
+  for (const file of selected) {
+    const text = await readTextIfExists(file);
+    if (text) {
+      items.push({
+        relativePath: path.relative(vaultRoot, file),
+        snippet: trimForContext(text, personalQuery ? 4200 : 2000),
+      });
+    }
+  }
+  return items;
+}
+
+async function collectMarkdownCandidates(vaultRoot) {
+  const files = [];
+  for (const root of SEARCH_ROOTS) {
+    files.push(...(await listFiles(path.join(vaultRoot, root), [".md"])));
+  }
+  const candidates = [];
+  for (const file of files.slice(0, 600)) {
+    const text = await readTextIfExists(file);
+    if (!text) {
+      continue;
+    }
+    candidates.push({
+      relativePath: path.relative(vaultRoot, file),
+      text,
+    });
+  }
+  return candidates;
+}
+
+function scoreCandidate(relativePath, text, terms, question) {
+  const haystack = `${relativePath}\n${frontmatterAndHead(text)}`.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    if (termMatches(haystack, term)) {
+      score += relativePath.toLowerCase().includes(term) ? 5 : 2;
+    }
+  }
+  if (/\bdating|relationship|partner|girlfriend|boyfriend|compatible|compatibility\b/i.test(question)) {
+    if (/\bdating|girlfriend|boyfriend|compatible|compatibility|arunima\b/i.test(haystack)) {
+      score += 20;
+    }
+  }
+  if (/\bjob|apply|application|intern|role|deadline|opportunit/i.test(question) && /items\/jobs|opportunit|deadline|application/i.test(haystack)) {
+    score += 12;
+  }
+  if (/\bevent|calendar|schedule|when|where\b/i.test(question) && /items\/events|event|calendar|schedule|location/i.test(haystack)) {
+    score += 12;
+  }
+  return score;
+}
+
+function termMatches(haystack, term) {
+  const escaped = String(term || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^a-z0-9_-])${escaped}([^a-z0-9_-]|$)`, "i").test(haystack);
+}
+
+function summarizeMarkdown(text) {
+  const source = String(text || "");
+  const parts = [];
+  const frontmatter = extractFrontmatter(source);
+  if (frontmatter) {
+    parts.push(frontmatter);
+  }
+  const body = source.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
+  const usefulLines = body.split(/\r?\n/);
+  const selected = usefulLines
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("![]("))
+    .slice(0, 45)
+    .join("\n");
+  if (selected) {
+    parts.push(selected);
+  }
+  return trimForContext(parts.join("\n\n"), 3200);
+}
+
+function frontmatterAndHead(text) {
+  const source = String(text || "");
+  return `${extractFrontmatter(source) || ""}\n${source.replace(/^---\n[\s\S]*?\n---\n/, "").slice(0, 2500)}`;
+}
+
+function extractFrontmatter(text) {
+  const source = String(text || "");
+  if (!source.startsWith("---\n")) {
+    return "";
+  }
+  const end = source.indexOf("\n---\n", 4);
+  return end === -1 ? "" : source.slice(0, end + 5).trim();
+}
+
+async function listFiles(root, extensions) {
+  const results = [];
+  if (!(await pathExists(root))) {
+    return results;
+  }
+  const entries = await fsp.readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith("._")) {
+      continue;
+    }
+    const fullPath = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...(await listFiles(fullPath, extensions)));
+    } else if (entry.isFile() && extensions.includes(path.extname(entry.name).toLowerCase())) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
+async function readTextIfExists(filePath, maxBytes = 80_000) {
+  try {
+    const stat = await fsp.stat(filePath);
+    if (!stat.isFile()) {
+      return "";
+    }
+    const handle = await fsp.open(filePath, "r");
+    try {
+      const length = Math.min(stat.size, maxBytes);
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, 0);
+      return buffer.toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return "";
+  }
+}
+
+async function pathExists(target) {
+  try {
+    await fsp.access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function renderContextSection(relativePath, body) {
+  return `### ${relativePath}\n${String(body || "").trim()}`;
+}
+
+function tailLines(text, count) {
+  const lines = String(text || "").split(/\r?\n/).filter(Boolean);
+  return lines.slice(-count).join("\n");
+}
+
+function summarizeTelegramDecisionLog(text) {
+  const lines = String(text || "").split(/\r?\n/).filter(Boolean).slice(-16);
+  const summaries = [];
+  for (const line of lines) {
+    try {
+      const record = JSON.parse(line);
+      const message = record.message || {};
+      const decision = record.decision || {};
+      const actions = Array.isArray(record.actions)
+        ? record.actions.map((action) => action.tool).filter(Boolean).join(", ")
+        : "";
+      summaries.push(
+        [
+          `logged_at: ${record.logged_at || ""}`,
+          `message: ${message.raw_text || message.export_line || ""}`,
+          `classification: ${decision.classification || ""}`,
+          `stored: ${Boolean(decision.storeInVault)}`,
+          `summary: ${decision.summary || ""}`,
+          actions ? `actions: ${actions}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      );
+    } catch {
+      summaries.push(line.slice(0, 500));
+    }
+  }
+  return summaries.join("\n\n");
+}
+
+function trimForContext(text, limit) {
+  const clean = String(text || "").trim();
+  if (clean.length <= limit) {
+    return clean;
+  }
+  return `${clean.slice(0, limit).trim()}\n[truncated]`;
 }
 
 async function hydrateAnswer(answer, vaultRoot) {
@@ -376,6 +690,21 @@ async function main() {
   const includeWebSearch = Boolean(payload.includeWebSearch ?? true);
   const model = String(payload.model || "gpt-5.4").trim() || "gpt-5.4";
   const reasoningEffort = String(payload.reasoningEffort || "medium").trim() || "medium";
+  const vaultContext = await buildVaultContextPack(vaultRoot, question);
+  if (process.env.VAULT_QUERY_CONTEXT_ONLY === "1") {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          question,
+          vaultContextBytes: Buffer.byteLength(vaultContext, "utf8"),
+          vaultContext,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return;
+  }
 
   const codex = new Codex({ apiKey });
   const threadOptions = buildThreadOptions({
@@ -387,7 +716,7 @@ async function main() {
 
   const thread = payload.threadId ? codex.resumeThread(payload.threadId, threadOptions) : codex.startThread(threadOptions);
   const startedAt = Date.now();
-  const turn = await thread.run(buildPrompt(question, includeWebSearch), { outputSchema: QUERY_SCHEMA });
+  const turn = await thread.run(buildPrompt(question, includeWebSearch, vaultContext), { outputSchema: QUERY_SCHEMA });
   const answer = await hydrateAnswer(extractJson(turn.finalResponse), vaultRoot);
   const usage = turn.usage || null;
   const cost = calculateCost(model, usage);
@@ -404,6 +733,7 @@ async function main() {
           model,
           reasoningEffort,
           includeWebSearch,
+          vaultContextBytes: Buffer.byteLength(vaultContext, "utf8"),
           durationMs: Date.now() - startedAt,
         },
       },
