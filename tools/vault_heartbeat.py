@@ -190,11 +190,12 @@ def collect_action_items(notes: list[Note], *, today: date, max_items: int) -> l
 
         if note_type in {"job", "opportunity"} and app_status in {"to_apply", "to_review", "watching", ""}:
             recency_date = posted or discovered
-            if not recency_date:
-                continue
-            age = (today - recency_date).days
             high_impact = note.priority in {"high", "critical"} or has_interest_signal(note, {"ai", "agent", "research", "ml", "job-search"})
-            if 0 <= age <= 10 or (high_impact and 0 <= age <= 21):
+            if recency_date:
+                age = (today - recency_date).days
+            else:
+                age = 999
+            if recency_date and (0 <= age <= 10 or (high_impact and 0 <= age <= 21)):
                 candidates.append(
                     action_payload(
                         note,
@@ -204,6 +205,19 @@ def collect_action_items(notes: list[Note], *, today: date, max_items: int) -> l
                         reason="fresh/high-impact opportunity; applying early matters",
                     )
                 )
+                continue
+
+        if note.priority in {"critical", "high"}:
+            anchor_date = deadline or revisit_after or posted or discovered or today
+            candidates.append(
+                action_payload(
+                    note,
+                    kind="explicit_priority",
+                    date_value=anchor_date,
+                    score=(92 if note.priority == "critical" else 82) + interest_points(note),
+                    reason=f"explicitly marked {note.priority} priority by the user or vault",
+                )
+            )
 
     candidates.sort(key=lambda item: (-int(item["score"]), item.get("date") or "9999-99-99", item["title"]))
     deduped = dedupe_by_path(candidates)

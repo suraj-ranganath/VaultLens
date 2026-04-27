@@ -160,6 +160,7 @@ Goal:
 Selection principles:
 - Include only things that are genuinely urgent, high impact, or intentionally saved for follow-up.
 - Prioritize deadlines/reminders within the next week, event logistics, job/opportunity items where applying early matters, and explicit promises/reminders from the user.
+- Treat explicit user priority as a strong signal. If the user marked something high or critical priority, it should usually appear unless it is stale, already done, or clearly less important than tighter deadline items.
 - Include at most one recommended reading. Pick the one recent item most likely to compound Suraj's current work, taste, or thinking.
 - It is okay to send no brief if there is no meaningful signal.
 - Do not include filler. Do not include low-signal "maybe read this" items.
@@ -276,6 +277,7 @@ async function readDigestSummary(vaultRoot) {
         discovered_on: page.discovered_on,
         published_on: page.published_on,
         deadline: page.deadline,
+        priority: page.priority,
         tags: page.tags,
         topics: page.topics,
       }));

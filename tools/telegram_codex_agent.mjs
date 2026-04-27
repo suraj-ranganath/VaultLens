@@ -73,7 +73,8 @@ Rules:
 - If the message is primarily asking a question that should be answered from the vault, request answer_vault_query.
 - For pure questions, usually set storeInVault=false unless the message also asks to remember something.
 - If the user says they completed, applied to, submitted, read, cancelled, skipped, or handled something, request update_task_ledger.
-- Treat the user's completion statement as authoritative. Do not ask for confirmation unless multiple tasks are genuinely ambiguous.
+- Treat the user's completion statement as authoritative. Infer references like "there", "that one", and named companies from recent conversation context when possible. Do not ask for confirmation unless multiple tasks are genuinely ambiguous.
+- If the user explicitly says something is low, medium, high, or critical priority, request update_task_ledger so the matching vault note/task can be reprioritized.
 - If attachments are present, use their extracted context and saved artifact paths when deciding classification and importance.
 - Treat screenshots, photos, and image-heavy messages with useful information as real vault content, not as low-value attachments.
 - If an image contains technical notes, article screenshots, job details, event details, reminders, or generally useful reference information, usually store it in the vault.

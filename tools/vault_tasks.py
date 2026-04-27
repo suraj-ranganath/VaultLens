@@ -23,8 +23,13 @@ TASK_DASHBOARD_PATH = Path("dashboards") / "tasks.md"
 ACTIONABLE_TYPES = {"job", "opportunity", "event", "reminder"}
 OPEN_STATUSES = {"", "open", "watching"}
 DONE_WORDS_RE = re.compile(
-    r"\b(done|did it|finished|completed|submitted|sent|applied|applied to|read it|read this|handled|took care|"
-    r"cancelled|canceled|skipped|not doing|closed|resolved)\b",
+    r"\b(done|did it|finished|completed|submitted|sent|applied|applied to|applied there|have applied|i applied|"
+    r"read it|read this|handled|took care|cancelled|canceled|skipped|not doing|closed|resolved)\b",
+    re.IGNORECASE,
+)
+PRIORITY_WORDS_RE = re.compile(
+    r"\b(?:(?:this|that|it|there|the\s+\w+|.+?)\s+(?:is|should be|needs to be|make(?:\s+it)?)\s+)?"
+    r"(low|medium|high|critical)\s+priority\b|\bprioriti[sz]e\s+(?:this|that|it|there)?\s*(high|critical)\b",
     re.IGNORECASE,
 )
 URL_RE = re.compile(r"https?://[^\s>)\]]+")
@@ -68,8 +73,16 @@ def main() -> None:
     complete_parser = subparsers.add_parser("complete-from-message")
     complete_parser.add_argument("--vault-root", type=Path, default=Path.cwd())
     complete_parser.add_argument("--message-text", required=True)
+    complete_parser.add_argument("--context-text", default="")
     complete_parser.add_argument("--source-id", default="")
     complete_parser.add_argument("--source", default="telegram")
+
+    update_parser = subparsers.add_parser("update-from-message")
+    update_parser.add_argument("--vault-root", type=Path, default=Path.cwd())
+    update_parser.add_argument("--message-text", required=True)
+    update_parser.add_argument("--context-text", default="")
+    update_parser.add_argument("--source-id", default="")
+    update_parser.add_argument("--source", default="telegram")
 
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--vault-root", type=Path, default=Path.cwd())
@@ -86,9 +99,19 @@ def main() -> None:
     if args.command == "sync-from-vault":
         result = sync_from_vault(vault_root)
     elif args.command == "complete-from-message":
-        result = complete_from_message(
+        result = update_from_message(
             vault_root,
             message_text=args.message_text,
+            context_text=args.context_text,
+            source_id=args.source_id,
+            source=args.source,
+            allow_priority=False,
+        )
+    elif args.command == "update-from-message":
+        result = update_from_message(
+            vault_root,
+            message_text=args.message_text,
+            context_text=args.context_text,
             source_id=args.source_id,
             source=args.source,
         )
@@ -147,13 +170,74 @@ def sync_from_vault(vault_root: Path) -> dict[str, Any]:
 
 
 def complete_from_message(vault_root: Path, *, message_text: str, source_id: str = "", source: str = "telegram") -> dict[str, Any]:
+    return update_from_message(
+        vault_root,
+        message_text=message_text,
+        context_text="",
+        source_id=source_id,
+        source=source,
+        allow_priority=False,
+    )
+
+
+def update_from_message(
+    vault_root: Path,
+    *,
+    message_text: str,
+    context_text: str = "",
+    source_id: str = "",
+    source: str = "telegram",
+    allow_priority: bool = True,
+) -> dict[str, Any]:
     text = str(message_text or "").strip()
-    if not DONE_WORDS_RE.search(text):
-        return {"completed": 0, "matched": [], "reason": "no_completion_language"}
+    completion_result = {"completed": 0, "matched": [], "reason": "no_completion_language"}
+    priority_result = {"priority_updates": 0, "matched": [], "reason": "no_priority_language"}
+
+    match_text = "\n".join(part for part in [text, context_text] if str(part or "").strip())
+    if DONE_WORDS_RE.search(text):
+        completion_result = complete_matching_task(
+            vault_root,
+            message_text=text,
+            match_text=match_text,
+            source_id=source_id,
+            source=source,
+        )
+    if allow_priority and PRIORITY_WORDS_RE.search(text):
+        priority_result = update_priority_from_message(
+            vault_root,
+            message_text=text,
+            match_text=match_text,
+            source_id=source_id,
+            source=source,
+        )
+
+    if completion_result.get("completed") or priority_result.get("priority_updates"):
+        return {
+            "completed": completion_result.get("completed", 0),
+            "completion": completion_result,
+            "priority_updates": priority_result.get("priority_updates", 0),
+            "priority": priority_result,
+        }
+    if DONE_WORDS_RE.search(text):
+        return completion_result
+    if allow_priority and PRIORITY_WORDS_RE.search(text):
+        return priority_result
+    return {"completed": 0, "priority_updates": 0, "matched": [], "reason": "no_update_language"}
+
+
+def complete_matching_task(
+    vault_root: Path,
+    *,
+    message_text: str,
+    match_text: str,
+    source_id: str = "",
+    source: str = "telegram",
+) -> dict[str, Any]:
+    text = str(message_text or "").strip()
 
     tasks = load_tasks(vault_root)
     open_tasks = [task for task in tasks if task.get("status") == "open"]
-    matches = rank_task_matches(open_tasks, text)
+    matches = rank_task_matches(open_tasks, match_text, direct_text=text)
     if not matches:
         return {"completed": 0, "matched": [], "reason": "no_matching_open_task"}
 
@@ -199,6 +283,83 @@ def complete_from_message(vault_root: Path, *, message_text: str, source_id: str
         "status": completion_status,
         "matched": [{k: v for k, v in match.items() if k != "task"} for match in selected],
         "updated_notes": updated_notes,
+    }
+
+
+def update_priority_from_message(
+    vault_root: Path,
+    *,
+    message_text: str,
+    match_text: str,
+    source_id: str = "",
+    source: str = "telegram",
+) -> dict[str, Any]:
+    priority = infer_priority(message_text)
+    if not priority:
+        return {"priority_updates": 0, "matched": [], "reason": "no_priority_language"}
+
+    tasks = load_tasks(vault_root)
+    task_matches = rank_task_matches([task for task in tasks if task.get("status") == "open"], match_text, direct_text=message_text)
+    selected_task_match = task_matches[0] if task_matches and (task_matches[0]["score"] >= 6 or len(tasks) == 1) else None
+
+    notes = load_notes(vault_root)
+    note_matches = rank_note_matches(notes, match_text, direct_text=message_text)
+    selected_note_match = note_matches[0] if note_matches and note_matches[0]["score"] >= 6 else None
+
+    changed_tasks: list[str] = []
+    changed_notes: list[str] = []
+    if selected_task_match:
+        task = selected_task_match["task"]
+        if clean_scalar(task.get("priority")).lower() != priority:
+            task["priority"] = priority
+            task["updated_at"] = now_iso()
+            task["priority_source"] = source
+            task["priority_source_id"] = source_id
+            task["priority_message_excerpt"] = truncate(message_text, 400)
+            changed_tasks.append(str(task.get("id") or ""))
+        note_path = clean_scalar(task.get("note_path"))
+        if note_path and update_note_priority(vault_root / note_path, priority):
+            changed_notes.append(note_path)
+    elif selected_note_match:
+        note_path = clean_scalar(selected_note_match.get("rel_path"))
+        if note_path and update_note_priority(vault_root / note_path, priority):
+            changed_notes.append(note_path)
+        linked_key = f"note:{note_path}"
+        for task in tasks:
+            if task.get("task_key") == linked_key and clean_scalar(task.get("priority")).lower() != priority:
+                task["priority"] = priority
+                task["updated_at"] = now_iso()
+                task["priority_source"] = source
+                task["priority_source_id"] = source_id
+                task["priority_message_excerpt"] = truncate(message_text, 400)
+                changed_tasks.append(str(task.get("id") or ""))
+
+    if not changed_tasks and not changed_notes:
+        return {
+            "priority_updates": 0,
+            "priority": priority,
+            "matched": sanitize_matches([selected_task_match] if selected_task_match else note_matches[:5]),
+            "reason": "no_confident_priority_match" if not (selected_task_match or selected_note_match) else "already_set",
+        }
+
+    save_tasks(vault_root, tasks)
+    render_dashboard(vault_root)
+    payload = {
+        "event": "tasks.priority_updated_from_message",
+        "priority": priority,
+        "source": source,
+        "source_id": source_id,
+        "changed_tasks": changed_tasks,
+        "changed_notes": changed_notes,
+        "matches": sanitize_matches([selected_task_match] if selected_task_match else [selected_note_match]),
+    }
+    append_audit(vault_root, payload)
+    return {
+        "priority_updates": len(set(changed_tasks + changed_notes)),
+        "priority": priority,
+        "matched": payload["matches"],
+        "updated_notes": changed_notes,
+        "updated_tasks": changed_tasks,
     }
 
 
@@ -278,8 +439,9 @@ def task_type(note: Note) -> str:
     return "generic"
 
 
-def rank_task_matches(tasks: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:
+def rank_task_matches(tasks: list[dict[str, Any]], text: str, *, direct_text: str = "") -> list[dict[str, Any]]:
     normalized_text = normalize_match_text(text)
+    normalized_direct = normalize_match_text(direct_text or text)
     urls = set(URL_RE.findall(text))
     matches: list[dict[str, Any]] = []
     for task in tasks:
@@ -295,6 +457,10 @@ def rank_task_matches(tasks: list[dict[str, Any]], text: str) -> list[dict[str, 
         if overlap:
             score += min(12, len(overlap) * 3)
             reasons.append(f"token_overlap:{','.join(sorted(overlap)[:6])}")
+        direct_overlap = (title_tokens | source_tokens) & set(normalized_direct.split())
+        if direct_overlap:
+            score += min(8, len(direct_overlap) * 4)
+            reasons.append(f"direct_token_overlap:{','.join(sorted(direct_overlap)[:6])}")
         if clean_scalar(task.get("task_type")) == "apply" and re.search(r"\b(applied|submitted|application)\b", text, re.I):
             score += 5
             reasons.append("apply_language")
@@ -326,6 +492,40 @@ def rank_task_matches(tasks: list[dict[str, Any]], text: str) -> list[dict[str, 
                 "task": task,
             }
         )
+    matches.sort(key=lambda item: (-int(item["score"]), str(item.get("title") or "")))
+    return matches
+
+
+def rank_note_matches(notes: list[Note], text: str, *, direct_text: str = "") -> list[dict[str, Any]]:
+    normalized_text = normalize_match_text(text)
+    normalized_direct = normalize_match_text(direct_text or text)
+    urls = set(URL_RE.findall(text))
+    matches: list[dict[str, Any]] = []
+    for note in notes:
+        score = 0
+        reasons: list[str] = []
+        if note.url and note.url in urls:
+            score += 20
+            reasons.append("exact_url")
+        tokens = important_tokens(" ".join([note.title, note.url, clean_scalar(note.frontmatter.get("company")), clean_scalar(note.frontmatter.get("role"))]))
+        overlap = tokens & set(normalized_text.split())
+        if overlap:
+            score += min(12, len(overlap) * 3)
+            reasons.append(f"token_overlap:{','.join(sorted(overlap)[:6])}")
+        direct_overlap = tokens & set(normalized_direct.split())
+        if direct_overlap:
+            score += min(8, len(direct_overlap) * 4)
+            reasons.append(f"direct_token_overlap:{','.join(sorted(direct_overlap)[:6])}")
+        if score > 0:
+            matches.append(
+                {
+                    "rel_path": note.rel_path,
+                    "title": note.title,
+                    "source_url": note.url,
+                    "score": score,
+                    "reasons": reasons,
+                }
+            )
     matches.sort(key=lambda item: (-int(item["score"]), str(item.get("title") or "")))
     return matches
 
@@ -386,6 +586,20 @@ def update_note_status(path: Path, completion_status: str) -> bool:
         changed = True
     if not changed:
         return False
+    path.write_text(render_note(frontmatter, body), encoding="utf-8")
+    return True
+
+
+def update_note_priority(path: Path, priority: str) -> bool:
+    if not path.exists() or path.suffix != ".md":
+        return False
+    text = path.read_text(encoding="utf-8", errors="replace")
+    frontmatter, body = parse_frontmatter(text)
+    if not frontmatter:
+        return False
+    if clean_scalar(frontmatter.get("priority")).lower() == priority:
+        return False
+    frontmatter["priority"] = priority
     path.write_text(render_note(frontmatter, body), encoding="utf-8")
     return True
 
@@ -487,6 +701,26 @@ def infer_completion_status(text: str) -> str:
     if re.search(r"\b(closed)\b", lowered):
         return "closed"
     return "done"
+
+
+def infer_priority(text: str) -> str:
+    matches = PRIORITY_WORDS_RE.findall(text)
+    if not matches:
+        return ""
+    flattened = [part.lower() for match in matches for part in match if part]
+    for priority in ["critical", "high", "medium", "low"]:
+        if priority in flattened:
+            return priority
+    return ""
+
+
+def sanitize_matches(matches: list[dict[str, Any] | None]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for match in matches:
+        if not match:
+            continue
+        sanitized.append({key: value for key, value in match.items() if key != "task"})
+    return sanitized
 
 
 def first_date(*values: Any) -> str:

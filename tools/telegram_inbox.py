@@ -73,8 +73,12 @@ CALENDAR_CONFIRM_RE = re.compile(
 )
 CALENDAR_CANCEL_RE = re.compile(r"^\s*(no|nope|cancel|stop|never mind|nevermind|discard|don't|do not)\s*[.!]?\s*$", re.IGNORECASE)
 TASK_COMPLETION_RE = re.compile(
-    r"\b(done|did it|finished|completed|submitted|sent|applied|applied to|read it|handled|took care|"
-    r"cancelled|canceled|skipped|not doing|closed|resolved)\b",
+    r"\b(done|did it|finished|completed|submitted|sent|applied|applied to|applied there|have applied|i applied|"
+    r"read it|handled|took care|cancelled|canceled|skipped|not doing|closed|resolved)\b",
+    re.IGNORECASE,
+)
+TASK_PRIORITY_RE = re.compile(
+    r"\b(low|medium|high|critical)\s+priority\b|\bprioriti[sz]e\s+(?:this|that|it|there)?\s*(high|critical)\b",
     re.IGNORECASE,
 )
 
@@ -1356,7 +1360,8 @@ def invoke_codex_agent(
             "message_context_rule": "Preserve user-written context or instructions that accompany links.",
             "tool_scope_rule": "Only request the provided local actions; do not invent tools.",
             "future_capture_rule": "Assume the user is sending future material that should usually be filed unless it is clearly ignorable.",
-            "task_completion_rule": "If the user says they completed, applied to, submitted, read, skipped, cancelled, or handled something, request update_task_ledger and treat it as authoritative.",
+            "task_completion_rule": "If the user says they completed, applied to, submitted, read, skipped, cancelled, or handled something, request update_task_ledger and treat it as authoritative. Infer references like 'there', 'that one', and 'Anthropic' from the recent conversation where possible.",
+            "priority_rule": "If the user explicitly says something is low, medium, high, or critical priority, request update_task_ledger so the matching vault note/task can be reprioritized.",
         },
         "message": message,
         "knownChats": known_chats,
@@ -1532,15 +1537,18 @@ def execute_agent_actions(
             continue
 
         if tool == "update_task_ledger":
+            context_text = recent_context_for_task_update(stream_file, normalized_message)
             task_proc = subprocess.run(
                 [
                     "python3",
                     str(vault_root / "tools" / "vault_tasks.py"),
-                    "complete-from-message",
+                    "update-from-message",
                     "--vault-root",
                     str(vault_root),
                     "--message-text",
                     str(normalized_message.get("raw_text") or ""),
+                    "--context-text",
+                    context_text,
                     "--source-id",
                     f"telegram:{normalized_message.get('update_id')}",
                     "--source",
@@ -1736,6 +1744,22 @@ def append_stream(path: Path, lines: list[str]) -> None:
     with path.open("a") as handle:
         for line in lines:
             handle.write(line.rstrip() + "\n")
+
+
+def recent_context_for_task_update(stream_file: Path, normalized_message: dict[str, Any], max_lines: int = 80) -> str:
+    chunks: list[str] = []
+    if stream_file.exists():
+        try:
+            chunks.append("\n".join(stream_file.read_text(encoding="utf-8", errors="replace").splitlines()[-max_lines:]))
+        except Exception:
+            pass
+    export_line = str(normalized_message.get("export_line") or "").strip()
+    raw_text = str(normalized_message.get("raw_text") or "").strip()
+    if export_line:
+        chunks.append(export_line)
+    elif raw_text:
+        chunks.append(raw_text)
+    return "\n".join(chunk for chunk in chunks if chunk).strip()
 
 
 def sync_once(
@@ -1941,6 +1965,18 @@ def process_update_batch(
                     {
                         "tool": "update_task_ledger",
                         "reason": "The user stated that an open task was completed, applied, skipped, cancelled, or handled.",
+                    }
+                ],
+                store_in_vault=bool(decision.get("storeInVault")),
+                include_ingest=ingest_after_sync,
+            )
+        if TASK_PRIORITY_RE.search(str(normalized.get("raw_text") or "")) and not any(action["tool"] == "update_task_ledger" for action in actions):
+            actions = ensure_action_order(
+                actions
+                + [
+                    {
+                        "tool": "update_task_ledger",
+                        "reason": "The user explicitly reprioritized a recent or named vault item.",
                     }
                 ],
                 store_in_vault=bool(decision.get("storeInVault")),

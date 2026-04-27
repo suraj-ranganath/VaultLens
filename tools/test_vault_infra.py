@@ -397,6 +397,89 @@ application_status: to_apply
             self.assertIn("application_status: applied", updated_note)
             self.assertTrue((root / "dashboards" / "tasks.md").exists())
 
+    def test_task_ledger_infers_completion_from_recent_context(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import vault_tasks  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note_dir = root / "items" / "jobs"
+            note_dir.mkdir(parents=True)
+            note_path = note_dir / "2026-04-26 anthropic - member of technical staff.md"
+            note_path.write_text(
+                """---
+type: job
+title: Anthropic - Member of Technical Staff
+url: https://anthropic.com/jobs/mts
+company: Anthropic
+role: Member of Technical Staff
+discovered_on: 2026-04-26
+posted_on: 2026-04-26
+status: open
+priority: medium
+application_status: to_apply
+---
+
+# Anthropic - Member of Technical Staff
+""",
+                encoding="utf-8",
+            )
+
+            vault_tasks.sync_from_vault(root)
+            result = vault_tasks.update_from_message(
+                root,
+                message_text="oh I applied there",
+                context_text="Yesterday I saved this Anthropic MTS role https://anthropic.com/jobs/mts",
+                source_id="telegram:124",
+            )
+            self.assertEqual(result["completed"], 1)
+            updated_note = note_path.read_text(encoding="utf-8")
+            self.assertIn("application_status: applied", updated_note)
+
+    def test_priority_update_marks_matching_note_and_task(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import vault_tasks  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note_dir = root / "items" / "jobs"
+            note_dir.mkdir(parents=True)
+            note_path = note_dir / "2026-04-26 example robotics - ml engineer.md"
+            note_path.write_text(
+                """---
+type: job
+title: Example Robotics - ML Engineer
+url: https://example.com/robotics-job
+company: Example Robotics
+role: ML Engineer
+discovered_on: 2026-04-26
+posted_on: 2026-04-26
+status: open
+priority: medium
+application_status: to_apply
+---
+
+# Example Robotics - ML Engineer
+""",
+                encoding="utf-8",
+            )
+
+            vault_tasks.sync_from_vault(root)
+            result = vault_tasks.update_from_message(
+                root,
+                message_text="this is high priority",
+                context_text="Saved Example Robotics ML Engineer https://example.com/robotics-job",
+                source_id="telegram:125",
+            )
+            self.assertEqual(result["priority_updates"], 2)
+            self.assertIn("priority: high", note_path.read_text(encoding="utf-8"))
+            tasks = vault_tasks.list_tasks(root, status="open")
+            self.assertEqual(tasks[0]["priority"], "high")
+
     def test_session_memory_append_creates_daily_reviewable_file(self) -> None:
         import sys
 
