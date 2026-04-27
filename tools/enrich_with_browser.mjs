@@ -108,6 +108,17 @@ function truncate(text, limit = 220) {
   return `${cleaned.slice(0, limit - 3).trimEnd()}...`;
 }
 
+function slugify(value, limit = 90) {
+  const slug = String(value || "")
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, limit)
+    .replace(/-+$/g, "");
+  return slug || `artifact-${Date.now()}`;
+}
+
 function replaceTwitterUrls(text, entities = {}) {
   let output = String(text || "");
   for (const entry of entities.urls || []) {
@@ -216,6 +227,39 @@ function renderNote(frontmatter, body) {
   return `---\n${frontmatter}\n---\n${body.startsWith("\n") ? body : `\n${body}`}`;
 }
 
+async function saveBrowserArtifactPack({ vaultRoot, filePath, url, page, extraction, xPayload }) {
+  const day = new Date().toISOString().slice(0, 10);
+  const artifactDir = path.join(vaultRoot, "raw", "web-clips", "browser-artifacts", day);
+  fs.mkdirSync(artifactDir, { recursive: true });
+  const base = slugify(`${path.basename(filePath, ".md")}-${url}`);
+  const jsonPath = path.join(artifactDir, `${base}.json`);
+  let screenshotPath = "";
+  if (String(process.env.VAULT_BROWSER_CAPTURE_SCREENSHOT || "1").toLowerCase() !== "0") {
+    screenshotPath = path.join(artifactDir, `${base}.png`);
+    try {
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+    } catch {
+      screenshotPath = "";
+    }
+  }
+  const artifact = {
+    schema: "my-vault-browser-artifact-v1",
+    capturedAt: new Date().toISOString(),
+    url,
+    finalUrl: page.url(),
+    notePath: path.relative(vaultRoot, filePath).replaceAll(path.sep, "/"),
+    extraction,
+    xPayloadCaptured: Boolean(xPayload),
+    rawXPayload: process.env.VAULT_BROWSER_SAVE_X_PAYLOAD === "1" ? xPayload : undefined,
+    screenshotPath: screenshotPath ? path.relative(vaultRoot, screenshotPath).replaceAll(path.sep, "/") : "",
+  };
+  fs.writeFileSync(jsonPath, JSON.stringify(artifact, null, 2) + "\n", "utf8");
+  return {
+    jsonPath: path.relative(vaultRoot, jsonPath).replaceAll(path.sep, "/"),
+    screenshotPath: artifact.screenshotPath,
+  };
+}
+
 async function extractGeneric(page) {
   return await page.evaluate(() => {
     const text = (value) => (value || "").replace(/\s+/g, " ").trim();
@@ -299,7 +343,7 @@ function discoveredOn(frontmatter) {
   return data.discovered_on || "";
 }
 
-async function enrichNote(browser, filePath) {
+async function enrichNote(browser, vaultRoot, filePath) {
   const note = loadNote(filePath);
   const data = parseSimpleFrontmatter(note.frontmatter);
   const url = data.url || "";
@@ -334,6 +378,7 @@ async function enrichNote(browser, filePath) {
     let summary = [];
     let signals = [];
     let browserLines = [];
+    let artifactExtraction = {};
 
     if (isX) {
       const gql = extractXFromPayload(xPayload, url);
@@ -368,6 +413,12 @@ async function enrichNote(browser, filePath) {
         `Browser URL: ${page.url()}`,
         ...(xPayload ? ["Browser source: X TweetResultByRestId GraphQL response."] : []),
       ];
+      artifactExtraction = {
+        kind: "x_post",
+        graphqlCaptured: Boolean(xPayload),
+        extracted,
+        xGraphqlSummary: gql,
+      };
     } else {
       const extracted = await extractGeneric(page);
       if (extracted.description) {
@@ -387,6 +438,13 @@ async function enrichNote(browser, filePath) {
           `Browser URL: ${page.url()}`,
         ];
       }
+      artifactExtraction = {
+        kind: "generic_page",
+        title: extracted.title,
+        description: extracted.description,
+        headings: extracted.headings,
+        paragraphs: extracted.paragraphs.slice(0, 30),
+      };
     }
 
     summary = dedupe(summary, 4, 30);
@@ -396,6 +454,18 @@ async function enrichNote(browser, filePath) {
     }
 
     let body = note.body;
+    const artifact = await saveBrowserArtifactPack({
+      vaultRoot,
+      filePath,
+      url,
+      page,
+      extraction: artifactExtraction,
+      xPayload,
+    });
+    browserLines.push(`Browser artifact: ${artifact.jsonPath}`);
+    if (artifact.screenshotPath) {
+      browserLines.push(`Browser screenshot: ${artifact.screenshotPath}`);
+    }
     body = replaceOrInsertSection(body, "Retrieved Context", summary);
     body = replaceOrInsertSection(body, "What's In It", signals);
     body = replaceOrInsertSection(body, "Browser Enrichment", browserLines, "Linked Topics");
@@ -452,7 +522,7 @@ async function main() {
       if (index >= files.length) {
         return;
       }
-      results[index] = await enrichNote(browser, files[index]);
+      results[index] = await enrichNote(browser, vaultRoot, files[index]);
     }
   }
 

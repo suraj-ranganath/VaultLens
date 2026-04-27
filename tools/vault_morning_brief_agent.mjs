@@ -226,7 +226,33 @@ async function buildContextPack(vaultRoot, candidateActions, candidateReadings) 
     sections.push(renderSection("imports/telegram-inbox/telegram-live.txt", tailLines(recentTelegram, 80)));
   }
 
+  const recentMemory = await readRecentMemory(vaultRoot);
+  if (recentMemory) {
+    sections.push(renderSection("memory/recent-session-memory", recentMemory));
+  }
+
   return sections.join("\n\n").slice(0, 42_000);
+}
+
+async function readRecentMemory(vaultRoot) {
+  const memoryRoot = path.join(vaultRoot, "memory");
+  try {
+    const files = (await fsp.readdir(memoryRoot))
+      .filter((name) => /^\d{4}-\d{2}-\d{2}\.md$/.test(name))
+      .sort()
+      .reverse()
+      .slice(0, 5);
+    const sections = [];
+    for (const file of files) {
+      const text = await readTextIfExists(path.join(memoryRoot, file), 30_000);
+      if (text) {
+        sections.push(`### memory/${file}\n${tailLines(text, 60)}`);
+      }
+    }
+    return sections.join("\n\n").slice(0, 10_000);
+  } catch {
+    return "";
+  }
 }
 
 async function readDigestSummary(vaultRoot) {

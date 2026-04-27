@@ -353,6 +353,96 @@ tags: [misc]
         self.assertEqual(meta["author_handle"], "@example")
         self.assertIn("local-first agent", meta["context_summary"][0])
 
+    def test_task_ledger_treats_user_completion_as_authoritative(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import vault_tasks  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note_dir = root / "items" / "jobs"
+            note_dir.mkdir(parents=True)
+            note_path = note_dir / "2026-04-26 example ai - research engineer.md"
+            note_path.write_text(
+                """---
+type: job
+title: Example AI - Research Engineer
+url: https://example.com/job
+company: Example AI
+role: Research Engineer
+discovered_on: 2026-04-26
+posted_on: 2026-04-26
+status: open
+priority: high
+application_status: to_apply
+---
+
+# Example AI - Research Engineer
+""",
+                encoding="utf-8",
+            )
+
+            sync = vault_tasks.sync_from_vault(root)
+            self.assertEqual(sync["created"], 1)
+            result = vault_tasks.complete_from_message(
+                root,
+                message_text="I applied to Example AI, done",
+                source_id="telegram:123",
+            )
+            self.assertEqual(result["completed"], 1)
+            tasks = vault_tasks.list_tasks(root, status="all")
+            self.assertEqual(tasks[0]["status"], "done")
+            updated_note = note_path.read_text(encoding="utf-8")
+            self.assertIn("application_status: applied", updated_note)
+            self.assertTrue((root / "dashboards" / "tasks.md").exists())
+
+    def test_session_memory_append_creates_daily_reviewable_file(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import vault_session_memory  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = vault_session_memory.append_memory(
+                root,
+                surface="telegram",
+                summary="User prefers direct useful bot responses.",
+                raw_text="make it direct and helpful",
+                metadata={"classification": "preference"},
+            )
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("User prefers direct useful bot responses", text)
+            self.assertIn("classification", text)
+
+    def test_dream_pass_writes_reviewable_output_with_mock_agent(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import vault_dream  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tools = root / "tools"
+            tools.mkdir()
+            (tools / "vault_dream_agent.mjs").write_text((REPO_ROOT / "tools" / "vault_dream_agent.mjs").read_text(), encoding="utf-8")
+            (tools / "vault_events.py").write_text((REPO_ROOT / "tools" / "vault_events.py").read_text(), encoding="utf-8")
+            mock_result = {
+                "durable_facts": ["Suraj wants the vault to be agent-first."],
+                "preferences": ["Keep responses direct and useful."],
+                "decisions_or_systems": ["Use Telegram as always-on ingestion."],
+                "task_implications": [],
+                "topic_updates": ["Personal knowledge systems are a recurring topic."],
+                "should_promote": ["Direct response style"],
+                "summary": "Promote direct style and agent-first vault preferences.",
+            }
+            result = vault_dream.run_dream(root, mock_json=json.dumps(mock_result))
+            output = root / result["output"]
+            self.assertTrue(output.exists())
+            self.assertIn("Promote direct style", output.read_text(encoding="utf-8"))
+            self.assertTrue((root / "memory" / "DREAMS.md").exists())
+
     def _telegram_update(self, update_id: int, timestamp: int, text: str) -> dict:
         return {
             "update_id": update_id,

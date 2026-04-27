@@ -16,6 +16,7 @@ import requests
 
 from vault_trajectory import append_trajectory_event
 from telegram_delivery_queue import drain_telegram_delivery_queue, send_or_queue_telegram_message
+from vault_tasks import list_tasks, sync_from_vault
 
 try:
     import yaml
@@ -76,8 +77,14 @@ def main() -> None:
 
     vault_root = args.vault_root.resolve()
     today = parse_date(args.today) or date.today()
+    try:
+        sync_from_vault(vault_root)
+    except Exception:
+        pass
     notes = load_notes(vault_root)
     candidate_actions = collect_action_items(notes, today=today, max_items=max(args.max_actions * 3, 12))
+    candidate_actions.extend(collect_task_ledger_actions(vault_root, today=today, max_items=max(args.max_actions * 2, 8)))
+    candidate_actions = dedupe_candidates(candidate_actions)[: max(args.max_actions * 4, 16)]
     candidate_readings = collect_recommended_readings(notes, today=today, max_items=8)
     agent_result = run_morning_brief_agent(
         vault_root=vault_root,
@@ -234,6 +241,36 @@ def collect_recommended_readings(notes: list[Note], *, today: date, max_items: i
     if not candidates:
         return []
     candidates.sort(key=lambda item: (-int(item["score"]), -date_sort_value(item.get("date"))))
+    return candidates[: max(1, max_items)]
+
+
+def collect_task_ledger_actions(vault_root: Path, *, today: date, max_items: int) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for task in list_tasks(vault_root, status="open", limit=max_items * 3):
+        due = parse_date(clean_scalar(task.get("due_on")))
+        score = 55
+        reason = "open task from the task ledger"
+        if due and today <= due <= today + timedelta(days=7):
+            score = 100 - (due - today).days * 8
+            reason = f"task ledger item due in {(due - today).days} day(s)"
+        elif clean_scalar(task.get("priority")).lower() in {"critical", "high"}:
+            score = 78
+            reason = "high-priority task ledger item"
+        candidates.append(
+            {
+                "kind": clean_scalar(task.get("task_type")) or "task",
+                "title": clean_scalar(task.get("title")),
+                "path": clean_scalar(task.get("note_path")),
+                "url": task.get("source_url") or None,
+                "date": due.isoformat() if due else clean_scalar(task.get("due_on")) or None,
+                "type": "task",
+                "status": clean_scalar(task.get("status")) or "open",
+                "priority": clean_scalar(task.get("priority")) or "medium",
+                "score": score,
+                "reason": reason,
+            }
+        )
+    candidates.sort(key=lambda item: (-int(item["score"]), item.get("date") or "9999-99-99", item["title"]))
     return candidates[: max(1, max_items)]
 
 
@@ -454,6 +491,18 @@ def dedupe_by_path(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if path in seen:
             continue
         seen.add(path)
+        output.append(item)
+    return output
+
+
+def dedupe_candidates(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    output: list[dict[str, Any]] = []
+    for item in sorted(items, key=lambda entry: (-int(entry.get("score") or 0), entry.get("date") or "9999-99-99", entry.get("title") or "")):
+        key = str(item.get("path") or item.get("url") or item.get("title") or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
         output.append(item)
     return output
 

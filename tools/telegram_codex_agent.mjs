@@ -65,12 +65,15 @@ Available local actions you may request:
 5. refresh_live_metadata_knowledge_all
 6. refresh_live_metadata_current_links
 7. answer_vault_query
+8. update_task_ledger
 
 Rules:
 - If the message should become part of the vault, set storeInVault=true.
 - If storeInVault=true, include append_message_to_stream and run_vault_ingest in actions.
 - If the message is primarily asking a question that should be answered from the vault, request answer_vault_query.
 - For pure questions, usually set storeInVault=false unless the message also asks to remember something.
+- If the user says they completed, applied to, submitted, read, cancelled, skipped, or handled something, request update_task_ledger.
+- Treat the user's completion statement as authoritative. Do not ask for confirmation unless multiple tasks are genuinely ambiguous.
 - If attachments are present, use their extracted context and saved artifact paths when deciding classification and importance.
 - Treat screenshots, photos, and image-heavy messages with useful information as real vault content, not as low-value attachments.
 - If an image contains technical notes, article screenshots, job details, event details, reminders, or generally useful reference information, usually store it in the vault.
@@ -113,6 +116,7 @@ const schema = {
         "resource",
         "event",
         "vault_query",
+        "task_update",
         "mixed",
         "ignore",
       ],
@@ -144,6 +148,7 @@ const schema = {
               "refresh_live_metadata_knowledge_all",
               "refresh_live_metadata_current_links",
               "answer_vault_query",
+              "update_task_ledger",
             ],
           },
           reason: { type: "string" },

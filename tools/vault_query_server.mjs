@@ -17,6 +17,7 @@ const webRoot = path.join(vaultRoot, "web");
 const chatTraceRoot = path.join(vaultRoot, "outputs", "chat-traces");
 const agentEventsPath = path.join(vaultRoot, ".vault", "events", "agent-events.jsonl");
 const trajectoryRoot = path.join(vaultRoot, ".vault", "trajectories");
+const sessionMemoryRoot = path.join(vaultRoot, "memory");
 
 loadEnvFile(path.join(vaultRoot, ".env.local"));
 
@@ -115,6 +116,10 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/api/chats") {
       return handleListChats(res);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/events") {
+      return handleListEvents(url, res);
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/api/chats/")) {
@@ -413,6 +418,15 @@ async function handleGetChat(chatId, res) {
   });
 }
 
+async function handleListEvents(url, res) {
+  const limit = Math.min(500, Math.max(1, Number.parseInt(url.searchParams.get("limit") || "200", 10)));
+  const events = await readRecentJsonl(agentEventsPath, limit);
+  return json(res, 200, {
+    ok: true,
+    events,
+  });
+}
+
 function buildPrompt(question, includeWebSearch, vaultContext = "") {
   return `
 You are answering questions against a local-first personal vault.
@@ -482,7 +496,46 @@ async function buildVaultContextPack(question) {
       timeoutMs: 60_000,
     });
     const parsed = JSON.parse(stdout);
-    return String(parsed.vaultContext || "");
+    const memory = await readRecentMemoryContext();
+    return [String(parsed.vaultContext || ""), memory ? `### recent session memory\n${memory}` : ""].filter(Boolean).join("\n\n").slice(0, 60_000);
+  } catch {
+    return await readRecentMemoryContext();
+  }
+}
+
+async function readRecentMemoryContext() {
+  try {
+    const files = (await fsp.readdir(sessionMemoryRoot))
+      .filter((name) => /^\d{4}-\d{2}-\d{2}\.md$/.test(name) || name === "DREAMS.md")
+      .sort()
+      .reverse()
+      .slice(0, 5);
+    const sections = [];
+    for (const file of files) {
+      const text = await readTextIfExists(path.join(sessionMemoryRoot, file), 40_000);
+      if (text) {
+        sections.push(`### memory/${file}\n${truncate(text.slice(-6000), 6000)}`);
+      }
+    }
+    return sections.join("\n\n");
+  } catch {
+    return "";
+  }
+}
+
+async function readTextIfExists(filePath, maxBytes = 80_000) {
+  try {
+    const stat = await fsp.stat(filePath);
+    if (!stat.isFile()) return "";
+    const handle = await fsp.open(filePath, "r");
+    try {
+      const length = Math.min(stat.size, maxBytes);
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, 0);
+      return buffer.toString("utf8");
+    } finally {
+      await handle.close();
+    }
   } catch {
     return "";
   }
@@ -770,20 +823,106 @@ async function persistChatTurn({ threadId, question, answer, trace, usage, cost,
     startedAt,
     completedAt,
   });
+  await appendSessionMemory({
+    surface: "web",
+    summary: `Vault Lens question: ${question}`,
+    rawText: question,
+    metadata: {
+      threadId: safeId,
+      confidence: answer?.confidence || "",
+      citationCount: Array.isArray(answer?.citations) ? answer.citations.length : 0,
+      cost,
+    },
+  });
   return chat;
 }
 
 async function appendAgentEvent(event) {
   try {
     await fsp.mkdir(path.dirname(agentEventsPath), { recursive: true });
+    const runId = String(event.run_id || event.thread_id || event.threadId || "web");
     const payload = {
       logged_at: new Date().toISOString(),
+      event_schema: "my-vault-agent-event-v2",
       surface: "web",
+      run_id: runId,
+      seq: await nextEventSeq(runId),
+      stream: event.stream || inferEventStream(event),
       ...event,
     };
     await fsp.appendFile(agentEventsPath, `${JSON.stringify(payload)}\n`, "utf8");
   } catch {
     // Event logging must never break user-facing answers.
+  }
+}
+
+async function appendSessionMemory({ surface, summary, rawText, metadata }) {
+  try {
+    const now = new Date();
+    const day = now.toISOString().slice(0, 10);
+    await fsp.mkdir(sessionMemoryRoot, { recursive: true });
+    const target = path.join(sessionMemoryRoot, `${day}.md`);
+    if (!(await fileExists(target))) {
+      await fsp.writeFile(
+        target,
+        ["---", "type: session_memory", `date: ${day}`, "status: active", "tags: [session-memory]", "---", "", `# Session Memory - ${day}`, ""].join("\n"),
+        "utf8",
+      );
+    }
+    const lines = [
+      `## ${now.toISOString()} - ${surface}`,
+      "",
+      `- Summary: ${truncate(summary || "", 500)}`,
+      rawText ? `- Raw: ${truncate(rawText, 700)}` : "",
+      metadata ? `- Metadata: \`${truncate(JSON.stringify(metadata), 800)}\`` : "",
+      "",
+    ].filter(Boolean);
+    await fsp.appendFile(target, `${lines.join("\n")}\n`, "utf8");
+  } catch {
+    // Session memory should never break answering.
+  }
+}
+
+async function nextEventSeq(runId) {
+  try {
+    const events = await readRecentJsonl(agentEventsPath, 500);
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      if (String(events[index]?.run_id || "") === runId) {
+        return Number(events[index].seq || 0) + 1;
+      }
+    }
+  } catch {
+    // Fall through to first sequence number.
+  }
+  return 1;
+}
+
+function inferEventStream(event) {
+  const name = String(event.event || "");
+  if (name.includes("failed") || name.includes("error")) return "error";
+  if (name.includes("tool") || name.includes("action")) return "tool";
+  if (name.includes("query") || name.includes("answer")) return "assistant";
+  return "lifecycle";
+}
+
+async function readRecentJsonl(filePath, limit) {
+  try {
+    if (!(await fileExists(filePath))) {
+      return [];
+    }
+    const text = await fsp.readFile(filePath, "utf8");
+    const lines = text.split(/\r?\n/).filter(Boolean).slice(-limit);
+    return lines
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
   }
 }
 

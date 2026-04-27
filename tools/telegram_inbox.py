@@ -29,9 +29,19 @@ except ModuleNotFoundError:
     from tools.vault_trajectory import append_trajectory_event
 
 try:
+    from vault_events import append_event as append_vault_event
+except ModuleNotFoundError:
+    from tools.vault_events import append_event as append_vault_event
+
+try:
     from telegram_delivery_queue import drain_telegram_delivery_queue, send_or_queue_telegram_message
 except ModuleNotFoundError:
     from tools.telegram_delivery_queue import drain_telegram_delivery_queue, send_or_queue_telegram_message
+
+try:
+    from vault_session_memory import append_memory
+except ModuleNotFoundError:
+    from tools.vault_session_memory import append_memory
 
 
 CURRENT_DATE = date.today()
@@ -62,6 +72,11 @@ CALENDAR_CONFIRM_RE = re.compile(
     re.IGNORECASE,
 )
 CALENDAR_CANCEL_RE = re.compile(r"^\s*(no|nope|cancel|stop|never mind|nevermind|discard|don't|do not)\s*[.!]?\s*$", re.IGNORECASE)
+TASK_COMPLETION_RE = re.compile(
+    r"\b(done|did it|finished|completed|submitted|sent|applied|applied to|read it|handled|took care|"
+    r"cancelled|canceled|skipped|not doing|closed|resolved)\b",
+    re.IGNORECASE,
+)
 
 
 def read_json(path: Path, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1222,9 +1237,8 @@ def split_message_chunks(text: str, limit: int = 3500) -> list[str]:
 
 
 def append_agent_event(vault_root: Path, event: dict[str, Any]) -> None:
-    target = vault_root / ".vault" / "events" / AGENT_EVENTS_FILE_NAME
-    payload = {"logged_at": datetime.now(timezone.utc).isoformat(), **event}
-    append_jsonl(target, [payload])
+    payload = {"surface": "telegram", **event}
+    append_vault_event(vault_root, payload)
 
 
 def run_vault_cache_compile(vault_root: Path) -> None:
@@ -1342,6 +1356,7 @@ def invoke_codex_agent(
             "message_context_rule": "Preserve user-written context or instructions that accompany links.",
             "tool_scope_rule": "Only request the provided local actions; do not invent tools.",
             "future_capture_rule": "Assume the user is sending future material that should usually be filed unless it is clearly ignorable.",
+            "task_completion_rule": "If the user says they completed, applied to, submitted, read, skipped, cancelled, or handled something, request update_task_ledger and treat it as authoritative.",
         },
         "message": message,
         "knownChats": known_chats,
@@ -1391,6 +1406,15 @@ def execute_agent_actions(
 
         if tool == "run_vault_ingest":
             ingest(vault_root, stream_file)
+            sync_proc = subprocess.run(
+                ["python3", str(vault_root / "tools" / "vault_tasks.py"), "sync-from-vault", "--vault-root", str(vault_root)],
+                text=True,
+                capture_output=True,
+                cwd=vault_root,
+                check=False,
+            )
+            if sync_proc.returncode != 0:
+                raise RuntimeError(sync_proc.stderr.strip() or sync_proc.stdout.strip() or "task ledger sync failed")
             results.append({"tool": tool, "status": "ok", "reason": reason})
             continue
 
@@ -1507,6 +1531,35 @@ def execute_agent_actions(
             )
             continue
 
+        if tool == "update_task_ledger":
+            task_proc = subprocess.run(
+                [
+                    "python3",
+                    str(vault_root / "tools" / "vault_tasks.py"),
+                    "complete-from-message",
+                    "--vault-root",
+                    str(vault_root),
+                    "--message-text",
+                    str(normalized_message.get("raw_text") or ""),
+                    "--source-id",
+                    f"telegram:{normalized_message.get('update_id')}",
+                    "--source",
+                    "telegram",
+                ],
+                text=True,
+                capture_output=True,
+                cwd=vault_root,
+                check=False,
+            )
+            if task_proc.returncode != 0:
+                raise RuntimeError(task_proc.stderr.strip() or task_proc.stdout.strip() or "task ledger update failed")
+            try:
+                task_payload = json.loads(task_proc.stdout or "{}")
+            except json.JSONDecodeError:
+                task_payload = {"raw_output": task_proc.stdout}
+            results.append({"tool": tool, "status": "ok", "reason": reason, "task_update": task_payload})
+            continue
+
         raise RuntimeError(f"Unsupported agent tool: {tool}")
 
     if any(
@@ -1519,6 +1572,7 @@ def execute_agent_actions(
             "refresh_live_metadata_jobs_recent",
             "refresh_live_metadata_knowledge_all",
             "refresh_live_metadata_current_links",
+            "update_task_ledger",
         }
         for result in results
     ):
@@ -1777,6 +1831,7 @@ def process_update_batch(
             vault_root,
             {
                 "event": "telegram.update.accepted",
+                "run_id": f"telegram-{update_id}",
                 "update_id": update_id,
                 "chat_id": chat_id,
                 "message_id": normalized["message_id"],
@@ -1852,6 +1907,21 @@ def process_update_batch(
         )
         agent_runs += 1
         decision = normalize_agent_decision(agent_result.get("decision") or {})
+        append_agent_event(
+            vault_root,
+            {
+                "event": "telegram.agent.decision",
+                "run_id": f"telegram-{update_id}",
+                "stream": "plan",
+                "update_id": update_id,
+                "chat_id": chat_id,
+                "message_id": normalized["message_id"],
+                "classification": decision.get("classification"),
+                "store_in_vault": bool(decision.get("storeInVault")),
+                "summary": decision.get("summary"),
+                "actions": [action.get("tool") for action in decision.get("actions", []) if isinstance(action, dict)],
+            },
+        )
         preview.update("Plan decided. Updating the relevant vault pieces…")
         actions = ensure_action_order(
             [action for action in decision.get("actions", []) if isinstance(action, dict)],
@@ -1861,6 +1931,18 @@ def process_update_batch(
         if decision.get("classification") == "vault_query" and not any(action["tool"] == "answer_vault_query" for action in actions):
             actions = ensure_action_order(
                 actions + [{"tool": "answer_vault_query", "reason": "Answer the user's vault question directly in Telegram."}],
+                store_in_vault=bool(decision.get("storeInVault")),
+                include_ingest=ingest_after_sync,
+            )
+        if TASK_COMPLETION_RE.search(str(normalized.get("raw_text") or "")) and not any(action["tool"] == "update_task_ledger" for action in actions):
+            actions = ensure_action_order(
+                actions
+                + [
+                    {
+                        "tool": "update_task_ledger",
+                        "reason": "The user stated that an open task was completed, applied, skipped, cancelled, or handled.",
+                    }
+                ],
                 store_in_vault=bool(decision.get("storeInVault")),
                 include_ingest=ingest_after_sync,
             )
@@ -1882,9 +1964,11 @@ def process_update_batch(
                 include_ingest=ingest_after_sync,
             )
         tool_results: list[dict[str, Any]] = []
-        if decision.get("storeInVault") or any(action.get("tool") == "answer_vault_query" for action in actions):
+        if decision.get("storeInVault") or any(action.get("tool") in {"answer_vault_query", "update_task_ledger"} for action in actions):
             if any(action.get("tool") == "answer_vault_query" for action in actions):
                 preview.update("Searching the compiled vault cache and building the answer…", force=True)
+            elif any(action.get("tool") == "update_task_ledger" for action in actions):
+                preview.update("Updating the task ledger…", force=True)
             tool_results = execute_agent_actions(
                 vault_root=vault_root,
                 session_name=session_name,
@@ -1895,6 +1979,18 @@ def process_update_batch(
                 openai_api_key=openai_api_key,
                 agent_model=agent_model,
                 agent_reasoning_effort=agent_reasoning_effort,
+            )
+            append_agent_event(
+                vault_root,
+                {
+                    "event": "telegram.agent.actions_completed",
+                    "run_id": f"telegram-{update_id}",
+                    "stream": "tool",
+                    "update_id": update_id,
+                    "chat_id": chat_id,
+                    "message_id": normalized["message_id"],
+                    "results": tool_results,
+                },
             )
             if any(result.get("tool") == "run_vault_ingest" for result in tool_results):
                 ingested += 1
@@ -1922,6 +2018,30 @@ def process_update_batch(
                 }
             ],
         )
+        try:
+            append_memory(
+                vault_root,
+                surface="telegram",
+                summary=str(decision.get("summary") or decision.get("classification") or "Telegram message processed."),
+                raw_text=str(normalized.get("raw_text") or ""),
+                metadata={
+                    "update_id": update_id,
+                    "chat_id": chat_id,
+                    "classification": decision.get("classification"),
+                    "stored": bool(decision.get("storeInVault")),
+                    "actions": [action["tool"] for action in actions],
+                    "tool_results": [
+                        {
+                            "tool": result.get("tool"),
+                            "status": result.get("status"),
+                            "task_update": result.get("task_update"),
+                        }
+                        for result in tool_results
+                    ],
+                },
+            )
+        except Exception:
+            pass
 
         query_result = next((result for result in tool_results if result.get("tool") == "answer_vault_query" and result.get("status") == "ok"), None)
         if query_result and str(query_result.get("reply_text") or "").strip():
@@ -1972,6 +2092,7 @@ def process_update_batch(
             vault_root,
             {
                 "event": "telegram.update.processed",
+                "run_id": f"telegram-{update_id}",
                 "update_id": update_id,
                 "collected_update_ids": update_ids,
                 "chat_id": chat_id,

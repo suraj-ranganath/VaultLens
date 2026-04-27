@@ -35,6 +35,7 @@ This vault is an AWS-backed, agent-maintained markdown wiki for personal knowled
 - `projects/`: active and archived project pages that collect relevant knowledge and decisions
 - `dashboards/`: operational views for urgency and retrieval
 - `outputs/`: reusable generated artifacts such as briefs, research notes, slide decks, and answer files
+- `memory/`: ignored daily session memory and reviewable dreamed memory promotions used to personalize future agent runs
 - `templates/`: note templates used during ingest and maintenance
 - `index.md`: catalog of major pages
 - `hot.md`: compact cross-session cache of recent context
@@ -52,6 +53,7 @@ This vault is an AWS-backed, agent-maintained markdown wiki for personal knowled
 - Local vault files are editable working copies for development, debugging, Obsidian browsing, browser-based enrichment, and repair work.
 - Any local workflow that changes vault content must be designed to sync changes back to the canonical AWS state.
 - Browser automation enrichment may remain local-only when that is materially cheaper or operationally simpler, but any durable metadata or note updates produced from it should be written back into canonical state.
+- Browser automation should write browser artifact packs under `raw/web-clips/browser-artifacts/` when it gets past blocked or dynamic pages. These packs are durable evidence, not just summaries.
 
 ## Source Handling
 
@@ -241,6 +243,7 @@ When the user provides a new export:
   - better retrieval and surfacing
   - better interoperability across interfaces
   - safer sync semantics between local tools and AWS state
+  - explicit task lifecycle state, so when the user says something is done/applied/read/skipped/cancelled, the ledger treats that as authoritative
 
 ## Job-Specific Rules
 
@@ -266,6 +269,7 @@ When answering questions:
    - prior verdicts and recurring systems
 6. Cite canonical notes, not imports, whenever possible.
 7. If the answer creates durable value, file it into `topics/`, `projects/`, or `outputs/`.
+8. Use `memory/` and `outputs/dreams/` as reviewable personalization surfaces; do not hide durable user understanding in opaque app memory.
 
 ## Surfacing Rules
 
@@ -290,6 +294,8 @@ When answering questions:
 - Cache/index writers should use atomic temp-file replacement. Do not leave half-written `agent-digest.json`, `claims.jsonl`, or `search.sqlite` artifacts.
 - Optional semantic search is controlled by `VAULT_EMBEDDINGS_ENABLED=true`; keep it off for cost-sensitive cloud paths unless deliberately enabled.
 - Web, Telegram, and morning-brief runs should leave redacted trajectory events under `.vault/trajectories/` so agent behavior is inspectable later.
+- Web and Telegram runs should also leave structured `.vault/events/agent-events.jsonl` records with `run_id`, `seq`, and `stream` so tool calls and lifecycle state are easy to inspect.
+- The task ledger lives under `.vault/tasks/` and renders a human-facing view at `dashboards/tasks.md`.
 - Telegram outbound delivery should use the durable queue path, not raw one-shot sends, for user-facing messages that should not be silently lost.
 
 ## Project and Output Workflow
