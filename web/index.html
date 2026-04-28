@@ -24,6 +24,10 @@
             </div>
           </div>
           <button id="new-thread-button" class="new-chat-button" type="button">New chat</button>
+          <nav class="workspace-switcher" aria-label="Workspace">
+            <button class="workspace-tab active" type="button" data-workspace="chat">Chat</button>
+            <button class="workspace-tab" type="button" data-workspace="knowledge">Knowledge</button>
+          </nav>
         </div>
 
         <div class="rail-section-head">
@@ -50,7 +54,7 @@
         </div>
       </aside>
 
-      <main class="chat-shell">
+      <main class="chat-shell workspace-panel" data-workspace-panel="chat">
         <header class="chat-topbar">
           <div class="topbar-copy">
             <p class="topbar-kicker">Vault chat</p>
@@ -130,6 +134,102 @@
             </div>
           </form>
         </footer>
+      </main>
+
+      <main class="knowledge-shell workspace-panel hidden" data-workspace-panel="knowledge">
+        <header class="knowledge-hero">
+          <div>
+            <p class="knowledge-kicker">Canonical vault atlas</p>
+            <h2>Browse the knowledge base like a living map.</h2>
+            <p class="knowledge-copy">
+              The dashboard reads the compiled markdown vault: canonical notes, topics, projects, outputs, dashboards, and source links.
+              Create custom dashboards as markdown so Obsidian and agents can use them too.
+            </p>
+          </div>
+          <div class="truth-card">
+            <span>Source of truth</span>
+            <strong>AWS-backed markdown vault</strong>
+            <p id="kb-freshness">Loading vault digest…</p>
+          </div>
+        </header>
+
+        <section class="kb-command-row">
+          <label class="kb-search-wrap" for="kb-search">
+            <span>Search</span>
+            <input id="kb-search" type="search" placeholder="Search titles, topics, saved context, URLs…" />
+          </label>
+          <button id="kb-save-view" class="kb-primary-button" type="button">Save dashboard</button>
+          <button id="kb-refresh" class="kb-secondary-button" type="button">Refresh</button>
+        </section>
+
+        <section class="kb-stats-grid" id="kb-stats"></section>
+
+        <section class="kb-layout">
+          <aside class="kb-filter-panel">
+            <div class="filter-block">
+              <div class="filter-label">Saved views</div>
+              <div id="kb-views" class="view-list"></div>
+            </div>
+
+            <div class="filter-block">
+              <label class="filter-label" for="kb-type">Type</label>
+              <select id="kb-type"></select>
+            </div>
+            <div class="filter-block">
+              <label class="filter-label" for="kb-status">Status</label>
+              <select id="kb-status"></select>
+            </div>
+            <div class="filter-block">
+              <label class="filter-label" for="kb-priority">Priority</label>
+              <select id="kb-priority"></select>
+            </div>
+            <div class="filter-block">
+              <label class="filter-label" for="kb-sort">Sort</label>
+              <select id="kb-sort">
+                <option value="recent">Latest first</option>
+                <option value="priority">Priority</option>
+                <option value="deadline">Deadline</option>
+                <option value="alpha">A-Z</option>
+              </select>
+            </div>
+
+            <div class="filter-block">
+              <div class="filter-label">Topics</div>
+              <div id="kb-topic-cloud" class="chip-cloud"></div>
+            </div>
+            <div class="filter-block">
+              <div class="filter-label">Tags</div>
+              <div id="kb-tag-cloud" class="chip-cloud"></div>
+            </div>
+          </aside>
+
+          <section class="kb-main-panel">
+            <div class="section-title-row">
+              <div>
+                <p class="knowledge-kicker">Now surfaced</p>
+                <h3>High-signal slices</h3>
+              </div>
+              <span id="kb-match-count" class="match-count">0 matches</span>
+            </div>
+            <div id="kb-focus-grid" class="kb-focus-grid"></div>
+
+            <div class="section-title-row item-title-row">
+              <div>
+                <p class="knowledge-kicker">Library</p>
+                <h3>Canonical notes</h3>
+              </div>
+            </div>
+            <div id="kb-items" class="kb-items"></div>
+          </section>
+
+          <aside class="kb-preview-panel">
+            <div id="kb-preview" class="kb-preview-card">
+              <p class="knowledge-kicker">Preview</p>
+              <h3>Select an item</h3>
+              <p>Open source links, vault notes, topics, tags, and saved context without losing your dashboard state.</p>
+            </div>
+          </aside>
+        </section>
       </main>
     </div>
 

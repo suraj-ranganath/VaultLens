@@ -10,6 +10,23 @@ const state = {
   isStreaming: false,
   routeChatId: "",
   routeTurnId: "",
+  workspace: localStorage.getItem("vaultWorkspace") || "chat",
+  kb: {
+    loaded: false,
+    loading: false,
+    data: null,
+    filters: {
+      search: "",
+      type: "all",
+      status: "all",
+      priority: "all",
+      tag: "",
+      topic: "",
+      source: "",
+      sort: "recent",
+    },
+    selectedPath: "",
+  },
 };
 
 const els = {
@@ -33,6 +50,24 @@ const els = {
   conversation: document.querySelector("#conversation"),
   conversationEmpty: document.querySelector("#conversation-empty"),
   presets: [...document.querySelectorAll(".preset")],
+  workspaceTabs: [...document.querySelectorAll("[data-workspace]")],
+  workspacePanels: [...document.querySelectorAll("[data-workspace-panel]")],
+  kbFreshness: document.querySelector("#kb-freshness"),
+  kbSearch: document.querySelector("#kb-search"),
+  kbSaveView: document.querySelector("#kb-save-view"),
+  kbRefresh: document.querySelector("#kb-refresh"),
+  kbStats: document.querySelector("#kb-stats"),
+  kbViews: document.querySelector("#kb-views"),
+  kbType: document.querySelector("#kb-type"),
+  kbStatus: document.querySelector("#kb-status"),
+  kbPriority: document.querySelector("#kb-priority"),
+  kbSort: document.querySelector("#kb-sort"),
+  kbTopicCloud: document.querySelector("#kb-topic-cloud"),
+  kbTagCloud: document.querySelector("#kb-tag-cloud"),
+  kbFocusGrid: document.querySelector("#kb-focus-grid"),
+  kbMatchCount: document.querySelector("#kb-match-count"),
+  kbItems: document.querySelector("#kb-items"),
+  kbPreview: document.querySelector("#kb-preview"),
 };
 
 Object.assign(state, readRouteFromLocation());
@@ -41,10 +76,14 @@ boot();
 
 async function boot() {
   bindEvents();
+  switchWorkspace(state.workspace, { persist: false });
   hydrateThread();
   renderHeader();
   await refreshHealth();
   await refreshChats();
+  if (state.workspace === "knowledge") {
+    await refreshKnowledgeBase();
+  }
   renderConversation({ scroll: true });
 }
 
@@ -60,6 +99,59 @@ function bindEvents() {
       els.question.value = button.dataset.question || "";
       els.question.focus();
     });
+  });
+
+  els.workspaceTabs.forEach((button) => {
+    button.addEventListener("click", () => {
+      switchWorkspace(button.dataset.workspace || "chat");
+    });
+  });
+
+  els.kbRefresh?.addEventListener("click", () => {
+    void refreshKnowledgeBase();
+  });
+  els.kbSaveView?.addEventListener("click", onSaveKnowledgeView);
+  els.kbSearch?.addEventListener("input", debounce(() => {
+    state.kb.filters.search = els.kbSearch.value.trim();
+    void refreshKnowledgeBase();
+  }, 220));
+  [els.kbType, els.kbStatus, els.kbPriority, els.kbSort].forEach((select) => {
+    select?.addEventListener("change", () => {
+      state.kb.filters.type = els.kbType.value;
+      state.kb.filters.types = [];
+      state.kb.filters.status = els.kbStatus.value;
+      state.kb.filters.priority = els.kbPriority.value;
+      state.kb.filters.sort = els.kbSort.value;
+      void refreshKnowledgeBase();
+    });
+  });
+  els.kbTopicCloud?.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-topic]");
+    if (!chip) return;
+    state.kb.filters.topic = state.kb.filters.topic === chip.dataset.topic ? "" : chip.dataset.topic;
+    void refreshKnowledgeBase();
+  });
+  els.kbTagCloud?.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-tag]");
+    if (!chip) return;
+    state.kb.filters.tag = state.kb.filters.tag === chip.dataset.tag ? "" : chip.dataset.tag;
+    void refreshKnowledgeBase();
+  });
+  els.kbViews?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-view-id]");
+    if (!button || !state.kb.data) return;
+    const view = (state.kb.data.views || []).find((entry) => entry.id === button.dataset.viewId);
+    if (!view) return;
+    state.kb.filters = { ...state.kb.filters, ...normalizeClientFilters(view.filters || {}) };
+    syncKnowledgeControls();
+    void refreshKnowledgeBase();
+  });
+  els.kbItems?.addEventListener("click", (event) => {
+    const previewButton = event.target.closest("[data-preview-path]");
+    if (previewButton) {
+      event.preventDefault();
+      selectKnowledgeItem(previewButton.dataset.previewPath || "");
+    }
   });
 
   els.conversation.addEventListener("click", (event) => {
@@ -85,6 +177,23 @@ function bindEvents() {
     }
     resetComposerState({ clearRouteState: false });
   });
+}
+
+function switchWorkspace(workspace, options = {}) {
+  const target = workspace === "knowledge" ? "knowledge" : "chat";
+  state.workspace = target;
+  if (options.persist !== false) {
+    localStorage.setItem("vaultWorkspace", target);
+  }
+  els.workspaceTabs.forEach((button) => {
+    button.classList.toggle("active", button.dataset.workspace === target);
+  });
+  els.workspacePanels.forEach((panel) => {
+    panel.classList.toggle("hidden", panel.dataset.workspacePanel !== target);
+  });
+  if (target === "knowledge" && !state.kb.loaded && !state.kb.loading) {
+    void refreshKnowledgeBase();
+  }
 }
 
 async function refreshHealth() {
@@ -587,6 +696,269 @@ function resetComposerState(options = {}) {
   renderChatList();
   renderConversation();
   els.question.focus();
+}
+
+async function refreshKnowledgeBase() {
+  if (!els.kbItems) return;
+  state.kb.loading = true;
+  renderKnowledgeLoading();
+  try {
+    const params = new URLSearchParams();
+    const filters = state.kb.filters;
+    Object.entries(filters).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        if (value.length) params.set(key, value.join(","));
+      } else if (value && value !== "all") {
+        params.set(key, value);
+      }
+    });
+    params.set("limit", "160");
+    const response = await fetch(`/api/kb?${params.toString()}`);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.error || "Failed to load knowledge base.");
+    }
+    state.kb.data = data;
+    state.kb.loaded = true;
+    state.kb.loading = false;
+    syncKnowledgeControls();
+    renderKnowledgeBase();
+  } catch (error) {
+    state.kb.loading = false;
+    els.kbItems.innerHTML = `<div class="kb-empty">Could not load the knowledge dashboard: ${escapeHtml(error instanceof Error ? error.message : String(error))}</div>`;
+  }
+}
+
+function renderKnowledgeLoading() {
+  if (!state.kb.loaded) {
+    els.kbStats.innerHTML = renderStatSkeletons();
+    els.kbItems.innerHTML = `<div class="kb-empty">Reading the compiled vault digest…</div>`;
+  }
+}
+
+function renderKnowledgeBase() {
+  const data = state.kb.data;
+  if (!data) return;
+  els.kbFreshness.textContent = data.generatedAt ? `Digest generated ${formatKnowledgeDate(data.generatedAt)}` : "Digest loaded";
+  els.kbStats.innerHTML = renderKnowledgeStats(data);
+  populateKnowledgeSelects(data);
+  renderKnowledgeViews(data.views || []);
+  renderKnowledgeClouds(data);
+  renderKnowledgeFocus(data);
+  els.kbMatchCount.textContent = `${data.totalMatches || 0} matches`;
+  els.kbItems.innerHTML = data.pages?.length
+    ? data.pages.map((page) => renderKnowledgeItem(page)).join("")
+    : `<div class="kb-empty">No notes match this dashboard. Try clearing a filter.</div>`;
+  if (state.kb.selectedPath) {
+    renderKnowledgePreview(state.kb.selectedPath);
+  }
+}
+
+function renderKnowledgeStats(data) {
+  const typeCount = sumCounts(data.counts?.byType || []);
+  const urgentCount = data.focus?.openDeadlinePages?.length || 0;
+  const highCount = data.focus?.highPriority?.length || 0;
+  return [
+    statCard("Notes indexed", formatNumber(typeCount || data.pageCount || 0), "compiled markdown files"),
+    statCard("Open tasks", formatNumber(data.tasks?.openCount || 0), "from task ledger"),
+    statCard("Urgent", formatNumber(urgentCount), "deadlines within a week"),
+    statCard("High signal", formatNumber(highCount), "high / critical priority"),
+  ].join("");
+}
+
+function statCard(label, value, sublabel) {
+  return `
+    <article class="kb-stat-card">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <p>${escapeHtml(sublabel)}</p>
+    </article>
+  `;
+}
+
+function renderStatSkeletons() {
+  return [1, 2, 3, 4].map(() => `<div class="kb-stat-card skeleton"></div>`).join("");
+}
+
+function populateKnowledgeSelects(data) {
+  fillSelect(els.kbType, [{ name: "all", count: data.pageCount }, ...(data.counts?.byType || [])], state.kb.filters.type);
+  fillSelect(els.kbStatus, [{ name: "all", count: data.pageCount }, ...(data.counts?.byStatus || [])], state.kb.filters.status);
+  fillSelect(els.kbPriority, [{ name: "all", count: data.pageCount }, ...(data.counts?.byPriority || [])], state.kb.filters.priority);
+}
+
+function fillSelect(select, entries, selected) {
+  if (!select) return;
+  const prior = select.value || selected;
+  select.innerHTML = entries
+    .map((entry) => `<option value="${escapeHtml(entry.name)}">${escapeHtml(labelize(entry.name))}${entry.count != null ? ` (${entry.count})` : ""}</option>`)
+    .join("");
+  select.value = entries.some((entry) => entry.name === prior) ? prior : "all";
+}
+
+function renderKnowledgeViews(views) {
+  els.kbViews.innerHTML = views.length
+    ? views
+        .map(
+          (view) => `
+            <button class="view-button" type="button" data-view-id="${escapeHtml(view.id)}">
+              <span>${escapeHtml(view.name)}</span>
+              <small>${escapeHtml(view.builtin ? "preset" : `${view.matchCount || 0} items`)}</small>
+            </button>
+          `,
+        )
+        .join("")
+    : `<div class="kb-muted">No saved dashboards yet.</div>`;
+}
+
+function renderKnowledgeClouds(data) {
+  els.kbTopicCloud.innerHTML = renderChipCloud(data.counts?.topics || [], "topic", state.kb.filters.topic);
+  els.kbTagCloud.innerHTML = renderChipCloud(data.counts?.tags || [], "tag", state.kb.filters.tag);
+}
+
+function renderChipCloud(entries, kind, active) {
+  return entries.slice(0, 24).map((entry) => {
+    const attr = kind === "topic" ? "data-topic" : "data-tag";
+    return `
+      <button class="kb-chip ${entry.name === active ? "active" : ""}" type="button" ${attr}="${escapeHtml(entry.name)}">
+        ${escapeHtml(entry.name)} <span>${entry.count}</span>
+      </button>
+    `;
+  }).join("") || `<div class="kb-muted">No ${kind}s yet.</div>`;
+}
+
+function renderKnowledgeFocus(data) {
+  const focus = data.focus || {};
+  const groups = [
+    { title: "Urgent", kicker: "this week", pages: focus.openDeadlinePages || [] },
+    { title: "High signal", kicker: "priority", pages: focus.highPriority || [] },
+    { title: "Recent knowledge", kicker: "fresh saves", pages: focus.recentKnowledge || [] },
+  ];
+  els.kbFocusGrid.innerHTML = groups
+    .map(
+      (group) => `
+        <article class="focus-card">
+          <div class="focus-topline"><span>${escapeHtml(group.kicker)}</span><strong>${group.pages.length}</strong></div>
+          <h4>${escapeHtml(group.title)}</h4>
+          ${
+            group.pages.length
+              ? `<ul>${group.pages
+                  .slice(0, 4)
+                  .map((page) => `<li><a href="${escapeHtml(buildVaultPath(page.path))}" target="_blank" rel="noreferrer">${escapeHtml(page.title || page.path)}</a></li>`)
+                  .join("")}</ul>`
+              : `<p>No active items in this slice.</p>`
+          }
+        </article>
+      `,
+    )
+    .join("");
+}
+
+function renderKnowledgeItem(page) {
+  const date = page.discovered_on || page.published_on || page.deadline || "";
+  const chips = [
+    page.type,
+    page.priority,
+    page.status,
+    page.sourceSite,
+    ...(page.topics || []).slice(0, 2),
+  ].filter(Boolean);
+  return `
+    <article class="kb-item ${page.path === state.kb.selectedPath ? "selected" : ""}">
+      <button class="kb-item-main" type="button" data-preview-path="${escapeHtml(page.path)}">
+        <span class="kb-item-type">${escapeHtml(page.type || "note")}</span>
+        <h4>${escapeHtml(page.title || page.path)}</h4>
+        <p>${escapeHtml(page.summary || page.why_saved || "No summary yet.")}</p>
+        <div class="kb-item-chips">${chips.map((chip) => `<span>${escapeHtml(chip)}</span>`).join("")}</div>
+      </button>
+      <div class="kb-item-actions">
+        ${date ? `<time>${escapeHtml(date)}</time>` : ""}
+        ${page.url ? `<a href="${escapeHtml(page.url)}" target="_blank" rel="noreferrer">Source</a>` : ""}
+        <a href="${escapeHtml(page.vaultUrl || buildVaultPath(page.path))}" target="_blank" rel="noreferrer">Vault</a>
+      </div>
+    </article>
+  `;
+}
+
+function selectKnowledgeItem(path) {
+  state.kb.selectedPath = path;
+  renderKnowledgeBase();
+}
+
+function renderKnowledgePreview(relativePath) {
+  const page = (state.kb.data?.pages || []).find((entry) => entry.path === relativePath);
+  if (!page) return;
+  els.kbPreview.innerHTML = `
+    <p class="knowledge-kicker">${escapeHtml(page.type || "note")}</p>
+    <h3>${escapeHtml(page.title || page.path)}</h3>
+    <p>${escapeHtml(page.summary || page.why_saved || "No summary yet.")}</p>
+    <div class="preview-facts">
+      ${previewFact("Path", page.path)}
+      ${previewFact("Website", page.sourceSite)}
+      ${previewFact("Author", [page.author, page.authorCredential].filter(Boolean).join(" - "))}
+      ${previewFact("Added", page.discovered_on)}
+      ${previewFact("Published", page.published_on)}
+      ${previewFact("Priority", page.priority)}
+    </div>
+    <div class="preview-actions">
+      ${page.url ? `<a href="${escapeHtml(page.url)}" target="_blank" rel="noreferrer">Primary source</a>` : ""}
+      <a href="${escapeHtml(page.vaultUrl || buildVaultPath(page.path))}" target="_blank" rel="noreferrer">Open rendered note</a>
+      <a href="${escapeHtml(page.rawUrl || `/vault-raw/${encodeURI(page.path)}`)}" target="_blank" rel="noreferrer">Raw markdown</a>
+    </div>
+  `;
+}
+
+function previewFact(label, value) {
+  return value ? `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>` : "";
+}
+
+async function onSaveKnowledgeView() {
+  const fallback = buildViewNameFromFilters(state.kb.filters);
+  const name = window.prompt("Dashboard name", fallback);
+  if (!name) return;
+  els.kbSaveView.disabled = true;
+  try {
+    const response = await fetch("/api/kb/views", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, filters: state.kb.filters }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Could not save dashboard.");
+    await refreshKnowledgeBase();
+    window.open(data.url, "_blank", "noreferrer");
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : String(error));
+  } finally {
+    els.kbSaveView.disabled = false;
+  }
+}
+
+function syncKnowledgeControls() {
+  if (els.kbSearch) els.kbSearch.value = state.kb.filters.search || "";
+  if (els.kbType) els.kbType.value = state.kb.filters.types?.length ? "all" : state.kb.filters.type || "all";
+  if (els.kbStatus) els.kbStatus.value = state.kb.filters.status || "all";
+  if (els.kbPriority) els.kbPriority.value = state.kb.filters.priority || "all";
+  if (els.kbSort) els.kbSort.value = state.kb.filters.sort || "recent";
+}
+
+function normalizeClientFilters(filters) {
+  return {
+    search: filters.search || "",
+    type: filters.type || "all",
+    types: Array.isArray(filters.types) ? filters.types : String(filters.types || "").split(",").map((item) => item.trim()).filter(Boolean),
+    status: filters.status || "all",
+    priority: filters.priority || "all",
+    tag: filters.tag || "",
+    topic: filters.topic || "",
+    source: filters.source || "",
+    sort: filters.sort || "recent",
+  };
+}
+
+function buildViewNameFromFilters(filters) {
+  const typeLabel = filters.types?.length ? filters.types.map(labelize).join(" + ") : filters.type !== "all" ? labelize(filters.type) : "Vault";
+  const parts = [typeLabel, filters.topic || filters.tag || "", filters.priority !== "all" ? labelize(filters.priority) : ""].filter(Boolean);
+  return `${parts.join(" ")} Dashboard`;
 }
 
 function renderConversation({ scroll = false, turnId = "" } = {}) {
@@ -1284,6 +1656,39 @@ function formatDuration(ms) {
     return `${ms}ms`;
   }
   return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function formatKnowledgeDate(value) {
+  if (!value) return "unknown";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function formatNumber(value) {
+  return new Intl.NumberFormat().format(Number(value || 0));
+}
+
+function sumCounts(entries) {
+  return (entries || []).reduce((total, entry) => total + Number(entry.count || 0), 0);
+}
+
+function labelize(value) {
+  const text = String(value || "unknown");
+  if (text === "all") return "All";
+  return text.replace(/[_-]/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function buildVaultPath(relativePath) {
+  return `/vault/${encodeURI(String(relativePath || "").replace(/^\/+/, ""))}`;
+}
+
+function debounce(fn, wait) {
+  let timer = 0;
+  return (...args) => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => fn(...args), wait);
+  };
 }
 
 function truncate(text, limit) {

@@ -18,6 +18,8 @@ const chatTraceRoot = path.join(vaultRoot, "outputs", "chat-traces");
 const agentEventsPath = path.join(vaultRoot, ".vault", "events", "agent-events.jsonl");
 const trajectoryRoot = path.join(vaultRoot, ".vault", "trajectories");
 const sessionMemoryRoot = path.join(vaultRoot, "memory");
+const webDashboardViewsPath = path.join(vaultRoot, ".vault", "web-dashboard-views.json");
+const customDashboardRoot = path.join(vaultRoot, "dashboards", "custom");
 
 loadEnvFile(path.join(vaultRoot, ".env.local"));
 
@@ -120,6 +122,18 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/api/events") {
       return handleListEvents(url, res);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/kb") {
+      return handleKnowledgeBase(url, res);
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/kb/views") {
+      return handleListDashboardViews(res);
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/kb/views") {
+      return handleSaveDashboardView(req, res);
     }
 
     if (req.method === "GET" && url.pathname.startsWith("/api/chats/")) {
@@ -427,6 +441,76 @@ async function handleListEvents(url, res) {
   });
 }
 
+async function handleKnowledgeBase(url, res) {
+  const digest = await readAgentDigest();
+  const allPages = Array.isArray(digest.pages) ? digest.pages : [];
+  const filters = parseKnowledgeFilters(url.searchParams);
+  const filtered = filterKnowledgePages(allPages, filters);
+  const sorted = sortKnowledgePages(filtered, filters.sort);
+  const limit = Math.min(400, Math.max(1, Number.parseInt(url.searchParams.get("limit") || "120", 10)));
+  const selected = sorted.slice(0, limit);
+  const [views, tasks] = await Promise.all([readDashboardViews(), readTaskLedgerSummary()]);
+
+  return json(res, 200, {
+    ok: true,
+    generatedAt: digest.generated_at || "",
+    pageCount: digest.page_count || allPages.length,
+    claimHealth: digest.claim_health || {},
+    browserQueueCount: digest.browser_queue_count || 0,
+    sourceCount: digest.source_count || 0,
+    filters,
+    counts: buildKnowledgeCounts(allPages),
+    focus: buildKnowledgeFocus(allPages, tasks),
+    pages: await Promise.all(selected.map((page) => hydrateKnowledgePage(page))),
+    totalMatches: filtered.length,
+    views,
+    tasks,
+  });
+}
+
+async function handleListDashboardViews(res) {
+  return json(res, 200, {
+    ok: true,
+    views: await readDashboardViews(),
+  });
+}
+
+async function handleSaveDashboardView(req, res) {
+  const body = await readJson(req);
+  const name = String(body.name || "").trim();
+  const filters = normalizeDashboardFilters(body.filters || {});
+  if (!name) {
+    return json(res, 400, { error: "Missing dashboard name." });
+  }
+
+  const digest = await readAgentDigest();
+  const pages = sortKnowledgePages(filterKnowledgePages(digest.pages || [], filters), filters.sort).slice(0, 80);
+  const view = {
+    id: slugify(name).slice(0, 80),
+    name,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    filters,
+    matchCount: pages.length,
+  };
+  const views = await readDashboardViews();
+  const existingIndex = views.findIndex((entry) => entry.id === view.id);
+  if (existingIndex >= 0) {
+    view.createdAt = views[existingIndex].createdAt || view.createdAt;
+    views[existingIndex] = view;
+  } else {
+    views.unshift(view);
+  }
+  await writeDashboardViews(views);
+  const markdownPath = await writeCustomDashboardMarkdown(view, pages);
+  return json(res, 200, {
+    ok: true,
+    view,
+    path: markdownPath,
+    url: `/vault/${encodeURI(markdownPath)}`,
+  });
+}
+
 function buildPrompt(question, includeWebSearch, vaultContext = "") {
   return `
 You are answering questions against a local-first personal vault.
@@ -520,6 +604,338 @@ async function readRecentMemoryContext() {
     return sections.join("\n\n");
   } catch {
     return "";
+  }
+}
+
+async function readAgentDigest() {
+  const digestPath = path.join(vaultRoot, ".vault", "cache", "agent-digest.json");
+  if (!(await fileExists(digestPath))) {
+    await runCacheCompile();
+  }
+  try {
+    return JSON.parse(await fsp.readFile(digestPath, "utf8"));
+  } catch {
+    await runCacheCompile();
+    return JSON.parse(await fsp.readFile(digestPath, "utf8"));
+  }
+}
+
+async function runCacheCompile() {
+  const script = path.join(vaultRoot, "tools", "vault_compile_cache.py");
+  if (!(await fileExists(script))) {
+    return;
+  }
+  await runWithInput({
+    command: "python3",
+    args: [script, "--vault-root", vaultRoot, "--quiet"],
+    cwd: vaultRoot,
+    env: process.env,
+    input: "",
+    timeoutMs: 90_000,
+  });
+}
+
+function parseKnowledgeFilters(searchParams) {
+  return normalizeDashboardFilters({
+    search: searchParams.get("search") || "",
+    type: searchParams.get("type") || "all",
+    types: searchParams.get("types") || "",
+    status: searchParams.get("status") || "all",
+    priority: searchParams.get("priority") || "all",
+    tag: searchParams.get("tag") || "",
+    topic: searchParams.get("topic") || "",
+    source: searchParams.get("source") || "",
+    sort: searchParams.get("sort") || "recent",
+  });
+}
+
+function normalizeDashboardFilters(raw) {
+  const explicitTypes = Array.isArray(raw.types)
+    ? raw.types
+    : String(raw.types || "").split(",");
+  return {
+    search: String(raw.search || "").trim(),
+    type: String(raw.type || "all").trim() || "all",
+    types: explicitTypes.map((item) => String(item || "").trim()).filter(Boolean),
+    status: String(raw.status || "all").trim() || "all",
+    priority: String(raw.priority || "all").trim() || "all",
+    tag: String(raw.tag || "").trim(),
+    topic: String(raw.topic || "").trim(),
+    source: String(raw.source || "").trim(),
+    sort: String(raw.sort || "recent").trim() || "recent",
+  };
+}
+
+function filterKnowledgePages(pages, filters) {
+  const query = normalizeSearchText(filters.search);
+  const sourceQuery = normalizeSearchText(filters.source);
+  const typeSet = new Set(filters.types?.length ? filters.types : filters.type && filters.type !== "all" ? [filters.type] : []);
+  return pages.filter((page) => {
+    const pagePath = String(page.path || "");
+    if (!pagePath.startsWith("items/") && !pagePath.startsWith("topics/") && !pagePath.startsWith("projects/") && !pagePath.startsWith("outputs/") && !pagePath.startsWith("dashboards/")) {
+      return false;
+    }
+    if (typeSet.size && !typeSet.has(String(page.type || ""))) return false;
+    if (filters.status !== "all" && String(page.status || "") !== filters.status) return false;
+    if (filters.priority !== "all" && String(page.priority || "") !== filters.priority) return false;
+    if (filters.tag && !(page.tags || []).map(String).includes(filters.tag)) return false;
+    if (filters.topic && !(page.topics || []).map(String).includes(filters.topic)) return false;
+    if (sourceQuery && !normalizeSearchText(`${page.url || ""} ${deriveSourceSite(page.url || "", {})}`).includes(sourceQuery)) return false;
+    if (!query) return true;
+    const haystack = normalizeSearchText(
+      [
+        page.title,
+        page.path,
+        page.type,
+        page.url,
+        page.summary,
+        page.why_saved,
+        ...(page.tags || []),
+        ...(page.topics || []),
+      ].join(" "),
+    );
+    return haystack.includes(query);
+  });
+}
+
+function sortKnowledgePages(pages, sort) {
+  const cloned = [...pages];
+  if (sort === "priority") {
+    cloned.sort((a, b) => priorityRank(b.priority) - priorityRank(a.priority) || compareRecent(b, a));
+  } else if (sort === "deadline") {
+    cloned.sort((a, b) => String(a.deadline || "9999-99-99").localeCompare(String(b.deadline || "9999-99-99")) || compareRecent(b, a));
+  } else if (sort === "alpha") {
+    cloned.sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")));
+  } else {
+    cloned.sort(compareRecent);
+  }
+  return cloned;
+}
+
+function compareRecent(a, b) {
+  const left = String(a.discovered_on || a.published_on || a.deadline || "");
+  const right = String(b.discovered_on || b.published_on || b.deadline || "");
+  if (left !== right) return right.localeCompare(left);
+  return Number(b.mtime || 0) - Number(a.mtime || 0);
+}
+
+function priorityRank(priority) {
+  return { critical: 4, high: 3, medium: 2, low: 1 }[String(priority || "").toLowerCase()] || 0;
+}
+
+function buildKnowledgeCounts(pages) {
+  const byType = countBy(pages, "type");
+  const byStatus = countBy(pages, "status");
+  const byPriority = countBy(pages, "priority");
+  const tags = countArrayValues(pages, "tags").slice(0, 48);
+  const topics = countArrayValues(pages, "topics").slice(0, 48);
+  const sources = countSources(pages).slice(0, 48);
+  return { byType, byStatus, byPriority, tags, topics, sources };
+}
+
+function countBy(pages, field) {
+  const counts = {};
+  for (const page of pages) {
+    const key = String(page[field] || "unknown").trim() || "unknown";
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+function countArrayValues(pages, field) {
+  const counts = {};
+  for (const page of pages) {
+    for (const item of page[field] || []) {
+      const key = String(item || "").trim();
+      if (key) counts[key] = (counts[key] || 0) + 1;
+    }
+  }
+  return Object.entries(counts)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+function countSources(pages) {
+  const counts = {};
+  for (const page of pages) {
+    const source = deriveSourceSite(page.url || "", {});
+    if (source) counts[source] = (counts[source] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+function buildKnowledgeFocus(pages, tasks) {
+  const now = new Date();
+  const inSevenDays = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const openDeadlinePages = pages
+    .filter((page) => page.deadline && String(page.status || "open") !== "done" && page.deadline <= inSevenDays)
+    .sort((a, b) => String(a.deadline).localeCompare(String(b.deadline)))
+    .slice(0, 6);
+  const highPriority = pages
+    .filter((page) => ["critical", "high"].includes(String(page.priority || "")) && String(page.status || "open") !== "done")
+    .sort(compareRecent)
+    .slice(0, 8);
+  const recentKnowledge = pages
+    .filter((page) => ["article", "resource", "tweet", "thought"].includes(String(page.type || "")))
+    .sort(compareRecent)
+    .slice(0, 8);
+  return {
+    openDeadlinePages,
+    highPriority,
+    recentKnowledge,
+    openTaskCount: tasks.openCount || 0,
+  };
+}
+
+async function hydrateKnowledgePage(page) {
+  const meta = await readPageFrontmatter(page.path);
+  const sourceUrl = String(page.url || meta.url || "").trim();
+  return {
+    path: page.path,
+    title: page.title || meta.title || path.basename(page.path || ""),
+    type: page.type || meta.type || "note",
+    url: sourceUrl || null,
+    status: page.status || meta.status || "",
+    priority: page.priority || meta.priority || "",
+    published_on: page.published_on || meta.published_on || "",
+    discovered_on: page.discovered_on || meta.discovered_on || "",
+    deadline: page.deadline || meta.deadline || "",
+    tags: page.tags || asArray(meta.tags),
+    topics: page.topics || asArray(meta.topics),
+    summary: page.summary || "",
+    why_saved: page.why_saved || meta.why_saved || "",
+    sourceSite: deriveSourceSite(sourceUrl, meta),
+    author: firstPresent(meta.author, meta.author_name, meta.source_author, meta.byline),
+    authorCredential: firstPresent(meta.author_credential, meta.author_credentials, meta.credential, meta.credentials),
+    vaultUrl: buildVaultUrl(page.path),
+    rawUrl: buildVaultRawUrl(page.path),
+  };
+}
+
+async function readPageFrontmatter(relativePath) {
+  const safePath = safeJoin(vaultRoot, relativePath || "");
+  if (!safePath || !(await fileExists(safePath)) || path.extname(safePath) !== ".md") {
+    return {};
+  }
+  try {
+    const handle = await fsp.open(safePath, "r");
+    try {
+      const buffer = Buffer.alloc(16_384);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const text = buffer.subarray(0, bytesRead).toString("utf8");
+      return parseSimpleFrontmatter(splitFrontmatter(text).frontmatter);
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return {};
+  }
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function normalizeSearchText(value) {
+  return String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+async function readDashboardViews() {
+  const defaults = defaultDashboardViews();
+  try {
+    if (!(await fileExists(webDashboardViewsPath))) {
+      return defaults;
+    }
+    const parsed = JSON.parse(await fsp.readFile(webDashboardViewsPath, "utf8"));
+    const views = Array.isArray(parsed.views) ? parsed.views : [];
+    const customViews = views.filter((view) => !view.builtin && !defaults.some((preset) => preset.id === view.id));
+    return [...defaults, ...customViews];
+  } catch {
+    return defaults;
+  }
+}
+
+async function writeDashboardViews(views) {
+  const persistedViews = views.filter((view) => !view.builtin);
+  await fsp.mkdir(path.dirname(webDashboardViewsPath), { recursive: true });
+  await fsp.writeFile(
+    webDashboardViewsPath,
+    JSON.stringify({ schema: "my-vault-web-dashboard-views-v1", updatedAt: new Date().toISOString(), views: persistedViews }, null, 2) + "\n",
+    "utf8",
+  );
+}
+
+function defaultDashboardViews() {
+  return [
+    { id: "urgent", name: "Urgent / This Week", builtin: true, filters: { type: "all", status: "open", priority: "all", sort: "deadline" } },
+    { id: "reading", name: "Reading Queue", builtin: true, filters: { types: ["article", "resource", "tweet"], status: "all", priority: "all", sort: "recent" } },
+    { id: "jobs", name: "Jobs + Opportunities", builtin: true, filters: { types: ["job", "opportunity"], status: "all", priority: "all", sort: "recent" } },
+    { id: "decisions", name: "Decisions + Systems", builtin: true, filters: { types: ["decision", "system"], status: "all", priority: "all", sort: "recent" } },
+  ];
+}
+
+async function writeCustomDashboardMarkdown(view, pages) {
+  await fsp.mkdir(customDashboardRoot, { recursive: true });
+  const relativePath = path.posix.join("dashboards", "custom", `${view.id}.md`);
+  const targetPath = path.join(vaultRoot, relativePath);
+  const lines = [
+    "---",
+    yamlDump({
+      title: view.name,
+      type: "dashboard",
+      status: "active",
+      created_on: view.createdAt,
+      updated_on: view.updatedAt,
+      tags: ["custom-dashboard", "web-dashboard"],
+      filters: JSON.stringify(view.filters),
+    }),
+    "---",
+    "",
+    `# ${view.name}`,
+    "",
+    `Generated from the web knowledge dashboard on ${view.updatedAt}.`,
+    "",
+    "## Filters",
+    "",
+    ...Object.entries(view.filters).map(([key, value]) => `- ${key}: ${value || "all"}`),
+    "",
+    "## Items",
+    "",
+    ...(pages.length
+      ? pages.map((page) => {
+          const bits = [page.type, page.priority, page.status].filter(Boolean).join(", ");
+          const source = page.url ? ` - [source](${page.url})` : "";
+          return `- [[${page.path}|${page.title || page.path}]]${bits ? ` (${bits})` : ""}${source}`;
+        })
+      : ["- No matching items at generation time."]),
+    "",
+  ];
+  await fsp.writeFile(targetPath, lines.join("\n"), "utf8");
+  return relativePath;
+}
+
+async function readTaskLedgerSummary() {
+  const tasksPath = path.join(vaultRoot, ".vault", "tasks", "tasks.json");
+  try {
+    if (!(await fileExists(tasksPath))) {
+      return { openCount: 0, totalCount: 0, urgent: [] };
+    }
+    const parsed = JSON.parse(await fsp.readFile(tasksPath, "utf8"));
+    const tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+    return {
+      openCount: tasks.filter((task) => task.status === "open").length,
+      totalCount: tasks.length,
+      urgent: tasks
+        .filter((task) => task.status === "open")
+        .sort((a, b) => String(a.due_on || "9999-99-99").localeCompare(String(b.due_on || "9999-99-99")))
+        .slice(0, 8),
+    };
+  } catch {
+    return { openCount: 0, totalCount: 0, urgent: [] };
   }
 }
 

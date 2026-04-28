@@ -154,7 +154,7 @@ The compiled cache is written atomically so Telegram/web queries never read half
 
 Web, Telegram, and morning-brief agent runs write redacted trajectory sidecars under `.vault/trajectories/`. Export one with `npm run vault:trajectory -- <run-id>`. Telegram outbound messages use a durable local queue under `.vault/telegram-delivery-queue/` so failed sends can be retried on the next worker run.
 
-### 6. Run the local web Q&A interface
+### 6. Run the local web interface
 
 ```bash
 npm run vault:web
@@ -162,9 +162,16 @@ npm run vault:web
 
 Then open `http://localhost:4318`.
 
-The web interface runs a local Codex-backed query route over the vault. It is designed for retrieval-first answering:
+The web interface has two workspaces:
 
-- local vault files are the primary source of truth
+- `Chat`: a Codex-backed query route over the vault for retrieval-first answering
+- `Knowledge`: a visual dashboard over the compiled markdown knowledge base with saved views, filters, source links, vault-rendered previews, and custom dashboard creation
+
+The Knowledge workspace is meant to be the browser surface for the AWS-backed markdown vault. It reads the current local mirror of the canonical state and writes custom dashboards as markdown under `dashboards/custom/`, so they remain visible in Obsidian and portable to other agents.
+
+The Chat workspace is designed for retrieval-first answering:
+
+- AWS-backed markdown vault files are the source of truth; local files are the working mirror used by this web server
 - the agent starts from the compiled `.vault/cache/agent-digest.json`, SQLite FTS retrieval, `hot.md`, dashboards, and canonical notes
 - answers return citations to vault files plus a live agent feed
 - the live feed shows reasoning summaries, plan updates, shell commands, web searches, MCP calls, and surfaced agent messages
