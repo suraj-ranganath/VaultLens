@@ -28,6 +28,7 @@ def send_or_queue_telegram_message(
     text: str,
     reply_to_message_id: int | None = None,
     disable_web_page_preview: bool = True,
+    reply_markup: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -37,6 +38,8 @@ def send_or_queue_telegram_message(
     }
     if reply_to_message_id is not None:
         payload["reply_to_message_id"] = reply_to_message_id
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     try:
         return send_telegram_payload(token, payload)
     except Exception as exc:

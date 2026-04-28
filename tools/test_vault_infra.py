@@ -572,6 +572,142 @@ application_status: to_apply
             tasks = vault_tasks.list_tasks(root, status="open")
             self.assertEqual(tasks[0]["priority"], "high")
 
+    def test_telegram_today_command_renders_without_agent(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note_dir = root / "items" / "jobs"
+            note_dir.mkdir(parents=True)
+            (note_dir / "2026-04-26 example ai - research engineer.md").write_text(
+                """---
+type: job
+title: Example AI - Research Engineer
+url: https://example.com/job
+company: Example AI
+role: Research Engineer
+discovered_on: 2026-04-26
+posted_on: 2026-04-26
+deadline: 2026-04-30
+status: open
+priority: high
+application_status: to_apply
+---
+
+# Example AI - Research Engineer
+""",
+                encoding="utf-8",
+            )
+
+            sent: list[dict[str, object]] = []
+
+            def fake_send_message(*args: object, **kwargs: object) -> dict[str, object]:
+                sent.append(kwargs)
+                return {"ok": True, "result": {"message_id": 10}}
+
+            update = {
+                "update_id": 100,
+                "message": {
+                    "message_id": 20,
+                    "date": 1777248000,
+                    "text": "/today",
+                    "chat": {"id": 123, "type": "private"},
+                    "from": {"first_name": "Suraj"},
+                },
+            }
+            with mock.patch.object(telegram_inbox, "telegram_send_message", side_effect=fake_send_message), mock.patch.object(
+                telegram_inbox, "telegram_send_chat_action", return_value={"ok": True}
+            ):
+                result = telegram_inbox.process_update_batch(
+                    vault_root=root,
+                    token="dummy",
+                    session_name="test",
+                    allowed_chat_ids=set(),
+                    ingest_after_sync=True,
+                    agent_model="gpt-5.4",
+                    agent_reasoning_effort="medium",
+                    openai_api_key="",
+                    updates=[update],
+                    mode="test",
+                )
+
+            self.assertEqual(result["agent_runs"], 0)
+            self.assertEqual(result["answered_messages"], 1)
+            self.assertIn("Today’s command center", str(sent[0]["text"]))
+            self.assertIn("Example AI", str(sent[0]["text"]))
+            self.assertIn("inline_keyboard", sent[0]["reply_markup"])
+
+    def test_telegram_callback_can_mark_task_applied(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+        import vault_tasks  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note_dir = root / "items" / "jobs"
+            note_dir.mkdir(parents=True)
+            note_path = note_dir / "2026-04-26 example ai - research engineer.md"
+            note_path.write_text(
+                """---
+type: job
+title: Example AI - Research Engineer
+url: https://example.com/job
+company: Example AI
+role: Research Engineer
+discovered_on: 2026-04-26
+posted_on: 2026-04-26
+deadline: 2026-04-30
+status: open
+priority: high
+application_status: to_apply
+---
+
+# Example AI - Research Engineer
+""",
+                encoding="utf-8",
+            )
+            vault_tasks.sync_from_vault(root)
+            text, markup = telegram_inbox.render_today_command(root)
+            self.assertIn("Example AI", text)
+            callback_data = markup["inline_keyboard"][0][0]["callback_data"]
+
+            update = {
+                "update_id": 101,
+                "callback_query": {
+                    "id": "cb-1",
+                    "data": callback_data,
+                    "message": {"message_id": 30, "chat": {"id": 123, "type": "private"}},
+                    "from": {"first_name": "Suraj"},
+                },
+            }
+            sent: list[dict[str, object]] = []
+            with mock.patch.object(telegram_inbox, "telegram_answer_callback_query", return_value={"ok": True}), mock.patch.object(
+                telegram_inbox, "telegram_send_message", side_effect=lambda *args, **kwargs: sent.append(kwargs) or {"ok": True}
+            ):
+                result = telegram_inbox.process_update_batch(
+                    vault_root=root,
+                    token="dummy",
+                    session_name="test",
+                    allowed_chat_ids=set(),
+                    ingest_after_sync=True,
+                    agent_model="gpt-5.4",
+                    agent_reasoning_effort="medium",
+                    openai_api_key="",
+                    updates=[update],
+                    mode="test",
+                )
+
+            self.assertEqual(result["agent_runs"], 0)
+            self.assertEqual(result["answered_messages"], 1)
+            self.assertIn("Marked applied", str(sent[0]["text"]))
+            updated_note = note_path.read_text(encoding="utf-8")
+            self.assertIn("application_status: applied", updated_note)
+
     def test_session_memory_append_creates_daily_reviewable_file(self) -> None:
         import sys
 

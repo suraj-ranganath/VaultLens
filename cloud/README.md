@@ -10,6 +10,7 @@ This deploys the vault Telegram agent as a webhook-first AWS path.
 - The processor Lambda restores the ignored vault state bundle from S3 into `/tmp/my-vault`.
 - The processor waits briefly, collects pending webhook events from S3, then runs `tools/telegram_inbox.py webhook` with a small batch so rapid Telegram messages can be coalesced instead of forcing separate agent turns.
 - The Telegram worker uses preview-message edits for progress, then edits that same preview into the final answer or acknowledgement when possible.
+- Telegram command-center requests (`/today`, `/queue`, `/status`, `/trace`) and inline button callbacks are handled by deterministic local code inside the same processor, so common state updates do not spend LLM tokens.
 - The query path compiles `.vault/cache/`, runs local SQLite FTS retrieval, and only then calls the Codex-backed answer agent.
 - Cache compilation writes digest/search/report artifacts atomically and produces claim-health reports for contradictions, stale claims, open questions, and low-confidence evidence. Optional semantic embeddings are gated by `VAULT_EMBEDDINGS_ENABLED=true` to avoid surprise daily cloud cost.
 - Web, Telegram, and morning-brief runs write redacted trajectory sidecars under `.vault/trajectories/`; Telegram outbound messages are queued under `.vault/telegram-delivery-queue/` if sendMessage fails and retried on the next worker run.

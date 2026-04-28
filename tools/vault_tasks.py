@@ -372,6 +372,169 @@ def list_tasks(vault_root: Path, *, status: str = "open", limit: int = 50) -> li
     return tasks[: max(1, limit)]
 
 
+def update_task_by_id(
+    vault_root: Path,
+    task_id: str,
+    *,
+    status: str = "",
+    priority: str = "",
+    source: str = "telegram",
+    source_id: str = "",
+) -> dict[str, Any]:
+    tasks = load_tasks(vault_root)
+    selected = next((task for task in tasks if clean_scalar(task.get("id")) == clean_scalar(task_id)), None)
+    if not selected:
+        return {"updated": False, "reason": "task_not_found", "task_id": task_id}
+
+    result = update_task_record(
+        vault_root,
+        selected,
+        status=status,
+        priority=priority,
+        source=source,
+        source_id=source_id,
+    )
+    if not result["updated"]:
+        return result
+    save_tasks(vault_root, tasks)
+    render_dashboard(vault_root)
+    append_audit(vault_root, {"event": "tasks.updated_by_id", **result})
+    return result
+
+
+def update_note_by_path(
+    vault_root: Path,
+    rel_path: str,
+    *,
+    status: str = "",
+    priority: str = "",
+    source: str = "telegram",
+    source_id: str = "",
+) -> dict[str, Any]:
+    resolved = safe_note_path(vault_root, rel_path)
+    if resolved is None:
+        return {"updated": False, "reason": "invalid_note_path", "note_path": rel_path}
+    note_changed = False
+    changed_notes: list[str] = []
+    completion_status = normalize_completion_status(status)
+    normalized_priority = normalize_priority(priority)
+    if completion_status and update_note_status(resolved, completion_status):
+        note_changed = True
+        changed_notes.append(rel_path)
+    if normalized_priority and update_note_priority(resolved, normalized_priority):
+        note_changed = True
+        changed_notes.append(rel_path)
+
+    tasks = load_tasks(vault_root)
+    changed_tasks: list[str] = []
+    for task in tasks:
+        if clean_scalar(task.get("note_path")) != rel_path:
+            continue
+        task_result = update_task_record(
+            vault_root,
+            task,
+            status=completion_status,
+            priority=normalized_priority,
+            source=source,
+            source_id=source_id,
+            update_note=False,
+        )
+        if task_result.get("updated"):
+            changed_tasks.append(clean_scalar(task.get("id")))
+
+    if changed_tasks:
+        save_tasks(vault_root, tasks)
+        render_dashboard(vault_root)
+    if note_changed or changed_tasks:
+        payload = {
+            "event": "tasks.note_updated_by_path",
+            "note_path": rel_path,
+            "status": completion_status,
+            "priority": normalized_priority,
+            "source": source,
+            "source_id": source_id,
+            "changed_notes": sorted(set(changed_notes)),
+            "changed_tasks": changed_tasks,
+        }
+        append_audit(vault_root, payload)
+        return {"updated": True, **payload}
+    return {
+        "updated": False,
+        "reason": "already_set",
+        "note_path": rel_path,
+        "status": completion_status,
+        "priority": normalized_priority,
+    }
+
+
+def update_task_record(
+    vault_root: Path,
+    task: dict[str, Any],
+    *,
+    status: str = "",
+    priority: str = "",
+    source: str = "telegram",
+    source_id: str = "",
+    update_note: bool = True,
+) -> dict[str, Any]:
+    completion_status = normalize_completion_status(status)
+    normalized_priority = normalize_priority(priority)
+    changed = False
+    changed_notes: list[str] = []
+    changed_fields: list[str] = []
+    now = now_iso()
+
+    if completion_status and clean_scalar(task.get("status")).lower() != completion_status:
+        task["status"] = completion_status
+        task["updated_at"] = now
+        task["completion_source"] = source
+        task["completion_source_id"] = source_id
+        if completion_status in {"done", "skipped", "cancelled", "closed"}:
+            task["completed_at"] = now
+            task["completion_reason"] = f"User marked this {completion_status}."
+        changed = True
+        changed_fields.append("status")
+
+    if normalized_priority and clean_scalar(task.get("priority")).lower() != normalized_priority:
+        task["priority"] = normalized_priority
+        task["updated_at"] = now
+        task["priority_source"] = source
+        task["priority_source_id"] = source_id
+        changed = True
+        changed_fields.append("priority")
+
+    note_path = clean_scalar(task.get("note_path"))
+    if update_note and note_path:
+        resolved = safe_note_path(vault_root, note_path)
+        if resolved is not None:
+            if completion_status and update_note_status(resolved, completion_status):
+                changed_notes.append(note_path)
+            if normalized_priority and update_note_priority(resolved, normalized_priority):
+                changed_notes.append(note_path)
+
+    if changed_notes:
+        changed = True
+    if not changed:
+        return {
+            "updated": False,
+            "reason": "already_set",
+            "task_id": clean_scalar(task.get("id")),
+            "title": clean_scalar(task.get("title")),
+        }
+    return {
+        "updated": True,
+        "task_id": clean_scalar(task.get("id")),
+        "title": clean_scalar(task.get("title")),
+        "note_path": note_path,
+        "status": clean_scalar(task.get("status")),
+        "priority": clean_scalar(task.get("priority")),
+        "changed_fields": changed_fields,
+        "changed_notes": sorted(set(changed_notes)),
+        "source": source,
+        "source_id": source_id,
+    }
+
+
 def load_notes(vault_root: Path) -> list[Note]:
     notes: list[Note] = []
     items_root = vault_root / "items"
@@ -712,6 +875,32 @@ def infer_priority(text: str) -> str:
         if priority in flattened:
             return priority
     return ""
+
+
+def normalize_completion_status(value: str) -> str:
+    normalized = clean_scalar(value).lower()
+    aliases = {"applied": "done", "complete": "done", "completed": "done", "canceled": "cancelled"}
+    normalized = aliases.get(normalized, normalized)
+    return normalized if normalized in {"done", "skipped", "cancelled", "closed"} else ""
+
+
+def normalize_priority(value: str) -> str:
+    normalized = clean_scalar(value).lower()
+    return normalized if normalized in {"critical", "high", "medium", "low"} else ""
+
+
+def safe_note_path(vault_root: Path, rel_path: str) -> Path | None:
+    if not rel_path or Path(rel_path).is_absolute():
+        return None
+    root = vault_root.resolve()
+    resolved = (root / rel_path).resolve()
+    try:
+        if resolved.is_relative_to(root) and resolved.exists() and resolved.suffix == ".md":
+            return resolved
+    except AttributeError:  # pragma: no cover - Python < 3.9 compatibility guard
+        if str(resolved).startswith(str(root)) and resolved.exists() and resolved.suffix == ".md":
+            return resolved
+    return None
 
 
 def sanitize_matches(matches: list[dict[str, Any] | None]) -> list[dict[str, Any]]:

@@ -116,6 +116,13 @@ npm run telegram:run
 
 The Telegram receiver stores raw updates locally, appends a normalized inbox stream, lets a local Codex agent decide how to classify or file each message, and acknowledges successful ingestion with `👍`. If the machine is down, the next sync catches up from Telegram history.
 
+Telegram also has a cheap command-center path that bypasses the LLM for operational actions:
+
+- `/today`: urgent tasks and one recommended read, with buttons for `Applied`, `Done`, `High`, `Summary`, and `Open`.
+- `/queue`: latest saved items first, with direct source links and action buttons.
+- `/status`: vault bot health, open task count, queued outbound messages, and cache freshness.
+- `/trace`: recent Telegram agent decisions and tool calls for the current chat.
+
 Calendar requests sent to Telegram use a separate confirmation-first flow. The agent can extract event details from text or image context, ask for missing details, ask you to confirm the final event plan, and then call Google Calendar through `gws`. Created event IDs are logged so follow-up messages like "move the previous event" have concrete history to work from.
 
 X/Twitter links are normalized to stable `x.com/<handle>/status/<id>` URLs and enriched through `tools/x_content.py`. The adapter uses local `xurl` when available, otherwise falls back to Twitter's public oEmbed endpoint, so Telegram/cloud ingestion can usually recover post text, author, published date, source links, and retrieval context without Playwright.

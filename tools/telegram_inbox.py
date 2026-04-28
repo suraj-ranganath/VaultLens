@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import mimetypes
 import json
 import os
@@ -42,6 +43,15 @@ try:
     from vault_session_memory import append_memory
 except ModuleNotFoundError:
     from tools.vault_session_memory import append_memory
+
+try:
+    from vault_tasks import list_tasks as vault_list_tasks
+    from vault_tasks import sync_from_vault as vault_sync_tasks
+    from vault_tasks import update_note_by_path, update_task_by_id
+except ModuleNotFoundError:
+    from tools.vault_tasks import list_tasks as vault_list_tasks
+    from tools.vault_tasks import sync_from_vault as vault_sync_tasks
+    from tools.vault_tasks import update_note_by_path, update_task_by_id
 
 
 CURRENT_DATE = date.today()
@@ -91,6 +101,10 @@ QUESTION_INTENT_RE = re.compile(
     r"summari[sz]e|explain|compare|tell me|give me|thoughts|opinion|worth)\b",
     re.IGNORECASE,
 )
+COMMAND_RE = re.compile(r"^/(today|queue|status|trace)(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+COMMAND_CALLBACK_PREFIX = "vault:"
+COMMAND_CALLBACKS_FILE = Path(".vault") / "telegram-command-center" / "callbacks.json"
+COMMAND_ITEM_LIMIT = 5
 
 
 def read_json(path: Path, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -613,13 +627,20 @@ def telegram_api(token: str, method: str, **params: Any) -> dict[str, Any]:
     return payload
 
 
-def telegram_send_message(token: str, chat_id: int, text: str, reply_to_message_id: int | None = None) -> dict[str, Any]:
+def telegram_send_message(
+    token: str,
+    chat_id: int,
+    text: str,
+    reply_to_message_id: int | None = None,
+    reply_markup: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return send_or_queue_telegram_message(
         vault_root=Path(os.environ.get("VAULT_ROOT", Path.cwd())).resolve(),
         token=token,
         chat_id=chat_id,
         text=text,
         reply_to_message_id=reply_to_message_id,
+        reply_markup=reply_markup,
     )
 
 
@@ -629,6 +650,13 @@ def telegram_edit_message_text(token: str, chat_id: int, message_id: int, text: 
 
 def telegram_send_chat_action(token: str, chat_id: int, action: str = "typing") -> dict[str, Any]:
     return telegram_api(token, "sendChatAction", chat_id=chat_id, action=action)
+
+
+def telegram_answer_callback_query(token: str, callback_query_id: str, text: str = "", show_alert: bool = False) -> dict[str, Any]:
+    params: dict[str, Any] = {"callback_query_id": callback_query_id, "show_alert": "true" if show_alert else "false"}
+    if text:
+        params["text"] = text[:180]
+    return telegram_api(token, "answerCallbackQuery", **params)
 
 
 class TelegramTypingHeartbeat:
@@ -753,12 +781,466 @@ def telegram_deliver_long_message(
 def get_updates(token: str, offset: int | None, poll_timeout: int) -> list[dict[str, Any]]:
     params: dict[str, Any] = {
         "timeout": poll_timeout,
-        "allowed_updates": json.dumps(["message", "edited_message", "channel_post", "edited_channel_post"]),
+        "allowed_updates": json.dumps(["message", "edited_message", "channel_post", "edited_channel_post", "callback_query"]),
     }
     if offset is not None:
         params["offset"] = offset
     payload = telegram_api(token, "getUpdates", **params)
     return list(payload.get("result") or [])
+
+
+def callback_chat_id(update: dict[str, Any]) -> int | None:
+    callback = update.get("callback_query") or {}
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    try:
+        return int(chat.get("id"))
+    except Exception:
+        return None
+
+
+def handle_vault_command(
+    *,
+    vault_root: Path,
+    token: str,
+    inbox_dir: Path,
+    session_name: str,
+    state: dict[str, Any],
+    normalized_message: dict[str, Any],
+) -> dict[str, Any] | None:
+    raw_text = str(normalized_message.get("raw_text") or "").strip()
+    match = COMMAND_RE.match(raw_text)
+    if not match:
+        return None
+
+    command = match.group(1).lower()
+    chat_id = int(normalized_message["chat_id"])
+    if command == "today":
+        text, reply_markup = render_today_command(vault_root)
+    elif command == "queue":
+        text, reply_markup = render_queue_command(vault_root)
+    elif command == "status":
+        text, reply_markup = render_status_command(vault_root, inbox_dir=inbox_dir, session_name=session_name, state=state)
+    elif command == "trace":
+        text, reply_markup = render_trace_command(inbox_dir=inbox_dir, session_name=session_name, chat_id=chat_id)
+    else:
+        return None
+
+    telegram_send_message(
+        token,
+        chat_id=chat_id,
+        text=text,
+        reply_to_message_id=int(normalized_message["message_id"]),
+        reply_markup=reply_markup,
+    )
+    return {"status": "handled", "command": command, "answered": True, "acked": False}
+
+
+def handle_vault_callback_update(
+    *,
+    vault_root: Path,
+    token: str,
+    update: dict[str, Any],
+) -> dict[str, Any] | None:
+    callback = update.get("callback_query")
+    if not isinstance(callback, dict):
+        return None
+    data = str(callback.get("data") or "")
+    if not data.startswith(COMMAND_CALLBACK_PREFIX):
+        return None
+    callback_id = str(callback.get("id") or "")
+    token_id = data[len(COMMAND_CALLBACK_PREFIX) :]
+    payload = load_command_callback(vault_root, token_id)
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    try:
+        chat_id = int(chat.get("id"))
+    except Exception:
+        return {"status": "ignored", "reason": "missing_chat_id"}
+    reply_to_message_id = message.get("message_id") if isinstance(message.get("message_id"), int) else None
+
+    if not payload:
+        if callback_id:
+            telegram_answer_callback_query(token, callback_id, "This button expired. Run /today or /queue again.", show_alert=True)
+        return {"status": "expired", "answered": True, "acked": False}
+
+    action = str(payload.get("action") or "")
+    label = str(payload.get("label") or payload.get("title") or "item").strip()
+    result: dict[str, Any]
+    if callback_id:
+        telegram_answer_callback_query(token, callback_id, "Working on it…")
+
+    if action in {"task_done", "task_applied"}:
+        result = update_task_by_id(
+            vault_root,
+            str(payload.get("task_id") or ""),
+            status="done",
+            source="telegram_callback",
+            source_id=f"callback:{update.get('update_id')}",
+        )
+        if not result.get("updated") and payload.get("note_path"):
+            result = update_note_by_path(
+                vault_root,
+                str(payload.get("note_path") or ""),
+                status="done",
+                source="telegram_callback",
+                source_id=f"callback:{update.get('update_id')}",
+            )
+        run_vault_cache_compile_if_possible(vault_root)
+        verb = "Marked applied" if action == "task_applied" else "Marked done"
+        text = f"{verb}: {label}"
+        if not result.get("updated") and result.get("reason") != "already_set":
+            text = f"I could not update that item: {result.get('reason') or 'unknown error'}"
+    elif action in {"task_high", "note_high"}:
+        if payload.get("task_id"):
+            result = update_task_by_id(
+                vault_root,
+                str(payload.get("task_id") or ""),
+                priority="high",
+                source="telegram_callback",
+                source_id=f"callback:{update.get('update_id')}",
+            )
+        else:
+            result = update_note_by_path(
+                vault_root,
+                str(payload.get("note_path") or ""),
+                priority="high",
+                source="telegram_callback",
+                source_id=f"callback:{update.get('update_id')}",
+            )
+        run_vault_cache_compile_if_possible(vault_root)
+        text = f"Marked high priority: {label}"
+        if not result.get("updated") and result.get("reason") != "already_set":
+            text = f"I could not reprioritize that item: {result.get('reason') or 'unknown error'}"
+    elif action == "summarize_note":
+        result = {"updated": False, "summary": True}
+        text = render_note_summary(vault_root, str(payload.get("note_path") or ""))
+    else:
+        result = {"updated": False, "reason": "unsupported_action"}
+        text = f"Unsupported action: {action}"
+
+    telegram_send_message(token, chat_id=chat_id, text=text[:3800], reply_to_message_id=reply_to_message_id)
+    return {"status": "handled", "action": action, "answered": True, "acked": False, "result": result}
+
+
+def run_vault_cache_compile_if_possible(vault_root: Path) -> None:
+    try:
+        run_vault_cache_compile(vault_root)
+    except Exception:
+        pass
+
+
+def render_today_command(vault_root: Path) -> tuple[str, dict[str, Any] | None]:
+    try:
+        vault_sync_tasks(vault_root)
+    except Exception:
+        pass
+    tasks = rank_today_tasks(vault_root)
+    reading = select_recommended_reading(vault_root)
+    lines = ["Today’s command center", ""]
+    if tasks:
+        lines.append("Most urgent:")
+        for index, task in enumerate(tasks, start=1):
+            due = str(task.get("due_on") or "no explicit date")
+            priority = str(task.get("priority") or "medium")
+            lines.append(f"{index}. {task.get('title')} — {priority}, due: {due}")
+            source = str(task.get("source_url") or task.get("note_path") or "")
+            if source:
+                lines.append(f"   {source}")
+    else:
+        lines.append("No urgent open task-ledger items surfaced right now.")
+
+    if reading:
+        lines.extend(["", "Recommended read:", f"- {reading['title']} ({reading.get('type') or 'item'})"])
+        if reading.get("summary"):
+            lines.append(f"  {truncate_context(str(reading['summary']), 220)}")
+        if reading.get("url"):
+            lines.append(f"  {reading['url']}")
+
+    rows: list[list[dict[str, Any]]] = []
+    for index, task in enumerate(tasks, start=1):
+        rows.extend(task_action_rows(vault_root, task, index))
+    if reading:
+        rows.extend(note_action_rows(vault_root, reading, len(tasks) + 1, include_done=False))
+    return "\n".join(lines), inline_keyboard(rows)
+
+
+def render_queue_command(vault_root: Path) -> tuple[str, dict[str, Any] | None]:
+    items = recent_queue_items(vault_root, limit=COMMAND_ITEM_LIMIT)
+    lines = ["Latest saved queue", ""]
+    if not items:
+        return "No recent queue items found in the compiled vault cache yet.", None
+    for index, item in enumerate(items, start=1):
+        date_label = item.get("discovered_on") or item.get("published_on") or "unknown date"
+        priority = item.get("priority") or "medium"
+        lines.append(f"{index}. {item.get('title')} — {item.get('type')}, {priority}, added: {date_label}")
+        if item.get("summary"):
+            lines.append(f"   {truncate_context(str(item['summary']), 180)}")
+        source = str(item.get("url") or item.get("path") or "")
+        if source:
+            lines.append(f"   {source}")
+    rows: list[list[dict[str, Any]]] = []
+    for index, item in enumerate(items, start=1):
+        rows.extend(note_action_rows(vault_root, item, index, include_done=True))
+    return "\n".join(lines), inline_keyboard(rows)
+
+
+def render_status_command(vault_root: Path, *, inbox_dir: Path, session_name: str, state: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    tasks = vault_list_tasks(vault_root, status="all", limit=500)
+    open_tasks = [task for task in tasks if str(task.get("status") or "") == "open"]
+    delivery_queue = vault_root / ".vault" / "telegram-delivery-queue"
+    queued = len(list(delivery_queue.glob("*.json"))) if delivery_queue.exists() else 0
+    digest = load_agent_digest(vault_root)
+    decisions = load_jsonl(agent_decisions_path(inbox_dir, session_name))
+    last_decision = decisions[-1] if decisions else {}
+    lines = [
+        "Vault bot status",
+        f"- Last ingest: {state.get('last_ingest_at') or 'unknown'}",
+        f"- Open tasks: {len(open_tasks)}",
+        f"- Queued outbound messages: {queued}",
+        f"- Digest pages: {digest.get('page_count') or 'unknown'}",
+        f"- Digest generated: {digest.get('generated_at') or 'unknown'}",
+    ]
+    if last_decision:
+        decision = last_decision.get("decision") or {}
+        lines.append(f"- Last agent classification: {decision.get('classification') or 'unknown'}")
+    return "\n".join(lines), None
+
+
+def render_trace_command(*, inbox_dir: Path, session_name: str, chat_id: int) -> tuple[str, dict[str, Any] | None]:
+    decisions = [
+        record
+        for record in load_jsonl(agent_decisions_path(inbox_dir, session_name))
+        if int(record.get("chat_id") or 0) == int(chat_id)
+    ]
+    if not decisions:
+        return "No recent Telegram agent trace found for this chat yet.", None
+    lines = ["Recent agent trace", ""]
+    for index, record in enumerate(reversed(decisions[-3:]), start=1):
+        decision = record.get("decision") or {}
+        tools = [str(action.get("tool") or "") for action in record.get("actions") or [] if isinstance(action, dict)]
+        results = [str(result.get("tool") or "") + ":" + str(result.get("status") or "") for result in record.get("tool_results") or []]
+        lines.append(f"{index}. update {record.get('update_id')} at {record.get('logged_at')}")
+        lines.append(f"   classification: {decision.get('classification') or 'unknown'}")
+        if decision.get("summary"):
+            lines.append(f"   summary: {truncate_context(str(decision.get('summary')), 220)}")
+        lines.append(f"   tools: {', '.join([tool for tool in tools if tool]) or 'none'}")
+        if results:
+            lines.append(f"   results: {', '.join(results[:6])}")
+    return "\n".join(lines), None
+
+
+def rank_today_tasks(vault_root: Path, limit: int = COMMAND_ITEM_LIMIT) -> list[dict[str, Any]]:
+    tasks = vault_list_tasks(vault_root, status="open", limit=100)
+    scored = [(today_task_score(task), task) for task in tasks]
+    scored = [(score, task) for score, task in scored if score > 0]
+    scored.sort(key=lambda item: (-item[0], str(item[1].get("due_on") or "9999-99-99"), str(item[1].get("title") or "")))
+    return [task for _, task in scored[:limit]]
+
+
+def today_task_score(task: dict[str, Any]) -> int:
+    score = 0
+    priority = str(task.get("priority") or "").lower()
+    score += {"critical": 50, "high": 35, "medium": 8, "low": 0}.get(priority, 8)
+    due = parse_date_value(task.get("due_on"))
+    if due:
+        days = (due - CURRENT_DATE).days
+        if days < 0:
+            score += 45
+        elif days <= 7:
+            score += 55 - (days * 5)
+        elif days <= 14:
+            score += 10
+    if str(task.get("task_type") or "") == "apply":
+        score += 12
+    if str(task.get("task_type") or "") == "reminder":
+        score += 12
+    return score
+
+
+def recent_queue_items(vault_root: Path, limit: int = COMMAND_ITEM_LIMIT) -> list[dict[str, Any]]:
+    digest = load_agent_digest(vault_root)
+    pages = digest.get("pages") or []
+    items = [
+        page
+        for page in pages
+        if isinstance(page, dict)
+        and str(page.get("path") or "").startswith("items/")
+        and str(page.get("type") or "") in {"article", "resource", "tweet", "job", "opportunity", "event", "reminder", "thought"}
+        and str(page.get("status") or "").lower() not in {"done", "closed", "archived"}
+    ]
+    items.sort(key=lambda item: (str(item.get("discovered_on") or item.get("published_on") or ""), float(item.get("mtime") or 0.0)), reverse=True)
+    return items[:limit]
+
+
+def select_recommended_reading(vault_root: Path) -> dict[str, Any] | None:
+    digest = load_agent_digest(vault_root)
+    pages = digest.get("pages") or []
+    candidates = [
+        page
+        for page in pages
+        if isinstance(page, dict)
+        and str(page.get("type") or "") in {"article", "resource", "tweet"}
+        and str(page.get("status") or "").lower() not in {"done", "closed", "archived"}
+    ]
+    candidates.sort(key=lambda item: (reading_score(item), str(item.get("discovered_on") or item.get("published_on") or "")), reverse=True)
+    return candidates[0] if candidates else None
+
+
+def reading_score(item: dict[str, Any]) -> int:
+    score = {"critical": 40, "high": 30, "medium": 12, "low": 4}.get(str(item.get("priority") or "").lower(), 8)
+    if item.get("why_saved"):
+        score += 8
+    if item.get("summary"):
+        score += 6
+    discovered = parse_date_value(item.get("discovered_on") or item.get("published_on"))
+    if discovered:
+        age = (CURRENT_DATE - discovered).days
+        if age <= 7:
+            score += 20
+        elif age <= 30:
+            score += 10
+    return score
+
+
+def load_agent_digest(vault_root: Path) -> dict[str, Any]:
+    path = vault_root / ".vault" / "cache" / "agent-digest.json"
+    if not path.exists():
+        run_vault_cache_compile_if_possible(vault_root)
+    return read_json(path, fallback={})
+
+
+def task_action_rows(vault_root: Path, task: dict[str, Any], index: int) -> list[list[dict[str, Any]]]:
+    title = str(task.get("title") or f"task {index}")
+    action = "task_applied" if str(task.get("task_type") or "") == "apply" else "task_done"
+    done_label = "Applied" if action == "task_applied" else "Done"
+    row = [
+        callback_button(vault_root, f"{index} {done_label}", {"action": action, "task_id": task.get("id"), "note_path": task.get("note_path"), "label": title}),
+        callback_button(vault_root, f"{index} High", {"action": "task_high", "task_id": task.get("id"), "note_path": task.get("note_path"), "label": title}),
+    ]
+    rows = [row]
+    if task.get("source_url"):
+        rows.append([{"text": f"{index} Open", "url": str(task["source_url"])}])
+    return rows
+
+
+def note_action_rows(vault_root: Path, item: dict[str, Any], index: int, *, include_done: bool) -> list[list[dict[str, Any]]]:
+    title = str(item.get("title") or f"item {index}")
+    path = str(item.get("path") or item.get("note_path") or "")
+    row = [
+        callback_button(vault_root, f"{index} Summary", {"action": "summarize_note", "note_path": path, "label": title}),
+        callback_button(vault_root, f"{index} High", {"action": "note_high", "note_path": path, "label": title}),
+    ]
+    if include_done:
+        row.append(callback_button(vault_root, f"{index} Done", {"action": "task_done", "note_path": path, "label": title}))
+    rows = [row]
+    if item.get("url"):
+        rows.append([{"text": f"{index} Open", "url": str(item["url"])}])
+    return rows
+
+
+def callback_button(vault_root: Path, text: str, payload: dict[str, Any]) -> dict[str, str]:
+    token_id = register_command_callback(vault_root, payload)
+    return {"text": text[:64], "callback_data": f"{COMMAND_CALLBACK_PREFIX}{token_id}"}
+
+
+def inline_keyboard(rows: list[list[dict[str, Any]]]) -> dict[str, Any] | None:
+    clean_rows = [[button for button in row if button] for row in rows if row]
+    return {"inline_keyboard": clean_rows} if clean_rows else None
+
+
+def command_callbacks_path(vault_root: Path) -> Path:
+    return vault_root / COMMAND_CALLBACKS_FILE
+
+
+def register_command_callback(vault_root: Path, payload: dict[str, Any]) -> str:
+    store = read_json(command_callbacks_path(vault_root), fallback={"schema": "my-vault-telegram-command-callbacks-v1", "callbacks": {}})
+    callbacks = store.setdefault("callbacks", {})
+    prune_command_callbacks(callbacks)
+    enriched = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        **{key: value for key, value in payload.items() if value not in (None, "", [], {})},
+    }
+    raw = json.dumps(enriched, sort_keys=True, ensure_ascii=False) + str(time.time_ns())
+    token_id = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:14]
+    callbacks[token_id] = enriched
+    store["updated_at"] = datetime.now(timezone.utc).isoformat()
+    write_json(command_callbacks_path(vault_root), store)
+    return token_id
+
+
+def load_command_callback(vault_root: Path, token_id: str) -> dict[str, Any] | None:
+    store = read_json(command_callbacks_path(vault_root), fallback={"callbacks": {}})
+    callbacks = store.get("callbacks") or {}
+    payload = callbacks.get(token_id)
+    return payload if isinstance(payload, dict) else None
+
+
+def prune_command_callbacks(callbacks: dict[str, Any], *, max_age_seconds: int = 7 * 24 * 3600, max_items: int = 500) -> None:
+    now = datetime.now(timezone.utc).timestamp()
+    for token_id, payload in list(callbacks.items()):
+        if not isinstance(payload, dict):
+            callbacks.pop(token_id, None)
+            continue
+        created = parse_iso_timestamp(str(payload.get("created_at") or ""))
+        if created and now - created > max_age_seconds:
+            callbacks.pop(token_id, None)
+    if len(callbacks) > max_items:
+        ordered = sorted(callbacks.items(), key=lambda item: str((item[1] or {}).get("created_at") or ""))
+        for token_id, _ in ordered[: len(callbacks) - max_items]:
+            callbacks.pop(token_id, None)
+
+
+def render_note_summary(vault_root: Path, rel_path: str) -> str:
+    digest = load_agent_digest(vault_root)
+    page = next((item for item in digest.get("pages") or [] if isinstance(item, dict) and item.get("path") == rel_path), {})
+    if not page:
+        page = read_note_summary_from_disk(vault_root, rel_path)
+    if not page:
+        return "I could not find that note anymore. Run /queue to refresh the buttons."
+    lines = [str(page.get("title") or rel_path)]
+    if page.get("type"):
+        lines.append(f"Type: {page.get('type')}")
+    if page.get("summary"):
+        lines.extend(["", truncate_context(str(page.get("summary")), 900)])
+    if page.get("why_saved"):
+        lines.extend(["", f"Why saved: {truncate_context(str(page.get('why_saved')), 500)}"])
+    if page.get("url"):
+        lines.extend(["", f"Source: {page.get('url')}"])
+    lines.append(f"Vault note: {rel_path}")
+    return "\n".join(lines)
+
+
+def read_note_summary_from_disk(vault_root: Path, rel_path: str) -> dict[str, Any]:
+    if not rel_path or Path(rel_path).is_absolute():
+        return {}
+    path = (vault_root / rel_path).resolve()
+    try:
+        if not path.is_relative_to(vault_root.resolve()) or not path.exists() or path.suffix != ".md":
+            return {}
+    except AttributeError:  # pragma: no cover
+        if not str(path).startswith(str(vault_root.resolve())) or not path.exists() or path.suffix != ".md":
+            return {}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    body = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.DOTALL)
+    return {"title": path.stem, "summary": truncate_context(body, 900), "path": rel_path}
+
+
+def parse_date_value(value: Any) -> date | None:
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})", str(value or ""))
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def parse_iso_timestamp(value: str) -> float:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
 
 
 def load_state(inbox_dir: Path) -> dict[str, Any]:
@@ -1989,6 +2471,70 @@ def process_update_batch(
             state["last_update_id"] = update_id
             continue
 
+        callback_chat = callback_chat_id(update)
+        if callback_chat is not None:
+            if allowed_chat_ids and callback_chat not in allowed_chat_ids:
+                state["last_update_id"] = update_id
+                continue
+            append_jsonl(raw_file, update_group)
+            accepted += 1
+            append_agent_event(
+                vault_root,
+                {
+                    "event": "telegram.callback.accepted",
+                    "run_id": f"telegram-{update_id}",
+                    "update_id": update_id,
+                    "chat_id": callback_chat,
+                    "mode": mode,
+                },
+            )
+            callback_result = handle_vault_callback_update(vault_root=vault_root, token=token, update=update) or {
+                "status": "ignored",
+                "answered": False,
+                "acked": False,
+            }
+            answered += 1 if callback_result.get("answered") else 0
+            acked += 1 if callback_result.get("acked") else 0
+            for item_id in update_ids:
+                append_processed_update(
+                    processed_updates_file,
+                    {
+                        "processed_at": datetime.now().isoformat(),
+                        "update_id": item_id,
+                        "chat_id": callback_chat,
+                        "message_id": None,
+                        "stored": False,
+                        "acked": bool(callback_result.get("acked")),
+                        "callback_status": callback_result.get("status"),
+                        "callback_action": callback_result.get("action"),
+                        "collected_update_ids": update_ids,
+                    },
+                )
+                processed_update_ids.add(item_id)
+            state["last_update_id"] = max(update_ids)
+            action_records.append(
+                {
+                    "update_id": update_id,
+                    "collected_update_ids": update_ids,
+                    "classification": "telegram_callback",
+                    "stored": False,
+                    "acked": bool(callback_result.get("acked")),
+                    "answered": bool(callback_result.get("answered")),
+                    "actions": [str(callback_result.get("action") or callback_result.get("status") or "callback")],
+                }
+            )
+            append_agent_event(
+                vault_root,
+                {
+                    "event": "telegram.callback.processed",
+                    "run_id": f"telegram-{update_id}",
+                    "update_id": update_id,
+                    "chat_id": callback_chat,
+                    "result": callback_result,
+                },
+            )
+            continue
+
         normalized = normalize_message(update)
         if normalized is None:
             state["last_update_id"] = update_id
@@ -2023,6 +2569,59 @@ def process_update_batch(
                 "mode": mode,
             },
         )
+        command_result = handle_vault_command(
+            vault_root=vault_root,
+            token=token,
+            inbox_dir=inbox_dir,
+            session_name=session_name,
+            state=state,
+            normalized_message=normalized,
+        )
+        if command_result is not None:
+            append_jsonl(raw_file, update_group)
+            answered += 1 if command_result.get("answered") else 0
+            acked += 1 if command_result.get("acked") else 0
+            for item_id in update_ids:
+                append_processed_update(
+                    processed_updates_file,
+                    {
+                        "processed_at": datetime.now().isoformat(),
+                        "update_id": item_id,
+                        "chat_id": chat_id,
+                        "message_id": normalized["message_id"],
+                        "stored": False,
+                        "acked": bool(command_result.get("acked")),
+                        "command": command_result.get("command"),
+                        "collected_update_ids": update_ids,
+                    },
+                )
+                processed_update_ids.add(item_id)
+            state["last_update_id"] = max(update_ids)
+            action_records.append(
+                {
+                    "update_id": update_id,
+                    "collected_update_ids": update_ids,
+                    "classification": "telegram_command",
+                    "stored": False,
+                    "acked": bool(command_result.get("acked")),
+                    "answered": bool(command_result.get("answered")),
+                    "actions": [f"command_{command_result.get('command')}"],
+                }
+            )
+            append_agent_event(
+                vault_root,
+                {
+                    "event": "telegram.command.processed",
+                    "run_id": f"telegram-{update_id}",
+                    "update_id": update_id,
+                    "chat_id": chat_id,
+                    "message_id": normalized["message_id"],
+                    "result": command_result,
+                },
+            )
+            typing.stop()
+            continue
+
         normalized = enrich_message_attachments(
             vault_root=vault_root,
             token=token,

@@ -207,7 +207,7 @@ payload = urllib.parse.urlencode(
         "url": os.environ["WEBHOOK_URL"],
         "secret_token": os.environ["TELEGRAM_WEBHOOK_SECRET"],
         "allowed_updates": json.dumps(
-            ["message", "edited_message", "channel_post", "edited_channel_post"]
+            ["message", "edited_message", "channel_post", "edited_channel_post", "callback_query"]
         ),
     }
 ).encode("utf-8")

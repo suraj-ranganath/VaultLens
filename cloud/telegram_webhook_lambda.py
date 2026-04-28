@@ -274,6 +274,16 @@ class TelegramTypingHeartbeat:
 
 
 def extract_chat_id(update: dict[str, Any]) -> int | None:
+    callback = update.get("callback_query") or {}
+    callback_message = callback.get("message") or {}
+    callback_chat = callback_message.get("chat") or {}
+    callback_chat_id = callback_chat.get("id")
+    if callback_chat_id is not None:
+        try:
+            return int(callback_chat_id)
+        except Exception:
+            pass
+
     message = (
         update.get("message")
         or update.get("edited_message")
