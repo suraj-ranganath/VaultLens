@@ -818,7 +818,12 @@ def handle_vault_command(
     if command == "today":
         text, reply_markup = render_today_command(vault_root)
     elif command == "queue":
-        text, reply_markup = render_queue_command(vault_root)
+        return send_queue_command_cards(
+            vault_root=vault_root,
+            token=token,
+            chat_id=chat_id,
+            reply_to_message_id=int(normalized_message["message_id"]),
+        )
     elif command == "status":
         text, reply_markup = render_status_command(vault_root, inbox_dir=inbox_dir, session_name=session_name, state=state)
     elif command == "trace":
@@ -992,6 +997,48 @@ def render_queue_command(vault_root: Path) -> tuple[str, dict[str, Any] | None]:
             lines.append(f"   {source}")
     rows = chunk_buttons([note_detail_button(vault_root, item, index) for index, item in enumerate(items, start=1)], size=2)
     return "\n".join(lines), inline_keyboard(rows)
+
+
+def send_queue_command_cards(*, vault_root: Path, token: str, chat_id: int, reply_to_message_id: int) -> dict[str, Any]:
+    items = recent_queue_items(vault_root, limit=COMMAND_ITEM_LIMIT)
+    if not items:
+        telegram_send_message(
+            token,
+            chat_id=chat_id,
+            text="No recent queue items found in the compiled vault cache yet.",
+            reply_to_message_id=reply_to_message_id,
+        )
+        return {"status": "handled", "command": "queue", "answered": True, "acked": False, "cards": 0}
+
+    telegram_send_message(
+        token,
+        chat_id=chat_id,
+        text=f"Latest saved queue: {len(items)} items. Each card has its own actions attached below it.",
+        reply_to_message_id=reply_to_message_id,
+    )
+    for index, item in enumerate(items, start=1):
+        telegram_send_message(
+            token,
+            chat_id=chat_id,
+            text=render_queue_item_card(item, index),
+            reply_markup=inline_keyboard(note_action_rows(vault_root, item, include_done=True)),
+        )
+    return {"status": "handled", "command": "queue", "answered": True, "acked": False, "cards": len(items)}
+
+
+def render_queue_item_card(item: dict[str, Any], index: int) -> str:
+    title = str(item.get("title") or "Untitled item")
+    note_type = str(item.get("type") or "item")
+    date_label = str(item.get("discovered_on") or item.get("published_on") or "unknown date")
+    priority = str(item.get("priority") or "medium")
+    lines = [f"{index}. {title}", f"{note_type} · {priority} priority · added {date_label}"]
+    if item.get("summary"):
+        lines.extend(["", truncate_context(str(item["summary"]), 700)])
+    if item.get("why_saved"):
+        lines.extend(["", f"Why saved: {truncate_context(str(item['why_saved']), 280)}"])
+    if item.get("url"):
+        lines.extend(["", f"Source: {item.get('url')}"])
+    return "\n".join(lines)
 
 
 def render_status_command(vault_root: Path, *, inbox_dir: Path, session_name: str, state: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:

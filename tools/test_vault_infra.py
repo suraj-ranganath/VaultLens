@@ -641,6 +641,78 @@ application_status: to_apply
             self.assertIn("inline_keyboard", sent[0]["reply_markup"])
             self.assertIn("Details", sent[0]["reply_markup"]["inline_keyboard"][0][0]["text"])
 
+    def test_telegram_queue_sends_item_cards_without_details_roundtrip(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_dir = root / ".vault" / "cache"
+            cache_dir.mkdir(parents=True)
+            (cache_dir / "agent-digest.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "my-vault-agent-digest-v1",
+                        "page_count": 1,
+                        "pages": [
+                            {
+                                "path": "items/articles/2026-04-28 fast agents.md",
+                                "title": "Fast Agents",
+                                "type": "article",
+                                "url": "https://example.com/fast-agents",
+                                "status": "open",
+                                "priority": "medium",
+                                "discovered_on": "2026-04-28",
+                                "summary": "A useful article about making agent systems faster.",
+                                "why_saved": "Relevant to vault latency.",
+                                "mtime": 1,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sent: list[dict[str, object]] = []
+
+            update = {
+                "update_id": 103,
+                "message": {
+                    "message_id": 21,
+                    "date": 1777248000,
+                    "text": "/queue",
+                    "chat": {"id": 123, "type": "private"},
+                    "from": {"first_name": "Suraj"},
+                },
+            }
+            with mock.patch.object(telegram_inbox, "telegram_send_message", side_effect=lambda *args, **kwargs: sent.append(kwargs) or {"ok": True}), mock.patch.object(
+                telegram_inbox, "telegram_send_chat_action", return_value={"ok": True}
+            ):
+                result = telegram_inbox.process_update_batch(
+                    vault_root=root,
+                    token="dummy",
+                    session_name="test",
+                    allowed_chat_ids=set(),
+                    ingest_after_sync=True,
+                    agent_model="gpt-5.4",
+                    agent_reasoning_effort="medium",
+                    openai_api_key="",
+                    updates=[update],
+                    mode="test",
+                )
+
+            self.assertEqual(result["agent_runs"], 0)
+            self.assertEqual(result["answered_messages"], 1)
+            self.assertEqual(len(sent), 2)
+            self.assertIn("Latest saved queue", str(sent[0]["text"]))
+            self.assertIn("Fast Agents", str(sent[1]["text"]))
+            labels = [button["text"] for row in sent[1]["reply_markup"]["inline_keyboard"] for button in row]
+            self.assertIn("⭐ Prioritize", labels)
+            self.assertIn("✅ Mark read/done", labels)
+            self.assertIn("Open source", labels)
+            self.assertFalse(any("Details" in label for label in labels))
+
     def test_telegram_callback_can_mark_task_applied(self) -> None:
         import sys
 

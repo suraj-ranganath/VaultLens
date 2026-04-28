@@ -119,7 +119,7 @@ The Telegram receiver stores raw updates locally, appends a normalized inbox str
 Telegram also has a cheap command-center path that bypasses the LLM for operational actions:
 
 - `/today`: urgent tasks and one recommended read, with compact `Details` buttons.
-- `/queue`: latest saved items first, with compact `Details` buttons; each detail card has `Prioritize`, `Mark read/done`, and `Open source`.
+- `/queue`: latest saved items first as separate cards; each card has its own attached `Prioritize`, `Mark read/done`, and `Open source` buttons.
 - `/status`: vault bot health, open task count, queued outbound messages, and cache freshness.
 - `/trace`: recent Telegram agent decisions and tool calls for the current chat.
 
