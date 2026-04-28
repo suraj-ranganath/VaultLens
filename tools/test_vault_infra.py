@@ -639,6 +639,7 @@ application_status: to_apply
             self.assertIn("Today’s command center", str(sent[0]["text"]))
             self.assertIn("Example AI", str(sent[0]["text"]))
             self.assertIn("inline_keyboard", sent[0]["reply_markup"])
+            self.assertIn("Details", sent[0]["reply_markup"]["inline_keyboard"][0][0]["text"])
 
     def test_telegram_callback_can_mark_task_applied(self) -> None:
         import sys
@@ -674,13 +675,13 @@ application_status: to_apply
             vault_tasks.sync_from_vault(root)
             text, markup = telegram_inbox.render_today_command(root)
             self.assertIn("Example AI", text)
-            callback_data = markup["inline_keyboard"][0][0]["callback_data"]
+            details_callback_data = markup["inline_keyboard"][0][0]["callback_data"]
 
             update = {
                 "update_id": 101,
                 "callback_query": {
                     "id": "cb-1",
-                    "data": callback_data,
+                    "data": details_callback_data,
                     "message": {"message_id": 30, "chat": {"id": 123, "type": "private"}},
                     "from": {"first_name": "Suraj"},
                 },
@@ -704,7 +705,37 @@ application_status: to_apply
 
             self.assertEqual(result["agent_runs"], 0)
             self.assertEqual(result["answered_messages"], 1)
-            self.assertIn("Marked applied", str(sent[0]["text"]))
+            self.assertIn("Actions: mark it done/applied", str(sent[0]["text"]))
+            applied_callback_data = sent[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+
+            apply_update = {
+                "update_id": 102,
+                "callback_query": {
+                    "id": "cb-2",
+                    "data": applied_callback_data,
+                    "message": {"message_id": 31, "chat": {"id": 123, "type": "private"}},
+                    "from": {"first_name": "Suraj"},
+                },
+            }
+            with mock.patch.object(telegram_inbox, "telegram_answer_callback_query", return_value={"ok": True}), mock.patch.object(
+                telegram_inbox, "telegram_send_message", side_effect=lambda *args, **kwargs: sent.append(kwargs) or {"ok": True}
+            ):
+                result = telegram_inbox.process_update_batch(
+                    vault_root=root,
+                    token="dummy",
+                    session_name="test",
+                    allowed_chat_ids=set(),
+                    ingest_after_sync=True,
+                    agent_model="gpt-5.4",
+                    agent_reasoning_effort="medium",
+                    openai_api_key="",
+                    updates=[apply_update],
+                    mode="test",
+                )
+
+            self.assertEqual(result["agent_runs"], 0)
+            self.assertEqual(result["answered_messages"], 1)
+            self.assertIn("Marked applied", str(sent[-1]["text"]))
             updated_note = note_path.read_text(encoding="utf-8")
             self.assertIn("application_status: applied", updated_note)
 

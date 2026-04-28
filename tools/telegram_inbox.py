@@ -870,6 +870,17 @@ def handle_vault_callback_update(
     if callback_id:
         telegram_answer_callback_query(token, callback_id, "Working on it…")
 
+    if action == "show_task":
+        result = {"updated": False, "detail": True}
+        text, reply_markup = render_task_detail_card(vault_root, payload)
+        telegram_send_message(token, chat_id=chat_id, text=text[:3800], reply_to_message_id=reply_to_message_id, reply_markup=reply_markup)
+        return {"status": "handled", "action": action, "answered": True, "acked": False, "result": result}
+    if action == "show_note":
+        result = {"updated": False, "detail": True}
+        text, reply_markup = render_note_detail_card(vault_root, payload)
+        telegram_send_message(token, chat_id=chat_id, text=text[:3800], reply_to_message_id=reply_to_message_id, reply_markup=reply_markup)
+        return {"status": "handled", "action": action, "answered": True, "acked": False, "result": result}
+
     if action in {"task_done", "task_applied"}:
         result = update_task_by_id(
             vault_root,
@@ -909,7 +920,7 @@ def handle_vault_callback_update(
                 source_id=f"callback:{update.get('update_id')}",
             )
         run_vault_cache_compile_if_possible(vault_root)
-        text = f"Marked high priority: {label}"
+        text = f"Prioritized: {label}\n\nThis means the vault will treat it as high priority when building /today, morning briefs, task surfacing, and future retrieval."
         if not result.get("updated") and result.get("reason") != "already_set":
             text = f"I could not reprioritize that item: {result.get('reason') or 'unknown error'}"
     elif action == "summarize_note":
@@ -959,9 +970,9 @@ def render_today_command(vault_root: Path) -> tuple[str, dict[str, Any] | None]:
 
     rows: list[list[dict[str, Any]]] = []
     for index, task in enumerate(tasks, start=1):
-        rows.extend(task_action_rows(vault_root, task, index))
+        rows.append([task_detail_button(vault_root, task, index)])
     if reading:
-        rows.extend(note_action_rows(vault_root, reading, len(tasks) + 1, include_done=False))
+        rows.append([note_detail_button(vault_root, reading, len(tasks) + 1)])
     return "\n".join(lines), inline_keyboard(rows)
 
 
@@ -979,9 +990,7 @@ def render_queue_command(vault_root: Path) -> tuple[str, dict[str, Any] | None]:
         source = str(item.get("url") or item.get("path") or "")
         if source:
             lines.append(f"   {source}")
-    rows: list[list[dict[str, Any]]] = []
-    for index, item in enumerate(items, start=1):
-        rows.extend(note_action_rows(vault_root, item, index, include_done=True))
+    rows = chunk_buttons([note_detail_button(vault_root, item, index) for index, item in enumerate(items, start=1)], size=2)
     return "\n".join(lines), inline_keyboard(rows)
 
 
@@ -1110,33 +1119,62 @@ def load_agent_digest(vault_root: Path) -> dict[str, Any]:
     return read_json(path, fallback={})
 
 
-def task_action_rows(vault_root: Path, task: dict[str, Any], index: int) -> list[list[dict[str, Any]]]:
+def task_detail_button(vault_root: Path, task: dict[str, Any], index: int) -> dict[str, str]:
+    title = str(task.get("title") or f"task {index}")
+    return callback_button(
+        vault_root,
+        f"{index} · Details",
+        {
+            "action": "show_task",
+            "task_id": task.get("id"),
+            "note_path": task.get("note_path"),
+            "label": title,
+        },
+    )
+
+
+def note_detail_button(vault_root: Path, item: dict[str, Any], index: int) -> dict[str, str]:
+    title = str(item.get("title") or f"item {index}")
+    return callback_button(
+        vault_root,
+        f"{index} · Details",
+        {
+            "action": "show_note",
+            "note_path": item.get("path") or item.get("note_path"),
+            "label": title,
+        },
+    )
+
+
+def task_action_rows(vault_root: Path, task: dict[str, Any], index: int | None = None) -> list[list[dict[str, Any]]]:
     title = str(task.get("title") or f"task {index}")
     action = "task_applied" if str(task.get("task_type") or "") == "apply" else "task_done"
-    done_label = "Applied" if action == "task_applied" else "Done"
+    done_label = "📨 Mark applied" if action == "task_applied" else "✅ Mark done"
     row = [
-        callback_button(vault_root, f"{index} {done_label}", {"action": action, "task_id": task.get("id"), "note_path": task.get("note_path"), "label": title}),
-        callback_button(vault_root, f"{index} High", {"action": "task_high", "task_id": task.get("id"), "note_path": task.get("note_path"), "label": title}),
+        callback_button(vault_root, done_label, {"action": action, "task_id": task.get("id"), "note_path": task.get("note_path"), "label": title}),
+        callback_button(vault_root, "⭐ Prioritize", {"action": "task_high", "task_id": task.get("id"), "note_path": task.get("note_path"), "label": title}),
     ]
     rows = [row]
     if task.get("source_url"):
-        rows.append([{"text": f"{index} Open", "url": str(task["source_url"])}])
+        rows.append([{"text": "Open source", "url": str(task["source_url"])}])
     return rows
 
 
-def note_action_rows(vault_root: Path, item: dict[str, Any], index: int, *, include_done: bool) -> list[list[dict[str, Any]]]:
-    title = str(item.get("title") or f"item {index}")
+def note_action_rows(vault_root: Path, item: dict[str, Any], *, include_done: bool) -> list[list[dict[str, Any]]]:
+    title = str(item.get("title") or "item")
     path = str(item.get("path") or item.get("note_path") or "")
-    row = [
-        callback_button(vault_root, f"{index} Summary", {"action": "summarize_note", "note_path": path, "label": title}),
-        callback_button(vault_root, f"{index} High", {"action": "note_high", "note_path": path, "label": title}),
-    ]
+    row = [callback_button(vault_root, "⭐ Prioritize", {"action": "note_high", "note_path": path, "label": title})]
     if include_done:
-        row.append(callback_button(vault_root, f"{index} Done", {"action": "task_done", "note_path": path, "label": title}))
+        done_label = "✅ Mark read/done" if str(item.get("type") or "") in {"article", "resource", "tweet"} else "✅ Mark done"
+        row.append(callback_button(vault_root, done_label, {"action": "task_done", "note_path": path, "label": title}))
     rows = [row]
     if item.get("url"):
-        rows.append([{"text": f"{index} Open", "url": str(item["url"])}])
+        rows.append([{"text": "Open source", "url": str(item["url"])}])
     return rows
+
+
+def chunk_buttons(buttons: list[dict[str, str]], size: int) -> list[list[dict[str, str]]]:
+    return [buttons[index : index + size] for index in range(0, len(buttons), max(1, size))]
 
 
 def callback_button(vault_root: Path, text: str, payload: dict[str, Any]) -> dict[str, str]:
@@ -1191,11 +1229,82 @@ def prune_command_callbacks(callbacks: dict[str, Any], *, max_age_seconds: int =
             callbacks.pop(token_id, None)
 
 
-def render_note_summary(vault_root: Path, rel_path: str) -> str:
+def render_task_detail_card(vault_root: Path, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    task_id = str(payload.get("task_id") or "")
+    task = next((item for item in vault_list_tasks(vault_root, status="all", limit=500) if str(item.get("id") or "") == task_id), {})
+    if not task and payload.get("note_path"):
+        note = page_for_path(vault_root, str(payload.get("note_path") or ""))
+        if note:
+            text, markup = render_note_detail_card(vault_root, {"note_path": note.get("path"), "label": note.get("title")})
+            return text, markup
+    if not task:
+        return "I could not find that task anymore. Run /today to refresh the buttons.", None
+
+    lines = [str(task.get("title") or payload.get("label") or "Task")]
+    details = [
+        ("Type", task.get("task_type")),
+        ("Priority", task.get("priority")),
+        ("Due", task.get("due_on") or "no explicit date"),
+        ("Status", task.get("status")),
+    ]
+    for label, value in details:
+        if value:
+            lines.append(f"{label}: {value}")
+    source = str(task.get("source_url") or task.get("note_path") or "")
+    if source:
+        lines.extend(["", f"Source: {source}"])
+    note_path = str(task.get("note_path") or "")
+    if note_path:
+        page = page_for_path(vault_root, note_path)
+        if page.get("summary"):
+            lines.extend(["", truncate_context(str(page["summary"]), 550)])
+        if page.get("why_saved"):
+            lines.append(f"Why saved: {truncate_context(str(page['why_saved']), 260)}")
+    lines.extend(["", "Actions: mark it done/applied, or prioritize it so it surfaces more often."])
+    return "\n".join(lines), inline_keyboard(task_action_rows(vault_root, task))
+
+
+def render_note_detail_card(vault_root: Path, payload: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    rel_path = str(payload.get("note_path") or "")
+    page = page_for_path(vault_root, rel_path)
+    if not page:
+        return "I could not find that item anymore. Run /queue to refresh the buttons.", None
+
+    note_type = str(page.get("type") or "item")
+    lines = [str(page.get("title") or rel_path)]
+    details = [
+        ("Type", note_type),
+        ("Priority", page.get("priority") or "medium"),
+        ("Added", page.get("discovered_on") or "unknown"),
+        ("Published", page.get("published_on")),
+        ("Status", page.get("status")),
+    ]
+    for label, value in details:
+        if value:
+            lines.append(f"{label}: {value}")
+    if page.get("summary"):
+        lines.extend(["", truncate_context(str(page["summary"]), 750)])
+    if page.get("why_saved"):
+        lines.extend(["", f"Why saved: {truncate_context(str(page['why_saved']), 350)}"])
+    if page.get("url"):
+        lines.extend(["", f"Source: {page.get('url')}"])
+    lines.append(f"Vault note: {rel_path}")
+    lines.extend(["", "Actions: prioritize means set priority to high for surfacing; mark read/done closes it out of the active queue."])
+    return "\n".join(lines), inline_keyboard(note_action_rows(vault_root, page, include_done=True))
+
+
+def page_for_path(vault_root: Path, rel_path: str) -> dict[str, Any]:
+    if not rel_path:
+        return {}
     digest = load_agent_digest(vault_root)
     page = next((item for item in digest.get("pages") or [] if isinstance(item, dict) and item.get("path") == rel_path), {})
-    if not page:
-        page = read_note_summary_from_disk(vault_root, rel_path)
+    if page:
+        return page
+    return read_note_summary_from_disk(vault_root, rel_path)
+
+
+def render_note_summary(vault_root: Path, rel_path: str) -> str:
+    page = page_for_path(vault_root, rel_path)
     if not page:
         return "I could not find that note anymore. Run /queue to refresh the buttons."
     lines = [str(page.get("title") or rel_path)]
