@@ -173,7 +173,7 @@ Primary objective:
 Search discipline:
 1. Read \`AGENTS.md\` first if you need the vault contract.
 2. Check \`hot.md\` first when it exists.
-3. Read the most relevant dashboard or topic/project page next.
+3. For Telegram follow-up questions, resolve "this", "that", "it", "there", "the link", "the screenshot", "that role", and "the previous one" from the recent Telegram context in the guaranteed context pack before doing broad vault search.
 4. Use \`rg\` and \`rg --files\` to find candidate notes before opening files.
 5. Prefer canonical notes under \`items/\`, \`topics/\`, \`projects/\`, \`outputs/\`, and \`dashboards/\`.
 6. If the user asks how something was ingested, stored, classified, or processed, inspect \`imports/telegram-inbox/\`, especially processed update logs and agent decision traces.
@@ -184,6 +184,8 @@ Search discipline:
 Answering rules:
 - treat the local vault as the source of truth
 - for ingestion-history questions, use stored ingest traces and decision logs rather than guessing
+- treat recent Telegram links, screenshot/image summaries, QR extracts, attachment artifact paths, and recent agent decisions as first-class evidence when the question references recent conversation context
+- if a referenced recent link/image has not been fully compiled into a canonical note yet, answer from the recent Telegram context and clearly say that the answer is based on the recent message or attachment analysis
 - web search is ${includeWebSearch ? "allowed only when the vault is insufficient and external context materially helps" : "disabled for this turn"}
 - if a question asks about a person and the vault only has a relationship note plus a profile/linkedin reference, still use that as weak context and clearly label it as limited evidence
 - for compatibility/person-summary questions, combine what the vault knows about the user with any captured profile/person notes; if profile detail is thin and web search is enabled, you may look up public context from the provided profile URL, but distinguish searched public context from vault memory
@@ -265,10 +267,15 @@ function calculateCost(model, usage) {
   };
 }
 
-async function buildVaultContextPack(vaultRoot, question) {
+async function buildVaultContextPack(vaultRoot, question, recentConversationContext = "") {
   const terms = queryTerms(question);
   const sections = [];
   await compileVaultCache(vaultRoot);
+
+  const recentContext = String(recentConversationContext || "").trim();
+  if (recentContext) {
+    sections.push(renderContextSection("telegram/recent-conversation-context", trimForContext(recentContext, 14_000)));
+  }
 
   const digestContext = await readDigestContext(vaultRoot);
   if (digestContext) {
@@ -882,7 +889,8 @@ async function main() {
   const includeWebSearch = Boolean(payload.includeWebSearch ?? true);
   const model = String(payload.model || "gpt-5.4").trim() || "gpt-5.4";
   const reasoningEffort = String(payload.reasoningEffort || "medium").trim() || "medium";
-  const vaultContext = await buildVaultContextPack(vaultRoot, question);
+  const recentConversationContext = String(payload.recentConversationContext || "");
+  const vaultContext = await buildVaultContextPack(vaultRoot, question, recentConversationContext);
   if (process.env.VAULT_QUERY_CONTEXT_ONLY === "1") {
     process.stdout.write(
       JSON.stringify(

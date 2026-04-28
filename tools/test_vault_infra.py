@@ -124,6 +124,98 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
         self.assertIn("second thought", merged["raw_text"])
         self.assertEqual(merged["collected_update_ids"], [101, 102])
 
+    def test_telegram_recent_context_pack_keeps_prior_links_and_images(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inbox_dir, _ = telegram_inbox.ensure_directories(root)
+            session_name = "telegram-live"
+            stream_file = telegram_inbox.stream_path(inbox_dir, session_name)
+            stream_file.write_text(
+                "[4/28/26, 8:01:00 AM] Suraj: Anthropic role https://anthropic.com/jobs/mts\n"
+                "[4/28/26, 8:03:00 AM] Suraj: screenshot of event\n",
+                encoding="utf-8",
+            )
+            telegram_inbox.append_jsonl(
+                telegram_inbox.agent_decisions_path(inbox_dir, session_name),
+                [
+                    {
+                        "logged_at": "2026-04-28T08:03:10",
+                        "update_id": 301,
+                        "chat_id": 42,
+                        "message_id": 1301,
+                        "message": {
+                            "raw_text": "screenshot of event\n\nAttachment context:\nsummary: AI meetup flyer",
+                            "attachments": [
+                                {
+                                    "kind": "photo",
+                                    "artifact_path": "raw/images/telegram/event.png",
+                                    "summary": "AI meetup flyer",
+                                    "extracted_text": "AI meetup, May 2, 6 PM",
+                                    "event_clues": ["May 2, 6 PM", "AI meetup"],
+                                }
+                            ],
+                        },
+                        "decision": {"classification": "event", "storeInVault": True, "summary": "Saved event screenshot."},
+                        "actions": [{"tool": "append_message_to_stream"}, {"tool": "run_vault_ingest"}],
+                        "tool_results": [{"tool": "run_vault_ingest", "status": "ok"}],
+                    }
+                ],
+            )
+            current = {
+                "update_id": 302,
+                "message_id": 1302,
+                "chat_id": 42,
+                "timestamp_iso": "2026-04-28T08:04:00+00:00",
+                "sender": "Suraj",
+                "raw_text": "what do you think about that link and screenshot?",
+                "attachments": [],
+            }
+
+            context = telegram_inbox.build_recent_telegram_context(
+                vault_root=root,
+                inbox_dir=inbox_dir,
+                session_name=session_name,
+                chat_id=42,
+                normalized_message=current,
+            )
+
+            self.assertIn("Anthropic role", context)
+            self.assertIn("https://anthropic.com/jobs/mts", context)
+            self.assertIn("raw/images/telegram/event.png", context)
+            self.assertIn("AI meetup, May 2, 6 PM", context)
+            self.assertTrue(telegram_inbox.looks_like_contextual_followup_question(current["raw_text"]))
+
+    def test_telegram_query_runner_injects_recent_conversation_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = os.environ.copy()
+            env["OPENAI_API_KEY"] = "test-key"
+            env["VAULT_QUERY_CONTEXT_ONLY"] = "1"
+            proc = subprocess.run(
+                ["node", str(REPO_ROOT / "tools" / "telegram_vault_query.mjs")],
+                input=json.dumps(
+                    {
+                        "workingDirectory": str(root),
+                        "question": "what do you think about that role?",
+                        "includeWebSearch": False,
+                        "recentConversationContext": "Previous Telegram message: Anthropic role https://anthropic.com/jobs/mts",
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertIn("telegram/recent-conversation-context", payload["vaultContext"])
+            self.assertIn("Anthropic role", payload["vaultContext"])
+
     def test_webhook_event_prefixes_are_replayable(self) -> None:
         import sys
         import types

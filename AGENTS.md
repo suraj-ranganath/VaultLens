@@ -258,17 +258,19 @@ When the user provides a new export:
 When answering questions:
 
 1. Read `hot.md` first when it exists.
-2. Start with the most relevant dashboard page.
-3. Read the canonical item notes referenced there.
-4. Read topic pages, decision notes, and project pages when synthesis, history, or intent-tracking is required.
-5. Surface items by relevance, combining:
+2. For Telegram follow-ups, first resolve short references like “this”, “that”, “there”, “the link”, “that screenshot”, “that role”, or “the previous one” against the recent Telegram context pack.
+3. Treat recent Telegram links, attachment summaries, QR extracts, image OCR, saved artifact paths, and agent decision traces as first-class evidence until the canonical note catches up.
+4. Start with the most relevant dashboard page.
+5. Read the canonical item notes referenced there.
+6. Read topic pages, decision notes, and project pages when synthesis, history, or intent-tracking is required.
+7. Surface items by relevance, combining:
    - explicit deadlines and dates
    - recency of discovery or publication
    - overlap with the user's recurring interests and recent questions
    - manual priority and `why_saved`
    - prior verdicts and recurring systems
-6. Cite canonical notes, not imports, whenever possible.
-7. If the answer creates durable value, file it into `topics/`, `projects/`, or `outputs/`.
+8. Cite canonical notes, not imports, whenever possible.
+9. If the answer creates durable value, file it into `topics/`, `projects/`, or `outputs/`.
 8. Use `memory/` and `outputs/dreams/` as reviewable personalization surfaces; do not hide durable user understanding in opaque app memory.
 
 ## Surfacing Rules

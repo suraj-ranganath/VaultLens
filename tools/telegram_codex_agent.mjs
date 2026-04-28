@@ -40,7 +40,7 @@ function extractJson(text) {
 }
 
 function buildPrompt(payload) {
-  const { message, knownChats = {}, instructions = {} } = payload;
+  const { message, knownChats = {}, instructions = {}, recentConversationContext = "" } = payload;
   return `
 You are the first point of contact for a personal vault ingestion system.
 
@@ -71,6 +71,7 @@ Rules:
 - If the message should become part of the vault, set storeInVault=true.
 - If storeInVault=true, include append_message_to_stream and run_vault_ingest in actions.
 - If the message is primarily asking a question that should be answered from the vault, request answer_vault_query.
+- If the message asks a follow-up question about "this", "that", "it", "there", "the link", "that screenshot", "that role", or something sent a few turns ago, use the recent Telegram context below and request answer_vault_query.
 - For pure questions, usually set storeInVault=false unless the message also asks to remember something.
 - If the user says they completed, applied to, submitted, read, cancelled, skipped, or handled something, request update_task_ledger.
 - Treat the user's completion statement as authoritative. Infer references like "there", "that one", and named companies from recent conversation context when possible. Do not ask for confirmation unless multiple tasks are genuinely ambiguous.
@@ -94,6 +95,9 @@ ${JSON.stringify(instructions, null, 2)}
 
 Known chats:
 ${JSON.stringify(knownChats, null, 2)}
+
+Recent Telegram context:
+${String(recentConversationContext || "").trim() || "(No recent context supplied.)"}
 
 Incoming message:
 ${JSON.stringify(message, null, 2)}

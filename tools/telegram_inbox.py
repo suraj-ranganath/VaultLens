@@ -81,6 +81,16 @@ TASK_PRIORITY_RE = re.compile(
     r"\b(low|medium|high|critical)\s+priority\b|\bprioriti[sz]e\s+(?:this|that|it|there)?\s*(high|critical)\b",
     re.IGNORECASE,
 )
+FOLLOWUP_REFERENCE_RE = re.compile(
+    r"\b(this|that|it|there|link|article|post|tweet|x post|screenshot|image|photo|picture|role|job|event|"
+    r"previous|earlier|above|sent|one)\b",
+    re.IGNORECASE,
+)
+QUESTION_INTENT_RE = re.compile(
+    r"\?|^\s*(what|why|how|when|where|who|which|can|could|should|would|is|are|do|does|did|"
+    r"summari[sz]e|explain|compare|tell me|give me|thoughts|opinion|worth)\b",
+    re.IGNORECASE,
+)
 
 
 def read_json(path: Path, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1142,6 +1152,7 @@ def invoke_vault_query_agent(
     model: str,
     reasoning_effort: str,
     prior_thread_id: str | None,
+    recent_conversation_context: str = "",
 ) -> dict[str, Any]:
     script_path = vault_root / "tools" / "telegram_vault_query.mjs"
     resume_threads = os.environ.get("VAULT_DISABLE_CODEX_THREAD_RESUME", "").strip() != "1"
@@ -1152,6 +1163,7 @@ def invoke_vault_query_agent(
         "question": question,
         "threadId": prior_thread_id if resume_threads else None,
         "includeWebSearch": True,
+        "recentConversationContext": recent_conversation_context,
     }
     env = os.environ.copy()
     env["OPENAI_API_KEY"] = openai_api_key
@@ -1346,6 +1358,7 @@ def invoke_codex_agent(
     message: dict[str, Any],
     known_chats: dict[str, Any],
     prior_thread_id: str | None,
+    recent_conversation_context: str = "",
 ) -> dict[str, Any]:
     script_path = vault_root / "tools" / "telegram_codex_agent.mjs"
     resume_threads = os.environ.get("VAULT_DISABLE_CODEX_THREAD_RESUME", "").strip() != "1"
@@ -1365,6 +1378,7 @@ def invoke_codex_agent(
         },
         "message": message,
         "knownChats": known_chats,
+        "recentConversationContext": recent_conversation_context,
     }
     env = os.environ.copy()
     env["OPENAI_API_KEY"] = openai_api_key
@@ -1511,6 +1525,13 @@ def execute_agent_actions(
 
         if tool == "answer_vault_query":
             prior_thread_id = (state.get("query_threads") or {}).get(str(normalized_message["chat_id"]))
+            recent_context = build_recent_telegram_context(
+                vault_root=vault_root,
+                inbox_dir=inbox_dir,
+                session_name=session_name,
+                chat_id=int(normalized_message["chat_id"]),
+                normalized_message=normalized_message,
+            )
             query_result = invoke_vault_query_agent(
                 vault_root=vault_root,
                 openai_api_key=openai_api_key,
@@ -1518,6 +1539,7 @@ def execute_agent_actions(
                 model=agent_model,
                 reasoning_effort=agent_reasoning_effort,
                 prior_thread_id=prior_thread_id,
+                recent_conversation_context=recent_context,
             )
             thread_id = str(query_result.get("threadId") or "").strip()
             if thread_id:
@@ -1762,6 +1784,145 @@ def recent_context_for_task_update(stream_file: Path, normalized_message: dict[s
     return "\n".join(chunk for chunk in chunks if chunk).strip()
 
 
+def build_recent_telegram_context(
+    *,
+    vault_root: Path,
+    inbox_dir: Path,
+    session_name: str,
+    chat_id: int,
+    normalized_message: dict[str, Any],
+    max_stream_lines: int = 100,
+    max_decisions: int = 12,
+) -> str:
+    stream_file = stream_path(inbox_dir, session_name)
+    decisions_file = agent_decisions_path(inbox_dir, session_name)
+    sections: list[str] = []
+
+    sections.append(
+        render_context_block(
+            "Current Telegram message",
+            {
+                "update_id": normalized_message.get("update_id"),
+                "message_id": normalized_message.get("message_id"),
+                "chat_id": chat_id,
+                "timestamp": normalized_message.get("timestamp_iso"),
+                "sender": normalized_message.get("sender"),
+                "urls": extract_message_urls(str(normalized_message.get("raw_text") or "")),
+                "text": truncate_context(str(normalized_message.get("raw_text") or ""), 2400),
+                "attachments": summarize_attachments_for_context(normalized_message.get("attachments") or []),
+            },
+        )
+    )
+
+    if stream_file.exists():
+        try:
+            stream_tail = "\n".join(stream_file.read_text(encoding="utf-8", errors="replace").splitlines()[-max_stream_lines:])
+            if stream_tail.strip():
+                sections.append("## Recent normalized Telegram stream\n" + truncate_context(stream_tail, 9000))
+        except Exception:
+            pass
+
+    decision_summaries = recent_decision_summaries(decisions_file, chat_id=chat_id, limit=max_decisions)
+    if decision_summaries:
+        sections.append("## Recent agent decisions and artifacts\n" + "\n\n".join(decision_summaries))
+
+    return "\n\n".join(section for section in sections if section.strip()).strip()[:20_000]
+
+
+def render_context_block(title: str, payload: dict[str, Any]) -> str:
+    lines = [f"## {title}"]
+    for key, value in payload.items():
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, (dict, list)):
+            rendered = json.dumps(value, indent=2, sort_keys=True)
+            lines.append(f"{key}:\n{rendered}")
+        else:
+            lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def summarize_attachments_for_context(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summarized: list[dict[str, Any]] = []
+    for attachment in attachments[:6]:
+        summarized.append(
+            {
+                "kind": attachment.get("kind"),
+                "artifact_path": attachment.get("artifact_path"),
+                "mime_type": attachment.get("mime_type"),
+                "summary": attachment.get("summary"),
+                "extracted_text": truncate_context(str(attachment.get("extracted_text") or ""), 800),
+                "urls": attachment.get("urls") or [],
+                "qr_values": attachment.get("qr_values") or [],
+                "event_clues": attachment.get("event_clues") or [],
+                "job_clues": attachment.get("job_clues") or [],
+                "reminder_clues": attachment.get("reminder_clues") or [],
+                "analysis_error": attachment.get("analysis_error"),
+            }
+        )
+    return summarized
+
+
+def recent_decision_summaries(path: Path, *, chat_id: int, limit: int) -> list[str]:
+    summaries: list[str] = []
+    for record in reversed(load_jsonl(path)):
+        if int(record.get("chat_id") or 0) != int(chat_id):
+            continue
+        message = record.get("message") or {}
+        decision = record.get("decision") or {}
+        tool_results = record.get("tool_results") or []
+        summary = {
+            "logged_at": record.get("logged_at"),
+            "update_id": record.get("update_id"),
+            "message_id": record.get("message_id"),
+            "text": truncate_context(str(message.get("raw_text") or message.get("export_line") or ""), 1800),
+            "urls": extract_message_urls(str(message.get("raw_text") or "")),
+            "attachments": summarize_attachments_for_context(message.get("attachments") or []),
+            "classification": decision.get("classification"),
+            "stored": bool(decision.get("storeInVault")),
+            "priority": decision.get("priority"),
+            "summary": decision.get("summary"),
+            "actions": [str(action.get("tool") or "") for action in record.get("actions") or [] if isinstance(action, dict)],
+            "tool_results": summarize_tool_results_for_context(tool_results),
+        }
+        summaries.append(render_context_block(f"Recent turn {len(summaries) + 1}", summary))
+        if len(summaries) >= limit:
+            break
+    return summaries
+
+
+def summarize_tool_results_for_context(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summarized: list[dict[str, Any]] = []
+    for result in tool_results[:12]:
+        entry: dict[str, Any] = {
+            "tool": result.get("tool"),
+            "status": result.get("status"),
+            "reason": result.get("reason"),
+        }
+        if result.get("urls"):
+            entry["urls"] = result.get("urls")
+        if result.get("task_update"):
+            entry["task_update"] = result.get("task_update")
+        if result.get("reply_text"):
+            entry["reply_text"] = truncate_context(str(result.get("reply_text") or ""), 900)
+        summarized.append({key: value for key, value in entry.items() if value not in (None, "", [], {})})
+    return summarized
+
+
+def looks_like_contextual_followup_question(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    return bool(QUESTION_INTENT_RE.search(value) and FOLLOWUP_REFERENCE_RE.search(value))
+
+
+def truncate_context(value: str, limit: int) -> str:
+    clean = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 3].rstrip() + "..."
+
+
 def sync_once(
     vault_root: Path,
     token: str,
@@ -1918,6 +2079,13 @@ def process_update_batch(
         preview = TelegramPreviewMessage(token, chat_id, normalized["message_id"])
         preview.update("Working on it — reading this and checking the vault…", force=True)
         prior_thread_id = (state.get("agent_threads") or {}).get(str(chat_id))
+        recent_conversation_context = build_recent_telegram_context(
+            vault_root=vault_root,
+            inbox_dir=inbox_dir,
+            session_name=session_name,
+            chat_id=chat_id,
+            normalized_message=normalized,
+        )
         preview.update("Deciding whether to save, enrich, answer, or take an action…")
         agent_result = invoke_codex_agent(
             vault_root=vault_root,
@@ -1928,6 +2096,7 @@ def process_update_batch(
             message=normalized,
             known_chats=state.get("known_chats", {}),
             prior_thread_id=prior_thread_id,
+            recent_conversation_context=recent_conversation_context,
         )
         agent_runs += 1
         decision = normalize_agent_decision(agent_result.get("decision") or {})
@@ -1955,6 +2124,18 @@ def process_update_batch(
         if decision.get("classification") == "vault_query" and not any(action["tool"] == "answer_vault_query" for action in actions):
             actions = ensure_action_order(
                 actions + [{"tool": "answer_vault_query", "reason": "Answer the user's vault question directly in Telegram."}],
+                store_in_vault=bool(decision.get("storeInVault")),
+                include_ingest=ingest_after_sync,
+            )
+        if looks_like_contextual_followup_question(str(normalized.get("raw_text") or "")) and not any(action["tool"] == "answer_vault_query" for action in actions):
+            actions = ensure_action_order(
+                actions
+                + [
+                    {
+                        "tool": "answer_vault_query",
+                        "reason": "The message is a follow-up question that likely refers to a recent Telegram link, image, or task.",
+                    }
+                ],
                 store_in_vault=bool(decision.get("storeInVault")),
                 include_ingest=ingest_after_sync,
             )
