@@ -1639,6 +1639,7 @@ def configure_gws_credentials(vault_root: Path, env: dict[str, str]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(normalize_gws_credentials_json(credentials_json))
         env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(path)
+        env.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
 
 
 def normalize_gws_credentials_json(raw: str) -> str:

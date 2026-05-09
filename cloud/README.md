@@ -56,7 +56,7 @@ Local setup:
 
 ```bash
 gws auth setup
-gws auth login --scopes calendar
+gws auth login --scopes https://www.googleapis.com/auth/calendar
 ```
 
 Cloud setup:
@@ -71,7 +71,7 @@ Then put the one-line JSON value into `.env.local`:
 GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON='{"...":"..."}'
 ```
 
-The deploy script passes this as a no-echo CloudFormation parameter. The Lambda writes it to `/tmp/my-vault/.runtime/google-workspace-credentials.json` at runtime and points `gws` at that file. Do not commit this value.
+The deploy script passes this as a no-echo CloudFormation parameter. The Lambda writes it to `/tmp/my-vault/.runtime/google-workspace-credentials.json` at runtime, points `gws` at that file, and forces `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` so the cloud worker does not depend on an OS keyring. Do not commit this value.
 
 ## Deploy
 
