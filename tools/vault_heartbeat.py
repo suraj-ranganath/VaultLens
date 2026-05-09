@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -73,6 +74,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--today", default=os.environ.get("VAULT_BRIEF_TODAY", ""))
     parser.add_argument("--max-actions", type=int, default=int(os.environ.get("VAULT_BRIEF_MAX_ACTIONS", "5")))
+    parser.add_argument("--calendar-id", default=os.environ.get("VAULT_BRIEF_CALENDAR_ID", "primary"))
     args = parser.parse_args()
 
     vault_root = args.vault_root.resolve()
@@ -86,11 +88,26 @@ def main() -> None:
     candidate_actions.extend(collect_task_ledger_actions(vault_root, today=today, max_items=max(args.max_actions * 2, 8)))
     candidate_actions = dedupe_candidates(candidate_actions)[: max(args.max_actions * 4, 16)]
     candidate_readings = collect_recommended_readings(notes, today=today, max_items=8)
+    candidate_calendar_events: list[dict[str, Any]] = []
+    calendar_error = ""
+    if env_flag("VAULT_BRIEF_INCLUDE_CALENDAR", default=True):
+        try:
+            candidate_calendar_events = collect_calendar_events(
+                vault_root,
+                today=today,
+                calendar_id=args.calendar_id,
+                timezone_label=os.environ.get("VAULT_DEFAULT_TIMEZONE", DEFAULT_TIMEZONE_LABEL),
+                max_items=int(os.environ.get("VAULT_BRIEF_MAX_CALENDAR_EVENTS", "12")),
+            )
+        except Exception as exc:
+            calendar_error = str(exc)
     agent_result = run_morning_brief_agent(
         vault_root=vault_root,
         today=today,
         candidate_actions=candidate_actions,
         candidate_readings=candidate_readings,
+        candidate_calendar_events=candidate_calendar_events,
+        calendar_error=calendar_error,
         max_actions=args.max_actions,
     )
     should_send = bool(agent_result.get("should_send"))
@@ -106,8 +123,11 @@ def main() -> None:
         "agent_rationale": agent_result.get("rationale"),
         "candidate_action_count": len(candidate_actions),
         "candidate_reading_count": len(candidate_readings),
+        "calendar_event_count": len(candidate_calendar_events),
+        "calendar_error": calendar_error or None,
         "candidate_actions": candidate_actions,
         "candidate_readings": candidate_readings,
+        "candidate_calendar_events": candidate_calendar_events,
         "text": text,
     }
     append_trajectory_event(
@@ -121,6 +141,8 @@ def main() -> None:
             "agent_result": agent_result,
             "candidate_action_count": len(candidate_actions),
             "candidate_reading_count": len(candidate_readings),
+            "calendar_event_count": len(candidate_calendar_events),
+            "calendar_error": calendar_error or None,
         },
     )
 
@@ -288,6 +310,217 @@ def collect_task_ledger_actions(vault_root: Path, *, today: date, max_items: int
     return candidates[: max(1, max_items)]
 
 
+def collect_calendar_events(
+    vault_root: Path,
+    *,
+    today: date,
+    calendar_id: str,
+    timezone_label: str,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    tz = safe_zoneinfo(timezone_label)
+    start = datetime.combine(today, datetime.min.time(), tzinfo=tz)
+    end = start + timedelta(days=1)
+    params = {
+        "calendarId": calendar_id or "primary",
+        "timeMin": start.isoformat(),
+        "timeMax": end.isoformat(),
+        "singleEvents": True,
+        "orderBy": "startTime",
+        "maxResults": max(1, max_items),
+        "showDeleted": False,
+    }
+    payload = run_gws(vault_root, ["calendar", "events", "list", "--params", json.dumps(params)])
+    raw_events = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(raw_events, list):
+        return []
+
+    events: list[dict[str, Any]] = []
+    for raw_event in raw_events:
+        if not isinstance(raw_event, dict) or raw_event.get("status") == "cancelled":
+            continue
+        if self_attendee_declined(raw_event):
+            continue
+        normalized = calendar_event_payload(raw_event, today=today, timezone_label=timezone_label)
+        if normalized:
+            events.append(normalized)
+    events.sort(key=lambda item: (str(item.get("start") or ""), item.get("title") or ""))
+    return events[: max(1, max_items)]
+
+
+def calendar_event_payload(event: dict[str, Any], *, today: date, timezone_label: str) -> dict[str, Any] | None:
+    start_info = event.get("start") if isinstance(event.get("start"), dict) else {}
+    end_info = event.get("end") if isinstance(event.get("end"), dict) else {}
+    start_value = clean_scalar(start_info.get("dateTime") or start_info.get("date"))
+    end_value = clean_scalar(end_info.get("dateTime") or end_info.get("date"))
+    if not start_value:
+        return None
+    all_day = bool(start_info.get("date") and not start_info.get("dateTime"))
+    title = clean_scalar(event.get("summary")) or "Untitled calendar event"
+    location = clean_scalar(event.get("location"))
+    description = clean_scalar(event.get("description"))
+    html_link = clean_scalar(event.get("htmlLink"))
+    meeting_link = first_calendar_link(event)
+    transparency = clean_scalar(event.get("transparency")).lower()
+    event_type = clean_scalar(event.get("eventType"))
+    creator = event.get("creator") if isinstance(event.get("creator"), dict) else {}
+    organizer = event.get("organizer") if isinstance(event.get("organizer"), dict) else {}
+    attendee_count = len(event.get("attendees") or []) if isinstance(event.get("attendees"), list) else 0
+    return {
+        "kind": "calendar_event_today",
+        "title": title,
+        "path": None,
+        "url": html_link or meeting_link or None,
+        "date": today.isoformat(),
+        "start": start_value,
+        "end": end_value or None,
+        "all_day": all_day,
+        "timezone": timezone_label,
+        "type": "calendar_event",
+        "status": clean_scalar(event.get("status")) or "confirmed",
+        "priority": calendar_event_priority(event),
+        "score": calendar_event_score(event),
+        "reason": calendar_event_reason(start_value, all_day=all_day, location=location),
+        "location": location or None,
+        "meeting_link": meeting_link or None,
+        "description": brief_calendar_description(description),
+        "creator": clean_scalar(creator.get("email") or creator.get("displayName")) or None,
+        "organizer": clean_scalar(organizer.get("email") or organizer.get("displayName")) or None,
+        "attendee_count": attendee_count,
+        "transparency": transparency or None,
+        "event_type": event_type or None,
+    }
+
+
+def calendar_event_priority(event: dict[str, Any]) -> str:
+    title = clean_scalar(event.get("summary")).lower()
+    description = clean_scalar(event.get("description")).lower()
+    haystack = f"{title} {description}"
+    if any(keyword in haystack for keyword in ["interview", "deadline", "exam", "presentation", "flight", "doctor", "appointment"]):
+        return "critical"
+    if event.get("transparency") == "transparent":
+        return "low"
+    if event.get("attendees"):
+        return "high"
+    return "medium"
+
+
+def calendar_event_score(event: dict[str, Any]) -> int:
+    score = {"critical": 95, "high": 82, "medium": 65, "low": 35}[calendar_event_priority(event)]
+    if clean_scalar(event.get("location")):
+        score += 4
+    if first_calendar_link(event):
+        score += 3
+    return score
+
+
+def calendar_event_reason(start_value: str, *, all_day: bool, location: str) -> str:
+    when = "all day" if all_day else start_value
+    if location:
+        return f"on your Google Calendar today at {when}; location: {location}"
+    return f"on your Google Calendar today at {when}"
+
+
+def first_calendar_link(event: dict[str, Any]) -> str:
+    for key in ("hangoutLink", "htmlLink"):
+        value = clean_scalar(event.get(key))
+        if value:
+            return value
+    conference = event.get("conferenceData") if isinstance(event.get("conferenceData"), dict) else {}
+    for entry in conference.get("entryPoints") or []:
+        if isinstance(entry, dict):
+            value = clean_scalar(entry.get("uri"))
+            if value:
+                return value
+    return ""
+
+
+def brief_calendar_description(value: str) -> str | None:
+    text = re.sub(r"\s+", " ", clean_scalar(value)).strip()
+    if not text:
+        return None
+    return text[:240].rstrip() + ("..." if len(text) > 240 else "")
+
+
+def self_attendee_declined(event: dict[str, Any]) -> bool:
+    for attendee in event.get("attendees") or []:
+        if isinstance(attendee, dict) and attendee.get("self") and attendee.get("responseStatus") == "declined":
+            return True
+    return False
+
+
+def safe_zoneinfo(timezone_label: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(timezone_label or DEFAULT_TIMEZONE_LABEL)
+    except Exception:
+        return ZoneInfo(DEFAULT_TIMEZONE_LABEL)
+
+
+def gws_command(vault_root: Path) -> list[str]:
+    local = vault_root / "node_modules" / ".bin" / "gws"
+    if local.exists():
+        return [str(local)]
+    return ["gws"]
+
+
+def configure_gws_credentials(vault_root: Path, env: dict[str, str]) -> None:
+    credentials_json = os.environ.get("GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON", "").strip()
+    if credentials_json and "GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE" not in env:
+        path = vault_root / ".runtime" / "google-workspace-credentials.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(normalize_gws_credentials_json(credentials_json), encoding="utf-8")
+        env["GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"] = str(path)
+
+
+def normalize_gws_credentials_json(raw: str) -> str:
+    text = str(raw or "").strip()
+    candidates = [text]
+    try:
+        candidates.append(bytes(text, "utf-8").decode("unicode_escape"))
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        current = candidate.strip()
+        for _ in range(3):
+            try:
+                parsed = json.loads(current)
+            except json.JSONDecodeError:
+                break
+            if isinstance(parsed, dict):
+                return json.dumps(parsed, separators=(",", ":"))
+            if isinstance(parsed, str):
+                current = parsed.strip()
+                continue
+            break
+
+    raise RuntimeError("GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON could not be parsed as credentials JSON")
+
+
+def run_gws(vault_root: Path, args: list[str]) -> dict[str, Any]:
+    env = os.environ.copy()
+    configure_gws_credentials(vault_root, env)
+    result = subprocess.run(
+        gws_command(vault_root) + args,
+        text=True,
+        capture_output=True,
+        cwd=vault_root,
+        env=env,
+        check=False,
+        timeout=int(os.environ.get("VAULT_GWS_TIMEOUT_SECONDS", "45")),
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "gws command failed"
+        raise RuntimeError(detail)
+    stdout = result.stdout.strip()
+    if not stdout:
+        return {}
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        return {"raw": stdout}
+
+
 def pick_recommended_reading(notes: list[Note], *, today: date) -> dict[str, Any] | None:
     readings = collect_recommended_readings(notes, today=today, max_items=1)
     return readings[0] if readings else None
@@ -299,6 +532,8 @@ def run_morning_brief_agent(
     today: date,
     candidate_actions: list[dict[str, Any]],
     candidate_readings: list[dict[str, Any]],
+    candidate_calendar_events: list[dict[str, Any]],
+    calendar_error: str,
     max_actions: int,
 ) -> dict[str, Any]:
     mock_json = os.environ.get("VAULT_MORNING_BRIEF_AGENT_MOCK_JSON", "").strip()
@@ -318,6 +553,8 @@ def run_morning_brief_agent(
         "maxActions": max_actions,
         "candidateActions": candidate_actions,
         "candidateReadings": candidate_readings,
+        "candidateCalendarEvents": candidate_calendar_events,
+        "calendarError": calendar_error,
         "model": os.environ.get("VAULT_MORNING_BRIEF_MODEL") or os.environ.get("VAULT_AGENT_MODEL") or "gpt-5.4",
         "reasoningEffort": os.environ.get("VAULT_MORNING_BRIEF_REASONING_EFFORT")
         or os.environ.get("VAULT_AGENT_REASONING_EFFORT")
@@ -526,6 +763,13 @@ def date_sort_value(value: Any) -> int:
     if not parsed:
         return 0
     return parsed.year * 10000 + parsed.month * 100 + parsed.day
+
+
+def env_flag(name: str, *, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 if __name__ == "__main__":

@@ -287,7 +287,7 @@ When answering questions:
   - active projects
   - prior decisions and verdicts
   - repeated mentions across exports
-- Morning briefs must be agentic, not deterministic. Deterministic code may shortlist candidates and enforce cost/recency bounds, but the Codex morning brief agent should make the final call using the user's profile, decisions, reminders, current interests, jobs, recent saves, and active systems.
+- Morning briefs must be agentic, not deterministic. Deterministic code may shortlist candidates and enforce cost/recency bounds, but the Codex morning brief agent should make the final call using the user's profile, decisions, reminders, current interests, jobs, today's Google Calendar events, recent saves, and active systems.
 - Scheduled morning briefs should be concise and intentional: only urgent next actions, high-impact opportunities, explicit reminders, and at most one genuinely valuable recent reading.
 - When the user asks about a topic, look for both direct matches and adjacent topics that often co-occur in saved items.
 - When the user asks for advice or ideation, privilege pages that capture taste, preferences, prior inspirations, and explicit decisions.

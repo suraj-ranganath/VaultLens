@@ -359,6 +359,7 @@ tags: [misc]
             }
             env = os.environ.copy()
             env["VAULT_MORNING_BRIEF_AGENT_MOCK_JSON"] = json.dumps(mock_agent_result)
+            env["VAULT_BRIEF_INCLUDE_CALENDAR"] = "false"
             proc = subprocess.run(
                 [
                     "python3",
@@ -387,6 +388,94 @@ tags: [misc]
             self.assertGreaterEqual(payload["candidate_reading_count"], 1)
             self.assertNotIn("Already Applied Role", payload["text"])
             self.assertNotIn("Low Signal Reading", payload["text"])
+
+    def test_daily_brief_collects_today_calendar_events_for_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "items" / "reminders").mkdir(parents=True)
+            bin_dir = root / "node_modules" / ".bin"
+            bin_dir.mkdir(parents=True)
+            fake_gws = bin_dir / "gws"
+            fake_gws.write_text(
+                """#!/usr/bin/env python3
+import json
+
+print(json.dumps({
+    "items": [
+        {
+            "id": "calendar-event-1",
+            "status": "confirmed",
+            "summary": "Research lab meeting",
+            "location": "CSE building",
+            "htmlLink": "https://calendar.google.com/event?eid=demo",
+            "start": {"dateTime": "2026-05-08T09:00:00-07:00", "timeZone": "America/Los_Angeles"},
+            "end": {"dateTime": "2026-05-08T10:00:00-07:00", "timeZone": "America/Los_Angeles"},
+            "attendees": [
+                {"email": "suraj@example.com", "self": True, "responseStatus": "accepted"},
+                {"email": "lab@example.com", "responseStatus": "accepted"}
+            ],
+            "creator": {"email": "suraj@example.com"},
+            "organizer": {"email": "lab@example.com"}
+        },
+        {
+            "id": "declined-event",
+            "status": "confirmed",
+            "summary": "Declined hold",
+            "start": {"dateTime": "2026-05-08T11:00:00-07:00"},
+            "end": {"dateTime": "2026-05-08T11:30:00-07:00"},
+            "attendees": [{"email": "suraj@example.com", "self": True, "responseStatus": "declined"}]
+        }
+    ]
+}))
+""",
+                encoding="utf-8",
+            )
+            fake_gws.chmod(0o755)
+
+            mock_agent_result = {
+                "should_send": True,
+                "telegram_text": "Morning brief\nToday: Research lab meeting at 9am.",
+                "selected_actions": [
+                    {
+                        "title": "Research lab meeting",
+                        "kind": "calendar_event_today",
+                        "date": "2026-05-08",
+                        "source": "https://calendar.google.com/event?eid=demo",
+                        "why_today": "Important calendar event today.",
+                        "suggested_next_step": "Leave time to get to CSE building.",
+                    }
+                ],
+                "recommended_reading": None,
+                "rationale": "Included the relevant calendar event and ignored the declined hold.",
+            }
+            env = os.environ.copy()
+            env["VAULT_MORNING_BRIEF_AGENT_MOCK_JSON"] = json.dumps(mock_agent_result)
+            env["VAULT_BRIEF_INCLUDE_CALENDAR"] = "true"
+            env["VAULT_DEFAULT_TIMEZONE"] = "America/Los_Angeles"
+            proc = subprocess.run(
+                [
+                    "python3",
+                    str(REPO_ROOT / "tools" / "vault_heartbeat.py"),
+                    "--vault-root",
+                    str(root),
+                    "--today",
+                    "2026-05-08",
+                    "--dry-run",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["calendar_event_count"], 1)
+            self.assertIsNone(payload["calendar_error"])
+            self.assertEqual(payload["candidate_calendar_events"][0]["title"], "Research lab meeting")
+            self.assertEqual(payload["candidate_calendar_events"][0]["kind"], "calendar_event_today")
+            self.assertEqual(payload["candidate_calendar_events"][0]["priority"], "high")
+            self.assertIn("Research lab meeting", payload["text"])
+            self.assertNotIn("Declined hold", json.dumps(payload["candidate_calendar_events"]))
 
     def test_x_oembed_payload_becomes_agent_friendly_metadata(self) -> None:
         import sys

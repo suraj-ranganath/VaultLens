@@ -99,14 +99,18 @@ async function main() {
   const reasoningEffort = String(payload.reasoningEffort || "medium");
   const candidateActions = Array.isArray(payload.candidateActions) ? payload.candidateActions : [];
   const candidateReadings = Array.isArray(payload.candidateReadings) ? payload.candidateReadings : [];
+  const candidateCalendarEvents = Array.isArray(payload.candidateCalendarEvents) ? payload.candidateCalendarEvents : [];
+  const calendarError = String(payload.calendarError || "");
   const maxActions = Number(payload.maxActions || 5);
-  const contextPack = await buildContextPack(vaultRoot, candidateActions, candidateReadings);
+  const contextPack = await buildContextPack(vaultRoot, candidateActions, candidateReadings, candidateCalendarEvents, calendarError);
 
   const prompt = buildPrompt({
     today,
     maxActions,
     candidateActions,
     candidateReadings,
+    candidateCalendarEvents,
+    calendarError,
     contextPack,
   });
 
@@ -147,7 +151,7 @@ async function main() {
   );
 }
 
-function buildPrompt({ today, maxActions, candidateActions, candidateReadings, contextPack }) {
+function buildPrompt({ today, maxActions, candidateActions, candidateReadings, candidateCalendarEvents, calendarError, contextPack }) {
   return `
 You are Suraj's morning brief agent.
 
@@ -160,11 +164,13 @@ Goal:
 Selection principles:
 - Include only things that are genuinely urgent, high impact, or intentionally saved for follow-up.
 - Prioritize deadlines/reminders within the next week, event logistics, job/opportunity items where applying early matters, and explicit promises/reminders from the user.
+- Check today's Google Calendar events. Include important events happening today, especially meetings, classes, interviews, appointments, travel, presentations, or anything with logistics Suraj needs to notice. Omit trivial holds, low-signal blockers, declined events, and filler.
 - Treat explicit user priority as a strong signal. If the user marked something high or critical priority, it should usually appear unless it is stale, already done, or clearly less important than tighter deadline items.
 - Include at most one recommended reading. Pick the one recent item most likely to compound Suraj's current work, taste, or thinking.
 - It is okay to send no brief if there is no meaningful signal.
 - Do not include filler. Do not include low-signal "maybe read this" items.
 - Preserve uncertainty honestly: if a date/deadline is inferred or weak, say that briefly.
+- If calendar access failed or no calendar events were fetched, do not invent calendar events.
 - Write as a useful personal assistant, not a report.
 - Be direct, warm, and slightly engaging. Light emojis are fine if natural.
 - The brief should wake him up with clear action items for the day.
@@ -183,6 +189,9 @@ ${JSON.stringify(candidateActions, null, 2)}
 Candidate reading shortlist:
 ${JSON.stringify(candidateReadings, null, 2)}
 
+Candidate Google Calendar events for today:
+${candidateCalendarEvents.length ? JSON.stringify(candidateCalendarEvents, null, 2) : calendarError ? `Calendar unavailable: ${calendarError}` : "[]"}
+
 Guaranteed vault/profile context:
 ${contextPack || "(No additional context found.)"}
 
@@ -190,8 +199,17 @@ Return JSON only.
 `.trim();
 }
 
-async function buildContextPack(vaultRoot, candidateActions, candidateReadings) {
+async function buildContextPack(vaultRoot, candidateActions, candidateReadings, candidateCalendarEvents, calendarError) {
   const sections = [];
+  if (candidateCalendarEvents.length || calendarError) {
+    sections.push(
+      renderSection(
+        "google-calendar/today",
+        candidateCalendarEvents.length ? JSON.stringify(candidateCalendarEvents, null, 2) : `Calendar unavailable: ${calendarError}`,
+      ),
+    );
+  }
+
   for (const relativePath of CORE_CONTEXT_FILES) {
     const text = await readTextIfExists(path.join(vaultRoot, relativePath));
     if (text) {
