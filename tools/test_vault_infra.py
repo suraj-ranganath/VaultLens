@@ -542,6 +542,63 @@ print(json.dumps({
         self.assertIn("Which calendar event should I update?", clarified["clarificationQuestion"])
         self.assertEqual(clarified["confidence"], "low")
 
+    def test_calendar_batch_update_targets_match_history_by_summary_and_start(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        plan = {
+            "calendarIntent": True,
+            "operation": "update",
+            "targetEventId": None,
+            "targetCalendarId": "primary",
+            "needsClarification": False,
+            "needsConfirmation": False,
+            "userConfirmed": True,
+            "events": [
+                {
+                    "summary": "Amazon SDE Intern (Fall) interview - Ryan Dalby",
+                    "start": "2026-05-13T13:00:00-07:00",
+                    "end": "2026-05-13T14:00:00-07:00",
+                },
+                {
+                    "summary": "Amazon SDE Intern (Fall) interview - Nick Meyer",
+                    "start": "2026-05-13T14:00:00-07:00",
+                    "end": "2026-05-13T15:00:00-07:00",
+                },
+            ],
+        }
+        history = [
+            {
+                "event_id": "ryan_event",
+                "summary": "Amazon SDE Intern (Fall) interview - Ryan Dalby",
+                "start": {"dateTime": "2026-05-13T13:00:00-07:00", "timeZone": "America/Los_Angeles"},
+                "calendar_id": "primary",
+            },
+            {
+                "event_id": "nick_event",
+                "summary": "Amazon SDE Intern (Fall) interview - Nick Meyer",
+                "start": {"dateTime": "2026-05-13T14:00:00-07:00", "timeZone": "America/Los_Angeles"},
+                "calendar_id": "primary",
+            },
+        ]
+
+        resolved = telegram_inbox.resolve_calendar_target_event(plan, None, history)
+
+        self.assertEqual(resolved["targetEventIds"], ["ryan_event", "nick_event"])
+        self.assertEqual(resolved["targetEventId"], "ryan_event")
+        self.assertFalse(telegram_inbox.calendar_target_missing(resolved))
+        self.assertEqual(resolved["targetResolution"]["mode"], "batch_summary_start_match")
+
+    def test_calendar_confirmation_accepts_yes_pls(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        self.assertIsNotNone(telegram_inbox.CALENDAR_CONFIRM_RE.match("Yes pls"))
+
     def test_x_oembed_payload_becomes_agent_friendly_metadata(self) -> None:
         import sys
 

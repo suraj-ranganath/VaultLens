@@ -78,7 +78,7 @@ CALENDAR_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 CALENDAR_CONFIRM_RE = re.compile(
-    r"^\s*(yes|yes please|yep|yeah|yup|confirm|confirmed|looks good|correct|save it|do it|add it|please save it)\s*[.!]?\s*$",
+    r"^\s*(yes|yes please|yes pls|yep|yeah|yup|confirm|confirmed|looks good|correct|save it|do it|add it|please save it)\s*[.!]?\s*$",
     re.IGNORECASE,
 )
 CALENDAR_CANCEL_RE = re.compile(r"^\s*(no|nope|cancel|stop|never mind|nevermind|discard|don't|do not)\s*[.!]?\s*$", re.IGNORECASE)
@@ -1557,16 +1557,40 @@ def recent_calendar_history(state: dict[str, Any], chat_id: int, limit: int = 8)
     return records[-limit:]
 
 
+def clean_scalar_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
 def resolve_calendar_target_event(
     plan: dict[str, Any],
     pending_request: dict[str, Any] | None,
     history: list[dict[str, Any]],
 ) -> dict[str, Any]:
     operation = str(plan.get("operation") or "none").strip()
-    if operation not in {"update", "delete"} or str(plan.get("targetEventId") or "").strip():
+    if operation not in {"update", "delete"} or str(plan.get("targetEventId") or "").strip() or clean_scalar_list(plan.get("targetEventIds")):
         return plan
 
     resolved = dict(plan)
+    if operation == "update":
+        events = [event for event in plan.get("events") or [] if isinstance(event, dict)]
+        if len(events) > 1:
+            matched_ids = match_calendar_events_to_history(events, history)
+            if len(matched_ids) == len(events):
+                resolved["targetEventIds"] = matched_ids
+                resolved["targetEventId"] = matched_ids[0]
+                resolved["targetCalendarId"] = str(resolved.get("targetCalendarId") or DEFAULT_CALENDAR_ID)
+                resolved["targetResolution"] = {
+                    "source": "recent_calendar_history",
+                    "matched_count": len(matched_ids),
+                    "mode": "batch_summary_start_match",
+                }
+                return resolved
+
     pending_plan = (pending_request or {}).get("plan") if isinstance(pending_request, dict) else {}
     if isinstance(pending_plan, dict):
         pending_event_id = str(pending_plan.get("targetEventId") or "").strip()
@@ -1594,7 +1618,61 @@ def resolve_calendar_target_event(
 
 
 def calendar_target_missing(plan: dict[str, Any]) -> bool:
-    return str(plan.get("operation") or "none").strip() in {"update", "delete"} and not str(plan.get("targetEventId") or "").strip()
+    return (
+        str(plan.get("operation") or "none").strip() in {"update", "delete"}
+        and not str(plan.get("targetEventId") or "").strip()
+        and not clean_scalar_list(plan.get("targetEventIds"))
+    )
+
+
+def match_calendar_events_to_history(events: list[dict[str, Any]], history: list[dict[str, Any]]) -> list[str]:
+    matched: list[str] = []
+    used: set[int] = set()
+    history_records = list(enumerate(history or []))
+    for event in events:
+        match = best_calendar_history_match(event, history_records, used)
+        if match is None:
+            return []
+        index, record = match
+        event_id = str(record.get("event_id") or "").strip()
+        if not event_id:
+            return []
+        used.add(index)
+        matched.append(event_id)
+    return matched
+
+
+def best_calendar_history_match(
+    event: dict[str, Any],
+    history_records: list[tuple[int, dict[str, Any]]],
+    used: set[int],
+) -> tuple[int, dict[str, Any]] | None:
+    event_title = normalize_calendar_match_text(event.get("summary"))
+    event_start = normalize_calendar_start(event.get("start"))
+    fallback: tuple[int, dict[str, Any]] | None = None
+    for index, record in reversed(history_records):
+        if index in used or not str(record.get("event_id") or "").strip():
+            continue
+        record_title = normalize_calendar_match_text(record.get("summary"))
+        record_start = normalize_calendar_start(record.get("start"))
+        title_matches = bool(event_title and record_title and (event_title == record_title or event_title in record_title or record_title in event_title))
+        start_matches = bool(event_start and record_start and event_start == record_start)
+        if title_matches and start_matches:
+            return index, record
+        if title_matches and fallback is None:
+            fallback = (index, record)
+    return fallback
+
+
+def normalize_calendar_match_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower()).strip()
+
+
+def normalize_calendar_start(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("dateTime") or value.get("date") or ""
+    text = str(value or "").strip()
+    return text[:16] if len(text) >= 16 else text
 
 
 def plan_calendar_target_clarification(plan: dict[str, Any], history: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1767,10 +1845,23 @@ def execute_calendar_plan(vault_root: Path, plan: dict[str, Any]) -> list[dict[s
         return results
 
     if operation == "update":
+        target_event_ids = clean_scalar_list(plan.get("targetEventIds"))
+        events = plan.get("events") or []
+        if target_event_ids:
+            if len(target_event_ids) != len(events):
+                raise RuntimeError("Calendar batch update target count does not match event count")
+            for event_id, event in zip(target_event_ids, events):
+                updated = run_gws(
+                    vault_root,
+                    ["calendar", "events", "patch", "--params", json.dumps({"calendarId": calendar_id, "eventId": event_id})],
+                    calendar_event_body(event),
+                )
+                results.append({"operation": "update", "calendar_id": calendar_id, "event_id": event_id, "event": updated, "input": event})
+            return results
+
         event_id = str(plan.get("targetEventId") or "").strip()
         if not event_id:
             raise RuntimeError("Calendar update requested without targetEventId")
-        events = plan.get("events") or []
         if not events:
             raise RuntimeError("Calendar update requested without event details")
         updated = run_gws(
