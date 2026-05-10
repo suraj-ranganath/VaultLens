@@ -1557,6 +1557,71 @@ def recent_calendar_history(state: dict[str, Any], chat_id: int, limit: int = 8)
     return records[-limit:]
 
 
+def resolve_calendar_target_event(
+    plan: dict[str, Any],
+    pending_request: dict[str, Any] | None,
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    operation = str(plan.get("operation") or "none").strip()
+    if operation not in {"update", "delete"} or str(plan.get("targetEventId") or "").strip():
+        return plan
+
+    resolved = dict(plan)
+    pending_plan = (pending_request or {}).get("plan") if isinstance(pending_request, dict) else {}
+    if isinstance(pending_plan, dict):
+        pending_event_id = str(pending_plan.get("targetEventId") or "").strip()
+        if pending_event_id:
+            resolved["targetEventId"] = pending_event_id
+            resolved["targetCalendarId"] = str(resolved.get("targetCalendarId") or pending_plan.get("targetCalendarId") or DEFAULT_CALENDAR_ID)
+            resolved["targetResolution"] = {"source": "pending_calendar_request"}
+            return resolved
+
+    for record in reversed(history or []):
+        event_id = str(record.get("event_id") or "").strip()
+        if not event_id:
+            continue
+        resolved["targetEventId"] = event_id
+        resolved["targetCalendarId"] = str(resolved.get("targetCalendarId") or record.get("calendar_id") or DEFAULT_CALENDAR_ID)
+        resolved["targetResolution"] = {
+            "source": "recent_calendar_history",
+            "summary": str(record.get("summary") or ""),
+            "start": record.get("start"),
+            "operation": record.get("operation"),
+        }
+        return resolved
+
+    return resolved
+
+
+def calendar_target_missing(plan: dict[str, Any]) -> bool:
+    return str(plan.get("operation") or "none").strip() in {"update", "delete"} and not str(plan.get("targetEventId") or "").strip()
+
+
+def plan_calendar_target_clarification(plan: dict[str, Any], history: list[dict[str, Any]]) -> dict[str, Any]:
+    clarified = dict(plan)
+    operation = str(plan.get("operation") or "update").strip()
+    choices = []
+    for record in reversed(history or []):
+        event_id = str(record.get("event_id") or "").strip()
+        if not event_id:
+            continue
+        summary = str(record.get("summary") or "Untitled event").strip()
+        start = record.get("start") or ""
+        choices.append(f"- {summary} ({start})")
+        if len(choices) >= 4:
+            break
+    if choices:
+        question = f"Which event should I {operation}? Recent events I can target:\n" + "\n".join(choices)
+    else:
+        question = f"Which calendar event should I {operation}? I do not have a saved event ID for the previous event."
+    clarified["needsClarification"] = True
+    clarified["clarificationQuestion"] = question
+    clarified["needsConfirmation"] = False
+    clarified["userConfirmed"] = False
+    clarified["confidence"] = "low"
+    return clarified
+
+
 def invoke_calendar_agent(
     vault_root: Path,
     openai_api_key: str,
@@ -2270,6 +2335,7 @@ def handle_calendar_flow(
     pending_by_chat = state.setdefault("calendar_pending", {})
     pending_request = pending_by_chat.get(str(chat_id))
     raw_text = str(normalized_message.get("raw_text") or "").strip()
+    calendar_history = recent_calendar_history(state, chat_id)
     calendar_result: dict[str, Any] = {}
     if pending_request and CALENDAR_CANCEL_RE.match(raw_text):
         pending_by_chat.pop(str(chat_id), None)
@@ -2301,13 +2367,17 @@ def handle_calendar_flow(
             openai_api_key=openai_api_key,
             message=normalized_message,
             pending_request=pending_request,
-            history=recent_calendar_history(state, chat_id),
+            history=calendar_history,
             model=agent_model,
             reasoning_effort=agent_reasoning_effort,
         )
         plan = calendar_result.get("plan") or {}
     if not plan.get("calendarIntent") and not pending_request:
         return None
+
+    plan = resolve_calendar_target_event(plan, pending_request, calendar_history)
+    if calendar_target_missing(plan):
+        plan = plan_calendar_target_clarification(plan, calendar_history)
 
     action_log: dict[str, Any] = {
         "logged_at": datetime.now().isoformat(),
@@ -2355,6 +2425,19 @@ def handle_calendar_flow(
     try:
         results = execute_calendar_plan(vault_root, plan)
     except Exception as exc:
+        if "targetEventId" in str(exc):
+            plan = plan_calendar_target_clarification(plan, calendar_history)
+            pending_by_chat[str(chat_id)] = {
+                "created_at": datetime.now().isoformat(),
+                "source_message": normalized_message,
+                "plan": plan,
+                "last_error": f"{type(exc).__name__}: {exc}",
+            }
+            telegram_send_message(token, chat_id=chat_id, text=plan["clarificationQuestion"], reply_to_message_id=normalized_message["message_id"])
+            action_log["status"] = "clarification_requested"
+            action_log["error"] = f"{type(exc).__name__}: {exc}"
+            append_jsonl(calendar_actions_path(inbox_dir, session_name), [action_log])
+            return {"status": "clarification_requested", "operation": operation, "answered": True, "acked": False}
         pending_by_chat[str(chat_id)] = {
             "created_at": datetime.now().isoformat(),
             "source_message": normalized_message,

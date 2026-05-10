@@ -477,6 +477,71 @@ print(json.dumps({
             self.assertIn("Research lab meeting", payload["text"])
             self.assertNotIn("Declined hold", json.dumps(payload["candidate_calendar_events"]))
 
+    def test_calendar_update_target_resolves_from_recent_history(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        plan = {
+            "calendarIntent": True,
+            "operation": "update",
+            "targetEventId": None,
+            "targetCalendarId": "",
+            "needsClarification": False,
+            "needsConfirmation": False,
+            "userConfirmed": True,
+            "events": [{"summary": "Updated event"}],
+        }
+        history = [
+            {
+                "chat_id": 123,
+                "operation": "create",
+                "calendar_id": "primary",
+                "event_id": "evt_older",
+                "summary": "Older event",
+                "start": "2026-05-08T10:00:00-07:00",
+            },
+            {
+                "chat_id": 123,
+                "operation": "create",
+                "calendar_id": "primary",
+                "event_id": "evt_latest",
+                "summary": "Latest event",
+                "start": "2026-05-09T10:00:00-07:00",
+            },
+        ]
+
+        resolved = telegram_inbox.resolve_calendar_target_event(plan, None, history)
+
+        self.assertEqual(resolved["targetEventId"], "evt_latest")
+        self.assertEqual(resolved["targetCalendarId"], "primary")
+        self.assertEqual(resolved["targetResolution"]["source"], "recent_calendar_history")
+        self.assertEqual(resolved["targetResolution"]["summary"], "Latest event")
+
+    def test_calendar_update_without_history_asks_clarification(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        plan = {
+            "calendarIntent": True,
+            "operation": "update",
+            "targetEventId": "",
+            "targetCalendarId": "primary",
+            "needsClarification": False,
+            "needsConfirmation": False,
+            "userConfirmed": True,
+        }
+
+        clarified = telegram_inbox.plan_calendar_target_clarification(plan, [])
+
+        self.assertTrue(clarified["needsClarification"])
+        self.assertFalse(clarified["userConfirmed"])
+        self.assertIn("Which calendar event should I update?", clarified["clarificationQuestion"])
+        self.assertEqual(clarified["confidence"], "low")
+
     def test_x_oembed_payload_becomes_agent_friendly_metadata(self) -> None:
         import sys
 

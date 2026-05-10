@@ -55,6 +55,7 @@ Critical rules:
 - Required details for all-day events: title, date or date range.
 - For recurring classes or batches, use one event with an RRULE when appropriate, otherwise emit multiple concrete events.
 - For updates like "modify the previous event", use pendingCalendarRequest first, then recentCalendarHistory.
+- For update/delete operations, copy the exact event_id from pendingCalendarRequest or recentCalendarHistory into targetEventId. If you cannot identify a target event ID, set needsClarification true instead of marking the plan ready.
 - Use America/Los_Angeles as the default timezone unless the message clearly says otherwise.
 - Event descriptions should include relevant source context and note that the event was created from Telegram.
 - Return JSON only.
