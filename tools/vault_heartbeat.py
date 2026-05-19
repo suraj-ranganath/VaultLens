@@ -489,13 +489,24 @@ def normalize_gws_credentials_json(raw: str) -> str:
             except json.JSONDecodeError:
                 break
             if isinstance(parsed, dict):
-                return json.dumps(parsed, separators=(",", ":"))
+                return json.dumps(normalize_gws_credentials_payload(parsed), separators=(",", ":"))
             if isinstance(parsed, str):
                 current = parsed.strip()
                 continue
             break
 
     raise RuntimeError("GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON could not be parsed as credentials JSON")
+
+
+def normalize_gws_credentials_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    private_key = normalized.get("private_key")
+    if isinstance(private_key, str):
+        key = private_key.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\r\n", "\n")
+        if "-----BEGIN" in key and not key.endswith("\n"):
+            key += "\n"
+        normalized["private_key"] = key
+    return normalized
 
 
 def run_gws(vault_root: Path, args: list[str]) -> dict[str, Any]:

@@ -477,6 +477,29 @@ print(json.dumps({
             self.assertIn("Research lab meeting", payload["text"])
             self.assertNotIn("Declined hold", json.dumps(payload["candidate_calendar_events"]))
 
+    def test_gws_credentials_normalize_double_escaped_service_account_key(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+        import vault_heartbeat  # type: ignore
+
+        raw = json.dumps(
+            {
+                "type": "service_account",
+                "client_email": "vault-calendar-worker@example.iam.gserviceaccount.com",
+                "private_key": "-----BEGIN PRIVATE KEY-----\\nabc123\\n-----END PRIVATE KEY-----\\n",
+            }
+        )
+
+        for module in [telegram_inbox, vault_heartbeat]:
+            normalized = json.loads(module.normalize_gws_credentials_json(raw))
+            self.assertEqual(
+                normalized["private_key"],
+                "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\n",
+            )
+            self.assertNotIn("\\n", normalized["private_key"])
+
     def test_calendar_update_target_resolves_from_recent_history(self) -> None:
         import sys
 
