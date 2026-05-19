@@ -68,7 +68,7 @@ AGENT_EVENTS_FILE_NAME = "agent-events.jsonl"
 DEFAULT_AGENT_MODEL = "gpt-5.4"
 ATTACHMENT_ANALYSIS_MAX_BYTES = 8 * 1024 * 1024
 ATTACHMENT_ANALYSIS_TIMEOUT_SECONDS = 90
-DEFAULT_CALENDAR_ID = "primary"
+DEFAULT_CALENDAR_ID = os.environ.get("VAULT_CALENDAR_ID") or os.environ.get("VAULT_BRIEF_CALENDAR_ID") or "primary"
 DEFAULT_TIMEZONE = "America/Los_Angeles"
 URL_RE = re.compile(r"https?://\S+")
 CALENDAR_INTENT_RE = re.compile(
@@ -1718,6 +1718,7 @@ def invoke_calendar_agent(
         "pendingCalendarRequest": pending_request,
         "recentCalendarHistory": history,
         "timezone": os.environ.get("VAULT_DEFAULT_TIMEZONE", DEFAULT_TIMEZONE),
+        "targetCalendarId": DEFAULT_CALENDAR_ID,
         "currentDate": CURRENT_DATE.isoformat(),
     }
     env = os.environ.copy()

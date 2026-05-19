@@ -59,7 +59,21 @@ gws auth setup
 gws auth login --scopes https://www.googleapis.com/auth/calendar
 ```
 
-Cloud setup:
+Cloud setup, preferred durable path:
+
+1. Create a service account in the same Google Cloud project.
+2. Create a JSON key for that service account.
+3. Share the target Google Calendar with the service account email as `Make changes to events`.
+4. Put the service-account JSON and real target calendar ID into `.env.local`:
+
+```bash
+GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON='{"type":"service_account", "...":"..."}'
+VAULT_CALENDAR_ID='surajranganath@gmail.com'
+```
+
+This avoids user OAuth refresh-token expiry in Lambda. For service accounts, do not use `primary` unless you intentionally want the service account's own calendar.
+
+Cloud setup, OAuth fallback:
 
 ```bash
 gws auth export --unmasked > /tmp/gws-credentials.json
@@ -69,9 +83,10 @@ Then put the one-line JSON value into `.env.local`:
 
 ```bash
 GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON='{"...":"..."}'
+VAULT_CALENDAR_ID='surajranganath@gmail.com'
 ```
 
-The deploy script passes this as a no-echo CloudFormation parameter. The Lambda writes it to `/tmp/my-vault/.runtime/google-workspace-credentials.json` at runtime, points `gws` at that file, and forces `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` so the cloud worker does not depend on an OS keyring. Do not commit this value.
+The deploy script passes credentials as a no-echo CloudFormation parameter. The Lambda writes them to `/tmp/my-vault/.runtime/google-workspace-credentials.json` at runtime, points `gws` at that file, and forces `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` so the cloud worker does not depend on an OS keyring. Do not commit this value.
 
 ## Deploy
 
@@ -124,7 +139,7 @@ The schedule defaults to `cron(0 8 * * ? *)` in `America/Los_Angeles`. Override 
 
 The heartbeat path reuses the processor function and runs `tools/vault_heartbeat.py`. That script cheaply builds a candidate pack from deadlines, reminders, jobs, opportunities, today's Google Calendar events, recent saves, profile context, dashboards, and hot context, then calls `tools/vault_morning_brief_agent.mjs` to choose and write the actual brief. The deterministic layer is only a shortlist; the agent decides what is relevant and personalized enough to send. Web search is disabled for the scheduled brief by default to keep it cheap and grounded in the canonical vault.
 
-Calendar events are fetched through the same `gws` credentials used by Telegram calendar actions. The default calendar is `primary`; override with `VAULT_BRIEF_CALENDAR_ID`. Set `VAULT_BRIEF_INCLUDE_CALENDAR=false` to disable calendar fetching if credentials are unavailable.
+Calendar events are fetched through the same `gws` credentials used by Telegram calendar actions. The default calendar is `VAULT_CALENDAR_ID`, falling back to `VAULT_BRIEF_CALENDAR_ID`, then `primary`. Set `VAULT_BRIEF_INCLUDE_CALENDAR=false` to disable calendar fetching if credentials are unavailable.
 
 ## Local Webhook Test
 

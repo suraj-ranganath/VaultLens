@@ -24,6 +24,10 @@ Parameters:
     NoEcho: true
     Default: ""
     Description: Optional exported Google Workspace CLI credentials JSON used by calendar actions.
+  VaultCalendarId:
+    Type: String
+    Default: primary
+    Description: Google Calendar ID used by Telegram calendar actions and morning briefs.
   VaultAgentModel:
     Type: String
     Default: gpt-5.4
@@ -80,6 +84,7 @@ Globals:
         TELEGRAM_ALLOWED_CHAT_IDS: !Ref TelegramAllowedChatIds
         TELEGRAM_WEBHOOK_SECRET: !Ref TelegramWebhookSecret
         GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON: !Ref GoogleWorkspaceCliCredentialsJson
+        VAULT_CALENDAR_ID: !Ref VaultCalendarId
         VAULT_AGENT_MODEL: !Ref VaultAgentModel
         VAULT_AGENT_REASONING_EFFORT: !Ref VaultAgentReasoningEffort
         VAULT_STATE_BUCKET: !Ref VaultStateBucket

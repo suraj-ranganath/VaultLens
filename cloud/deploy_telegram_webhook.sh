@@ -23,6 +23,7 @@ HEARTBEAT_ENABLED="${HEARTBEAT_ENABLED:-false}"
 TELEGRAM_HEARTBEAT_CHAT_ID="${TELEGRAM_HEARTBEAT_CHAT_ID:-}"
 HEARTBEAT_SCHEDULE="${HEARTBEAT_SCHEDULE:-cron(0 8 * * ? *)}"
 HEARTBEAT_SCHEDULE_TIMEZONE="${HEARTBEAT_SCHEDULE_TIMEZONE:-${HEARTBEAT_TIMEZONE:-America/Los_Angeles}}"
+VAULT_CALENDAR_ID="${VAULT_CALENDAR_ID:-${VAULT_BRIEF_CALENDAR_ID:-primary}}"
 AWS_ACCOUNT_ID="$(
   aws sts get-caller-identity \
     --query Account \
@@ -54,6 +55,7 @@ export HEARTBEAT_ENABLED
 export TELEGRAM_HEARTBEAT_CHAT_ID
 export HEARTBEAT_SCHEDULE
 export HEARTBEAT_SCHEDULE_TIMEZONE
+export VAULT_CALENDAR_ID
 export STACK_NAME
 export AWS_REGION
 export ECR_URI
@@ -146,6 +148,7 @@ overrides = {
     "HeartbeatEnabled": os.environ["HEARTBEAT_ENABLED"],
     "HeartbeatSchedule": os.environ["HEARTBEAT_SCHEDULE"],
     "HeartbeatScheduleTimezone": os.environ["HEARTBEAT_SCHEDULE_TIMEZONE"],
+    "VaultCalendarId": os.environ["VAULT_CALENDAR_ID"],
 }
 allowed = os.environ.get("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
 if allowed:

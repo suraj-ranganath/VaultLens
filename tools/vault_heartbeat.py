@@ -74,7 +74,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--today", default=os.environ.get("VAULT_BRIEF_TODAY", ""))
     parser.add_argument("--max-actions", type=int, default=int(os.environ.get("VAULT_BRIEF_MAX_ACTIONS", "5")))
-    parser.add_argument("--calendar-id", default=os.environ.get("VAULT_BRIEF_CALENDAR_ID", "primary"))
+    parser.add_argument("--calendar-id", default=os.environ.get("VAULT_CALENDAR_ID") or os.environ.get("VAULT_BRIEF_CALENDAR_ID", "primary"))
     args = parser.parse_args()
 
     vault_root = args.vault_root.resolve()

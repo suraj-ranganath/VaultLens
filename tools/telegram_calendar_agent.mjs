@@ -40,7 +40,7 @@ function extractJson(text) {
 }
 
 function buildPrompt(payload) {
-  const { message, pendingCalendarRequest = null, recentCalendarHistory = [], timezone, currentDate } = payload;
+  const { message, pendingCalendarRequest = null, recentCalendarHistory = [], timezone, currentDate, targetCalendarId = "primary" } = payload;
   return `
 You are a careful calendar planning agent for a personal Telegram assistant.
 
@@ -56,12 +56,14 @@ Critical rules:
 - For recurring classes or batches, use one event with an RRULE when appropriate, otherwise emit multiple concrete events.
 - For updates like "modify the previous event", use pendingCalendarRequest first, then recentCalendarHistory.
 - For update/delete operations, copy the exact event_id from pendingCalendarRequest or recentCalendarHistory into targetEventId. If you cannot identify a target event ID, set needsClarification true instead of marking the plan ready.
+- Always set targetCalendarId to the default target calendar unless the user explicitly names another calendar.
 - Use America/Los_Angeles as the default timezone unless the message clearly says otherwise.
 - Event descriptions should include relevant source context and note that the event was created from Telegram.
 - Return JSON only.
 
 Current date: ${currentDate}
 Default timezone: ${timezone}
+Default target calendar ID: ${targetCalendarId}
 
 Pending calendar request:
 ${JSON.stringify(pendingCalendarRequest, null, 2)}
