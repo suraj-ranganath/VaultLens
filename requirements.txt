@@ -1,4 +1,4 @@
 beautifulsoup4>=4.14.3,<5
 boto3>=1.43.15,<2
 PyYAML>=6,<7
-requests>=2.31,<3
+requests>=2.34.2,<3
