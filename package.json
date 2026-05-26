@@ -37,12 +37,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/suraj-ranganath/my-vault.git"
+    "url": "git+https://github.com/suraj-ranganath/VaultLens.git"
   },
   "bugs": {
-    "url": "https://github.com/suraj-ranganath/my-vault/issues"
+    "url": "https://github.com/suraj-ranganath/VaultLens/issues"
   },
-  "homepage": "https://github.com/suraj-ranganath/my-vault#readme",
+  "homepage": "https://github.com/suraj-ranganath/VaultLens#readme",
   "type": "commonjs",
   "dependencies": {
     "@googleworkspace/cli": "^0.22.5",
