@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 
 
+def js_runtime() -> str:
+    return os.environ.get("VAULT_JS_RUNTIME", "bun")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a reviewable vault dreaming pass.")
     parser.add_argument("--vault-root", type=Path, default=Path.cwd())
@@ -35,7 +39,7 @@ def run_dream(vault_root: Path, *, mock_json: str = "") -> dict[str, Any]:
         "reasoningEffort": os.environ.get("VAULT_DREAM_REASONING_EFFORT") or "low",
     }
     proc = subprocess.run(
-        ["node", str(script)],
+        [js_runtime(), str(script)],
         input=json.dumps(payload),
         text=True,
         capture_output=True,

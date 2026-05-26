@@ -1,10 +1,15 @@
+const { existsSync } = require("fs");
+const path = require("path");
 const { spawnSync } = require("child_process");
 
 exports.handler = async function handler(event) {
+  const taskRoot = process.env.LAMBDA_TASK_ROOT || "/var/task";
+  const venvPython = path.join(taskRoot, ".venv", "bin", "python");
+  const python = process.env.VAULT_PYTHON || (existsSync(venvPython) ? venvPython : "python3");
   const env = {
     ...process.env,
     PYTHONPATH: [
-      process.env.LAMBDA_TASK_ROOT || "/var/task",
+      taskRoot,
       process.env.PYTHONPATH || "",
     ]
       .filter(Boolean)
@@ -19,8 +24,8 @@ exports.handler = async function handler(event) {
       .filter(Boolean)
       .join(":"),
   };
-  const child = spawnSync("python3", ["cloud/lambda_bridge.py"], {
-    cwd: process.env.LAMBDA_TASK_ROOT || "/var/task",
+  const child = spawnSync(python, ["cloud/lambda_bridge.py"], {
+    cwd: taskRoot,
     env,
     input: JSON.stringify({ event }),
     encoding: "utf8",

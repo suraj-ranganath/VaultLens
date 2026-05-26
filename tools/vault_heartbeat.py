@@ -34,6 +34,10 @@ DEFAULT_TIMEZONE_LABEL = "America/Los_Angeles"
 DISPLAY_TITLE_LIMIT = 120
 
 
+def js_runtime() -> str:
+    return os.environ.get("VAULT_JS_RUNTIME", "bun")
+
+
 @dataclass
 class Note:
     path: Path
@@ -574,7 +578,7 @@ def run_morning_brief_agent(
     }
     env = os.environ.copy()
     result = subprocess.run(
-        ["node", str(script)],
+        [js_runtime(), str(script)],
         input=json.dumps(payload),
         text=True,
         capture_output=True,

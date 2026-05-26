@@ -15,10 +15,10 @@ Thanks for helping improve VaultLens. This project is a personal-knowledge syste
 ```bash
 git clone https://github.com/suraj-ranganath/VaultLens.git
 cd VaultLens
-npm ci
-python3 -m pip install -r requirements.txt
+bun install
+uv sync
 cp .env.example .env.local
-npm run vault:setup
+bun run vault:setup
 ```
 
 Only fill `.env.local` with real credentials on your own machine. It is ignored by Git.
@@ -26,11 +26,11 @@ Only fill `.env.local` with real credentials on your own machine. It is ignored 
 ## Useful Commands
 
 ```bash
-npm test
-npm run vault:compile
-npm run rebuild:dashboards
-npm run vault:web
-npm run telegram:webhook:test < /path/to/redacted-update.json
+bun run test
+bun run vault:compile
+bun run rebuild:dashboards
+bun run vault:web
+bun run telegram:webhook:test < /path/to/redacted-update.json
 ```
 
 For JavaScript entrypoints touched by your change, run `node --check` before opening a PR.
