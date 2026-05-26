@@ -63,9 +63,10 @@ Your personal vault data should never be committed.
 ## Quick Start
 
 ```bash
-git clone https://github.com/suraj-ranganath/my-vault.git
-cd my-vault
+git clone https://github.com/suraj-ranganath/VaultLens.git
+cd VaultLens
 npm ci
+python3 -m pip install -r requirements.txt
 cp .env.example .env.local
 npm run vault:setup
 npm run vault:compile
