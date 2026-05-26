@@ -51,9 +51,10 @@ Your personal vault data should never be committed.
 
 ## Requirements
 
-- Node.js 22 or newer
-- Python 3.10 or newer
-- npm
+- Bun 1.3 or newer
+- uv 0.9 or newer
+- Optional: Node.js 22 or newer for direct `node --check` syntax validation
+- Optional: Python 3.10 or newer if you prefer a system Python instead of uv-managed Python
 - Optional: Obsidian for browsing the markdown vault
 - Optional: Telegram bot token from BotFather
 - Optional: AWS CLI, AWS SAM CLI, and Docker for always-on cloud ingestion
@@ -65,12 +66,12 @@ Your personal vault data should never be committed.
 ```bash
 git clone https://github.com/suraj-ranganath/VaultLens.git
 cd VaultLens
-npm ci
-python3 -m pip install -r requirements.txt
+bun install
+uv sync
 cp .env.example .env.local
-npm run vault:setup
-npm run vault:compile
-npm run vault:web
+bun run vault:setup
+bun run vault:compile
+bun run vault:web
 ```
 
 Then open `http://localhost:4318`.
@@ -116,9 +117,9 @@ Do not commit `.env.local`.
 ### Build Or Refresh The Vault Index
 
 ```bash
-npm run rebuild:dashboards
-npm run vault:compile
-npm run vault:health
+bun run rebuild:dashboards
+bun run vault:compile
+bun run vault:health
 ```
 
 This refreshes machine-facing cache files, Obsidian dashboards, task ledgers, source indexes, and health reports.
@@ -126,7 +127,7 @@ This refreshes machine-facing cache files, Obsidian dashboards, task ledgers, so
 ### Run Local Web Chat
 
 ```bash
-npm run vault:web
+bun run vault:web
 ```
 
 The web UI has two main surfaces:
@@ -139,22 +140,22 @@ The web UI has two main surfaces:
 Place exports under `imports/chat-exports/` or `raw/chat-exports/`, then run the relevant importer:
 
 ```bash
-python3 tools/ingest_chat_export.py --help
-python3 tools/ingest_whatsapp_inbox.py --vault-root .
+uv run python tools/ingest_chat_export.py --help
+uv run python tools/ingest_whatsapp_inbox.py --vault-root .
 ```
 
 After ingest:
 
 ```bash
-npm run rebuild:dashboards
-npm run vault:compile
+bun run rebuild:dashboards
+bun run vault:compile
 ```
 
 ### Ingest From Telegram Locally
 
 ```bash
-npm run telegram:sync
-npm run telegram:run
+bun run telegram:sync
+bun run telegram:run
 ```
 
 Telegram messages can include plain notes, links, screenshots, images with captions, job posts, reminders, questions, and calendar requests. The agent decides how to route each message and writes durable context back into the vault.
@@ -169,8 +170,8 @@ Useful Telegram commands:
 ### Deploy Always-On Telegram Ingestion To AWS
 
 ```bash
-npm run cloud:deploy
-npm run cloud:sync-state
+bun run cloud:deploy
+bun run cloud:sync-state
 ```
 
 See [cloud/README.md](cloud/README.md) for the full AWS setup. The deployment uses:
@@ -184,7 +185,7 @@ See [cloud/README.md](cloud/README.md) for the full AWS setup. The deployment us
 ### Enrich Weak Links Locally
 
 ```bash
-npm run enrich:browser:recent
+bun run enrich:browser:recent
 ```
 
 This uses Playwright for recent links that are weak, dynamic, blocked, or social-post-heavy. Browser artifacts should be treated as source evidence and stored under ignored vault state, not Git.
@@ -192,9 +193,9 @@ This uses Playwright for recent links that are weak, dynamic, blocked, or social
 ### Search From The CLI
 
 ```bash
-npm run vault:search -- "agent memory systems"
-npm run x:fetch -- https://x.com/example/status/123
-npm run vault:heartbeat -- --dry-run
+bun run vault:search -- "agent memory systems"
+bun run x:fetch -- https://x.com/example/status/123
+bun run vault:heartbeat -- --dry-run
 ```
 
 ## Architecture
@@ -230,8 +231,8 @@ Design principles:
 ## Testing
 
 ```bash
-npm test
-python3 -m unittest tools.test_vault_infra
+bun run test
+uv run python -m unittest tools.test_vault_infra
 node --check tools/telegram_codex_agent.mjs
 node --check tools/vault_query_server.mjs
 ```

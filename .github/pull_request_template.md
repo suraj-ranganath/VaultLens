@@ -4,7 +4,7 @@ Describe what changed and why.
 
 ## Validation
 
-- [ ] `npm test`
+- [ ] `bun run test`
 - [ ] Relevant `node --check ...` commands
 - [ ] Manual workflow tested, if applicable
 

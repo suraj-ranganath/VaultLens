@@ -43,13 +43,30 @@ CODE_PATHS = [
     "bin",
     "config",
     "hooks",
+    ".venv",
     "node_modules",
-    "package-lock.json",
+    "bun.lock",
     "package.json",
+    "pyproject.toml",
     "templates",
     "tools",
+    "uv.lock",
 ]
 STATE_BUNDLE_NAME = "vault-state.tar.gz"
+
+
+def python_executable(root: Path = WORK_ROOT) -> str:
+    candidate = root / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.exists() else "python3"
+
+
+def prepend_venv_path(env: dict[str, str], root: Path = WORK_ROOT) -> None:
+    bin_dir = root / ".venv" / "bin"
+    current = env.get("PATH") or os.environ.get("PATH", "")
+    if bin_dir.exists():
+        env["PATH"] = f"{bin_dir}{os.pathsep}{current}" if current else str(bin_dir)
+    else:
+        env["PATH"] = current
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -392,17 +409,19 @@ def iter_state_paths() -> list[Path]:
 def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[str, Any]:
     home_dir = WORK_ROOT / ".home"
     codex_home = WORK_ROOT / ".codex"
-    npm_cache = WORK_ROOT / ".npm"
-    for directory in (home_dir, codex_home, npm_cache):
+    package_cache = WORK_ROOT / ".bun-cache"
+    uv_cache = WORK_ROOT / ".uv-cache"
+    for directory in (home_dir, codex_home, package_cache, uv_cache):
         directory.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
     env.setdefault("OPENAI_API_KEY", required_env("OPENAI_API_KEY"))
     env.setdefault("TELEGRAM_BOT_TOKEN", required_env("TELEGRAM_BOT_TOKEN"))
-    env.setdefault("PATH", os.environ.get("PATH", ""))
+    prepend_venv_path(env)
     env["HOME"] = str(home_dir)
     env["CODEX_HOME"] = str(codex_home)
-    env["NPM_CONFIG_CACHE"] = str(npm_cache)
+    env["BUN_INSTALL_CACHE_DIR"] = str(package_cache)
+    env["UV_CACHE_DIR"] = str(uv_cache)
     env["XDG_CACHE_HOME"] = str(WORK_ROOT / ".cache")
     env["XDG_CONFIG_HOME"] = str(WORK_ROOT / ".config")
     env["XDG_DATA_HOME"] = str(WORK_ROOT / ".local" / "share")
@@ -410,7 +429,7 @@ def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[
     env["VAULT_ROOT"] = str(WORK_ROOT)
 
     command = [
-        "python3",
+        python_executable(),
         str(WORK_ROOT / "tools" / "telegram_inbox.py"),
         "webhook",
         "--vault-root",
@@ -444,13 +463,17 @@ def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[
 
 def run_heartbeat(*, dry_run: bool = False) -> dict[str, Any]:
     home_dir = WORK_ROOT / ".home"
-    home_dir.mkdir(parents=True, exist_ok=True)
+    uv_cache = WORK_ROOT / ".uv-cache"
+    for directory in (home_dir, uv_cache):
+        directory.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.setdefault("TELEGRAM_BOT_TOKEN", required_env("TELEGRAM_BOT_TOKEN"))
     env["HOME"] = str(home_dir)
     env["VAULT_ROOT"] = str(WORK_ROOT)
+    env["UV_CACHE_DIR"] = str(uv_cache)
+    prepend_venv_path(env)
     command = [
-        "python3",
+        python_executable(),
         str(WORK_ROOT / "tools" / "vault_heartbeat.py"),
         "--vault-root",
         str(WORK_ROOT),

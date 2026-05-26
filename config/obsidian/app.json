@@ -11,6 +11,8 @@
     "GEMINI.md",
     "WIKI.md",
     "package.json",
-    "package-lock.json"
+    "bun.lock",
+    "pyproject.toml",
+    "uv.lock"
   ]
 }

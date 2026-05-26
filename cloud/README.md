@@ -51,7 +51,7 @@ HEARTBEAT_ENABLED=false
 
 ## Google Calendar Actions
 
-Calendar writes use the Google Workspace CLI (`gws`) bundled through npm. The Telegram worker always asks for clarification or confirmation before calling `gws`.
+Calendar writes use the Google Workspace CLI (`gws`) installed through Bun from `package.json`. The Telegram worker always asks for clarification or confirmation before calling `gws`.
 
 Local setup:
 
@@ -92,7 +92,7 @@ The deploy script passes credentials as a no-echo CloudFormation parameter. The 
 ## Deploy
 
 ```bash
-npm run cloud:deploy
+bun run cloud:deploy
 ```
 
 The deploy script:
@@ -109,7 +109,7 @@ The cloud worker cannot see local ignored files unless they are synced to the st
 Run this after the first deploy and whenever you want to push local-only vault data up to the cloud worker:
 
 ```bash
-npm run cloud:sync-state
+bun run cloud:sync-state
 ```
 
 The script uploads one compressed `state/vault-state.tar.gz` bundle containing:
@@ -133,7 +133,7 @@ The script uploads one compressed `state/vault-state.tar.gz` bundle containing:
 Daily morning briefs are off by default to keep costs down. To enable the focused 8am Pacific Telegram brief, deploy with:
 
 ```bash
-HEARTBEAT_ENABLED=true TELEGRAM_HEARTBEAT_CHAT_ID=123456789 npm run cloud:deploy
+HEARTBEAT_ENABLED=true TELEGRAM_HEARTBEAT_CHAT_ID=123456789 bun run cloud:deploy
 ```
 
 The schedule defaults to `cron(0 8 * * ? *)` in `America/Los_Angeles`. Override with `HEARTBEAT_SCHEDULE` and `HEARTBEAT_SCHEDULE_TIMEZONE` if needed.
@@ -147,7 +147,7 @@ Calendar events are fetched through the same `gws` credentials used by Telegram 
 You can test the non-polling path locally by piping a Telegram update JSON into:
 
 ```bash
-npm run telegram:webhook:test < /tmp/telegram-update.json
+bun run telegram:webhook:test < /tmp/telegram-update.json
 ```
 
 ## Operational Notes

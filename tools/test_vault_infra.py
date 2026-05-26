@@ -197,7 +197,7 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
             env["OPENAI_API_KEY"] = "test-key"
             env["VAULT_QUERY_CONTEXT_ONLY"] = "1"
             proc = subprocess.run(
-                ["node", str(REPO_ROOT / "tools" / "telegram_vault_query.mjs")],
+                ["bun", str(REPO_ROOT / "tools" / "telegram_vault_query.mjs")],
                 input=json.dumps(
                     {
                         "workingDirectory": str(root),

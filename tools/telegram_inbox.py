@@ -107,6 +107,10 @@ COMMAND_CALLBACKS_FILE = Path(".vault") / "telegram-command-center" / "callbacks
 COMMAND_ITEM_LIMIT = 5
 
 
+def js_runtime() -> str:
+    return os.environ.get("VAULT_JS_RUNTIME", "bun")
+
+
 def read_json(path: Path, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
     if not path.exists():
         return fallback or {}
@@ -1724,7 +1728,7 @@ def invoke_calendar_agent(
     env = os.environ.copy()
     env["OPENAI_API_KEY"] = openai_api_key
     result = subprocess.run(
-        ["node", str(script_path)],
+        [js_runtime(), str(script_path)],
         input=json.dumps(payload),
         text=True,
         capture_output=True,
@@ -1975,7 +1979,7 @@ def invoke_vault_query_agent(
     env = os.environ.copy()
     env["OPENAI_API_KEY"] = openai_api_key
     result = subprocess.run(
-        ["node", str(script_path)],
+        [js_runtime(), str(script_path)],
         input=json.dumps(payload),
         text=True,
         capture_output=True,
@@ -2190,7 +2194,7 @@ def invoke_codex_agent(
     env = os.environ.copy()
     env["OPENAI_API_KEY"] = openai_api_key
     result = subprocess.run(
-        ["node", str(script_path)],
+        [js_runtime(), str(script_path)],
         input=json.dumps(payload),
         text=True,
         capture_output=True,

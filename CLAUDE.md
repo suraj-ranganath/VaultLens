@@ -20,7 +20,7 @@ This repository is a local-first, agent-maintained markdown knowledge vault. Rea
 ## Key Local Commands
 
 ```bash
-npm run rebuild:dashboards
-npm run enrich:browser:recent
-python3 tools/vault_health.py
+bun run rebuild:dashboards
+bun run enrich:browser:recent
+bun run vault:health
 ```
