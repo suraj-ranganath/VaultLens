@@ -16,6 +16,7 @@ Thanks for helping improve VaultLens. This project is a personal-knowledge syste
 git clone https://github.com/suraj-ranganath/VaultLens.git
 cd VaultLens
 npm ci
+python3 -m pip install -r requirements.txt
 cp .env.example .env.local
 npm run vault:setup
 ```
