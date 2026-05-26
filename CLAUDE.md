@@ -1,6 +1,6 @@
-# My Vault
+# VaultLens
 
-This repository is a local-first personal knowledge vault. Read `AGENTS.md` for the full operating contract and `WIKI.md` for the architectural reference.
+This repository is a local-first, agent-maintained markdown knowledge vault. Read `AGENTS.md` for the full operating contract and `WIKI.md` for the architectural reference.
 
 ## Session Startup
 

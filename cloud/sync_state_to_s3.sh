@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-STACK_NAME="${STACK_NAME:-my-vault-telegram}"
+STACK_NAME="${STACK_NAME:-vault-lens-telegram}"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
 
 BUCKET="$(
@@ -20,7 +20,7 @@ if [ -z "$BUCKET" ] || [ "$BUCKET" = "None" ]; then
   exit 1
 fi
 
-ARCHIVE="$(mktemp -t my-vault-state.XXXXXX.tar.gz)"
+ARCHIVE="$(mktemp -t vault-lens-state.XXXXXX.tar.gz)"
 cleanup() {
   rm -f "$ARCHIVE"
 }

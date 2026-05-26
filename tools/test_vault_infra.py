@@ -411,10 +411,10 @@ print(json.dumps({
             "start": {"dateTime": "2026-05-08T09:00:00-07:00", "timeZone": "America/Los_Angeles"},
             "end": {"dateTime": "2026-05-08T10:00:00-07:00", "timeZone": "America/Los_Angeles"},
             "attendees": [
-                {"email": "suraj@example.com", "self": True, "responseStatus": "accepted"},
+                {"email": "user@example.com", "self": True, "responseStatus": "accepted"},
                 {"email": "lab@example.com", "responseStatus": "accepted"}
             ],
-            "creator": {"email": "suraj@example.com"},
+            "creator": {"email": "user@example.com"},
             "organizer": {"email": "lab@example.com"}
         },
         {
@@ -423,7 +423,7 @@ print(json.dumps({
             "summary": "Declined hold",
             "start": {"dateTime": "2026-05-08T11:00:00-07:00"},
             "end": {"dateTime": "2026-05-08T11:30:00-07:00"},
-            "attendees": [{"email": "suraj@example.com", "self": True, "responseStatus": "declined"}]
+            "attendees": [{"email": "user@example.com", "self": True, "responseStatus": "declined"}]
         }
     ]
 }))

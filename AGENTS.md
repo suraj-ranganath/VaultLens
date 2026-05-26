@@ -1,4 +1,4 @@
-# AGENTS.md
+# VaultLens Agent Contract
 
 This vault is an AWS-backed, agent-maintained markdown wiki for personal knowledge capture, opportunity tracking, decision tracking, and retrieval. The canonical vault state lives in AWS so Telegram can remain the always-on ingestion path. Local checkouts, Obsidian views, and web interfaces are working copies and operator surfaces over that canonical state. The agent owns structure, bookkeeping, surfacing, filing, sync discipline, and maintenance. The user owns source curation, priority, and intent.
 

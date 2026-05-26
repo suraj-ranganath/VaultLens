@@ -1,4 +1,4 @@
-# WIKI.md
+# VaultLens Wiki Contract
 
 This file is the reference contract for the vault.
 

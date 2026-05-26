@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest an improvement to VaultLens.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What capture, retrieval, surfacing, or maintenance problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the behavior you want.
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime surface
+      options:
+        - Local only
+        - Cloud safe
+        - Both local and cloud
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: Cost and privacy considerations
+      description: Mention expected model calls, browser automation, AWS resources, credentials, or private data touched.
+    validations:
+      required: false

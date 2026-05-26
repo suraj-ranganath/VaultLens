@@ -1,5 +1,5 @@
 ---
-description: my-vault: local-first personal knowledge vault with hot cache, dashboards, browser enrichment, and durable markdown notes
+description: VaultLens: local-first personal knowledge vault with hot cache, dashboards, browser enrichment, and durable markdown notes
 globs:
   - "tools/**/*.py"
   - "tools/**/*.mjs"
@@ -9,7 +9,7 @@ globs:
 alwaysApply: true
 ---
 
-# my-vault
+# VaultLens
 
 Read `AGENTS.md` for the operating contract.
 

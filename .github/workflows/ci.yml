@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Python tests
+        run: npm test
+
+      - name: Python compile check
+        run: python3 -m py_compile tools/*.py
+
+      - name: JavaScript syntax check
+        run: |
+          for file in tools/*.mjs cloud/*.js; do
+            node --check "$file"
+          done

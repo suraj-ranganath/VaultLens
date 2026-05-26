@@ -21,7 +21,7 @@ from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 
 OEMBED_ENDPOINT = "https://publish.twitter.com/oembed"
 REQUEST_TIMEOUT_SECONDS = 12
-X_USER_AGENT = "Mozilla/5.0 (compatible; my-vault-x-content/1.0)"
+X_USER_AGENT = "Mozilla/5.0 (compatible; vault-lens-x-content/1.0)"
 
 warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 

@@ -1,6 +1,6 @@
-# My Vault: GitHub Copilot Instructions
+# VaultLens: GitHub Copilot Instructions
 
-This repository tracks the infrastructure for a local-first knowledge vault. Personal data and note content stay ignored locally. The tracked repo contains tooling, templates, setup assets, and agent instructions.
+This repository tracks the infrastructure for a local-first, agent-maintained markdown knowledge vault. Personal data and note content stay ignored locally. The tracked repo contains tooling, templates, setup assets, and agent instructions.
 
 ## Conventions
 

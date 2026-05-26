@@ -1,4 +1,4 @@
-# My Vault
+# VaultLens
 
 This repo is a local-first markdown vault for durable personal knowledge and retrieval.
 

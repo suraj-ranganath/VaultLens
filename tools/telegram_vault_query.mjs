@@ -495,7 +495,7 @@ function queryTerms(question) {
 async function profileContextItems(vaultRoot, terms) {
   const rawDocs = path.join(vaultRoot, "raw", "docs");
   const files = await listFiles(rawDocs, [".md", ".txt"]);
-  const profileFiles = files.filter((file) => /handoff|profile|personal|suraj/i.test(path.basename(file)));
+  const profileFiles = files.filter((file) => /handoff|profile|personal|preferences|identity/i.test(path.basename(file)));
   const personalQuery = /\b(who am i|about me|dating|compatible|compatibility|preference|values|personality|profile|know about me)\b/i.test(
     terms.join(" "),
   );

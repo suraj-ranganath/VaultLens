@@ -17,7 +17,7 @@ import requests
 
 
 TASK_ROOT = Path(os.environ.get("LAMBDA_TASK_ROOT", "/var/task")).resolve()
-WORK_ROOT = Path(os.environ.get("VAULT_WORK_ROOT", "/tmp/my-vault")).resolve()
+WORK_ROOT = Path(os.environ.get("VAULT_WORK_ROOT", "/tmp/vault-lens")).resolve()
 
 STATE_DIRS = [
     ".vault",

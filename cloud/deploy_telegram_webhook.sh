@@ -14,7 +14,7 @@ fi
 : "${OPENAI_API_KEY:?Missing OPENAI_API_KEY. Put it in .env.local or export it.}"
 : "${TELEGRAM_BOT_TOKEN:?Missing TELEGRAM_BOT_TOKEN. Put it in .env.local or export it.}"
 
-STACK_NAME="${STACK_NAME:-my-vault-telegram}"
+STACK_NAME="${STACK_NAME:-vault-lens-telegram}"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
 VAULT_AGENT_MODEL="${VAULT_AGENT_MODEL:-gpt-5.4}"
 VAULT_AGENT_REASONING_EFFORT="${VAULT_AGENT_REASONING_EFFORT:-medium}"
@@ -125,7 +125,7 @@ aws ecr get-login-password \
     --username AWS \
     --password-stdin "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" >/dev/null
 
-SAM_CONFIG_FILE="$(mktemp -t my-vault-sam-config).toml"
+SAM_CONFIG_FILE="$(mktemp -t vault-lens-sam-config).toml"
 cleanup() {
   rm -f "$SAM_CONFIG_FILE"
 }

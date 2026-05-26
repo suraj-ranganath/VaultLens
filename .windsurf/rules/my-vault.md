@@ -1,4 +1,4 @@
-# my-vault: Windsurf Rules
+# VaultLens: Windsurf Rules
 
 This project is a local-first markdown vault for personal knowledge retrieval and maintenance.
 

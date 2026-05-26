@@ -1,13 +1,13 @@
-# Cloud Telegram Webhook
+# VaultLens Cloud Telegram Webhook
 
-This deploys the vault Telegram agent as a webhook-first AWS path.
+This deploys the VaultLens Telegram agent as a webhook-first AWS path.
 
 ## Architecture
 
 - Telegram sends messages to an AWS Lambda Function URL.
 - The receiver Lambda validates Telegram's `X-Telegram-Bot-Api-Secret-Token` header.
 - The receiver stores the raw update in S3 and asynchronously invokes a processor Lambda.
-- The processor Lambda restores the ignored vault state bundle from S3 into `/tmp/my-vault`.
+- The processor Lambda restores the ignored vault state bundle from S3 into `/tmp/vault-lens`.
 - The processor waits briefly, collects pending webhook events from S3, then runs `tools/telegram_inbox.py webhook` with a small batch so rapid Telegram messages can be coalesced instead of forcing separate agent turns.
 - The Telegram worker uses preview-message edits for progress, then edits that same preview into the final answer or acknowledgement when possible.
 - Telegram command-center requests (`/today`, `/queue`, `/status`, `/trace`) and inline button callbacks are handled by deterministic local code inside the same processor, so common state updates do not spend LLM tokens.
@@ -43,7 +43,8 @@ OPENAI_API_KEY=...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_CHAT_IDS=123456789
 AWS_REGION=us-west-2
-STACK_NAME=my-vault-telegram
+STACK_NAME=vault-lens-telegram
+HEARTBEAT_ENABLED=false
 ```
 
 `TELEGRAM_ALLOWED_CHAT_IDS` is optional, but strongly recommended so only your Telegram chat can use the bot.
@@ -68,7 +69,7 @@ Cloud setup, preferred durable path:
 
 ```bash
 GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON='{"type":"service_account", "...":"..."}'
-VAULT_CALENDAR_ID='surajranganath@gmail.com'
+VAULT_CALENDAR_ID='your_calendar_id@example.com'
 ```
 
 This avoids user OAuth refresh-token expiry in Lambda. For service accounts, do not use `primary` unless you intentionally want the service account's own calendar.
@@ -83,10 +84,10 @@ Then put the one-line JSON value into `.env.local`:
 
 ```bash
 GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON='{"...":"..."}'
-VAULT_CALENDAR_ID='surajranganath@gmail.com'
+VAULT_CALENDAR_ID='your_calendar_id@example.com'
 ```
 
-The deploy script passes credentials as a no-echo CloudFormation parameter. The Lambda writes them to `/tmp/my-vault/.runtime/google-workspace-credentials.json` at runtime, points `gws` at that file, and forces `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` so the cloud worker does not depend on an OS keyring. Do not commit this value.
+The deploy script passes credentials as a no-echo CloudFormation parameter. The Lambda writes them to `/tmp/vault-lens/.runtime/google-workspace-credentials.json` at runtime, points `gws` at that file, and forces `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` so the cloud worker does not depend on an OS keyring. Do not commit this value.
 
 ## Deploy
 

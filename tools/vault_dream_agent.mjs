@@ -28,6 +28,7 @@ const DREAM_SCHEMA = {
   ],
   additionalProperties: false,
 };
+const PROFILE_HINT_RE = /handoff|profile|personal|preferences|identity/i;
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -122,11 +123,30 @@ async function buildContext(vaultRoot) {
   }
   const memory = await readRecentMemory(vaultRoot);
   if (memory) sections.push(`### recent memory\n${memory}`);
-  for (const relative of ["raw/docs/suraj_agent_handoff_master_profile.md", "raw/docs/suraj_agent_handoff_profile.md"]) {
+  for (const relative of await discoverProfileHintFiles(vaultRoot)) {
     const text = await readText(path.join(vaultRoot, relative), 100_000);
     if (text) sections.push(`### ${relative}\n${trim(text, 6000)}`);
   }
   return sections.join("\n\n").slice(0, 44_000);
+}
+
+async function discoverProfileHintFiles(vaultRoot) {
+  const fromEnv = String(process.env.VAULT_PROFILE_HINT_FILES || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const discovered = [];
+  const rawDocs = path.join(vaultRoot, "raw", "docs");
+  try {
+    for (const name of await fsp.readdir(rawDocs)) {
+      if (PROFILE_HINT_RE.test(name) && /\.(md|txt)$/i.test(name)) {
+        discovered.push(path.join("raw", "docs", name));
+      }
+    }
+  } catch {
+    // Profile context is optional.
+  }
+  return [...new Set([...fromEnv, ...discovered])].slice(0, 8);
 }
 
 async function readRecentMemory(vaultRoot) {

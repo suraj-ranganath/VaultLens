@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible VaultLens bug.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste private vault data, raw Telegram updates, calendar details, screenshots, API keys, or `.env.local` values.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use synthetic or redacted examples.
+      placeholder: |
+        1. Run ...
+        2. Send ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Local web UI
+        - Telegram local polling
+        - Telegram AWS webhook
+        - Ingest/import
+        - Search/cache
+        - Obsidian/dashboard
+        - Google Calendar
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node, Python, AWS region, deployment mode, and relevant package versions.
+    validations:
+      required: false

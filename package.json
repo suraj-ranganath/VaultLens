@@ -1,7 +1,7 @@
 {
-  "name": "my_vault",
+  "name": "vault-lens",
   "version": "1.0.0",
-  "description": "This vault is a retrieval-first personal wiki for anything you may want to revisit later: jobs, opportunities, interesting thoughts, technical articles, general reading, tweets, events, reminders, reusable resources, decisions, and personal systems.",
+  "description": "Self-hosted, agent-maintained markdown knowledge base for personal capture, retrieval, surfacing, and decisions.",
   "main": "index.js",
   "scripts": {
     "vault:setup": "bash bin/setup-vault.sh",
@@ -21,11 +21,28 @@
     "telegram:run": "python3 tools/telegram_inbox.py run --vault-root .",
     "telegram:webhook:test": "python3 tools/telegram_inbox.py webhook --vault-root . --session-name telegram-webhook-test",
     "cloud:deploy": "bash cloud/deploy_telegram_webhook.sh",
-    "cloud:sync-state": "bash cloud/sync_state_to_s3.sh"
+    "cloud:sync-state": "bash cloud/sync_state_to_s3.sh",
+    "test": "npm run test:vault-infra"
   },
-  "keywords": [],
-  "author": "suraj <suraj.ranganath@gmail.com> (http://surajr.com/)",
-  "license": "ISC",
+  "keywords": [
+    "personal-knowledge-base",
+    "markdown",
+    "obsidian",
+    "telegram-bot",
+    "aws-lambda",
+    "agents",
+    "retrieval"
+  ],
+  "author": "Suraj Ranganath",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/suraj-ranganath/my-vault.git"
+  },
+  "bugs": {
+    "url": "https://github.com/suraj-ranganath/my-vault/issues"
+  },
+  "homepage": "https://github.com/suraj-ranganath/my-vault#readme",
   "type": "commonjs",
   "dependencies": {
     "@googleworkspace/cli": "^0.22.5",

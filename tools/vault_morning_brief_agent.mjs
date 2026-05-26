@@ -44,10 +44,7 @@ const BRIEF_SCHEMA = {
 };
 
 const CORE_CONTEXT_FILES = ["hot.md", "index.md", "dashboards/urgent.md", "dashboards/reading-queue.md", "log.md"];
-const PROFILE_HINT_FILES = [
-  "raw/docs/suraj_agent_handoff_master_profile.md",
-  "raw/docs/suraj_agent_handoff_profile.md",
-];
+const PROFILE_HINT_RE = /handoff|profile|personal|preferences|identity/i;
 
 function readStdin() {
   return new Promise((resolve, reject) => {
@@ -222,7 +219,7 @@ async function buildContextPack(vaultRoot, candidateActions, candidateReadings, 
     sections.push(renderSection(".vault/cache/agent-digest.json", digest));
   }
 
-  for (const relativePath of PROFILE_HINT_FILES) {
+  for (const relativePath of await discoverProfileHintFiles(vaultRoot)) {
     const text = await readTextIfExists(path.join(vaultRoot, relativePath), 120_000);
     if (text) {
       sections.push(renderSection(relativePath, trimForContext(text, 5200)));
@@ -251,6 +248,25 @@ async function buildContextPack(vaultRoot, candidateActions, candidateReadings, 
   }
 
   return sections.join("\n\n").slice(0, 42_000);
+}
+
+async function discoverProfileHintFiles(vaultRoot) {
+  const fromEnv = String(process.env.VAULT_PROFILE_HINT_FILES || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const discovered = [];
+  const rawDocs = path.join(vaultRoot, "raw", "docs");
+  try {
+    for (const name of await fsp.readdir(rawDocs)) {
+      if (PROFILE_HINT_RE.test(name) && /\.(md|txt)$/i.test(name)) {
+        discovered.push(path.join("raw", "docs", name));
+      }
+    }
+  } catch {
+    // Profile context is optional.
+  }
+  return [...new Set([...fromEnv, ...discovered])].slice(0, 8);
 }
 
 async function readRecentMemory(vaultRoot) {

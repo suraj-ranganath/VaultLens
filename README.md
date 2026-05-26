@@ -1,210 +1,255 @@
-# My Vault
+# VaultLens
 
-This repo contains the infrastructure for a local-first, agent-maintained personal wiki inspired by the wiki-first knowledge base pattern. The goal is not just to save links, but to turn a stream of jobs, articles, tweets, reminders, ideas, systems, and decisions into explicit files that an agent can crawl, update, and query well.
+VaultLens is a self-hosted, agent-maintained markdown knowledge base for everything you want to revisit later: links, articles, tweets, jobs, events, screenshots, notes to self, reminders, decisions, and recurring systems.
 
-The actual personal data stays local and is intentionally ignored by Git. This repository is only for code, templates, and operating rules.
+The core idea is simple: keep your long-term memory as explicit files, then let agents maintain, search, and surface those files. No opaque app memory. No provider lock-in. The vault is just markdown, images, JSONL logs, SQLite indexes, and portable source artifacts.
 
-## What This System Is Trying To Do
+## Why VaultLens Exists
 
-- ingest messy capture streams from chat exports and Telegram
-- compile them into durable markdown notes with backlinks and structured metadata
-- surface the right things at the right time through dashboards and retrieval-oriented note structure
-- preserve decisions, reasoning, and personal systems, not just facts and links
-- prefer explicit files over opaque app memory so any model or tool can operate on the knowledge base
+Most people save useful links into chats, notes apps, bookmarks, or screenshots and never see them again. VaultLens turns that messy capture stream into a personal wiki that agents can actually use:
+
+- **Ingest anything** from chat exports, Telegram messages, URLs, screenshots, documents, and notes.
+- **Compile structured markdown** with frontmatter, backlinks, summaries, source links, and durable context.
+- **Ask questions** through a local web chat that searches the vault first and cites sources.
+- **Surface what matters** through dashboards, task ledgers, deadline views, reading queues, and an optional morning Telegram brief.
+- **Track decisions** so future agents can reuse prior reasoning instead of researching from scratch.
+- **Stay portable** because your knowledge base is a normal file tree that works with Obsidian, editors, CLIs, and different AI providers.
+
+## What You Get
+
+- Markdown-first vault structure for `raw/`, `items/`, `topics/`, `projects/`, `dashboards/`, `outputs/`, and `.vault/`.
+- Telegram ingestion with an agentic first-pass router for links, questions, screenshots, reminders, jobs, and calendar requests.
+- Optional AWS Lambda webhook deployment so Telegram ingestion works even when your laptop is off.
+- Local web interface for vault Q&A, chat history, citations, traces, and knowledge dashboards.
+- Obsidian-friendly dashboards and templates.
+- Local search/index pipeline using compact agent digests, SQLite FTS/BM25, source indexes, and health reports.
+- Optional Playwright enrichment for dynamic or blocked pages.
+- Optional Google Calendar integration for confirmation-first event creation and daily brief context.
 
 ## Repository Scope
 
-Tracked here:
+This public repo contains only software, templates, configuration, and operating rules.
 
-- `tools/` for ingestion, dashboard rebuilds, artifact attachment, and browser enrichment
-- `templates/` for canonical note shapes
-- `config/obsidian/` for tracked Obsidian defaults that can be installed into a local vault
-- `hooks/` for hot-cache style hook definitions
-- `bin/setup-vault.sh` for local vault bootstrap
-- `AGENTS.md` for the operating rules the agent follows
-- `WIKI.md`, `CLAUDE.md`, `GEMINI.md`, and agent bootstrap files for cross-tool consistency
-- `package.json` for the Codex SDK and Playwright toolchain
-- `.env.example` for local configuration shape
+Tracked:
 
-Ignored from Git:
+- `tools/`: ingestion, enrichment, search, Telegram, web query, calendar, task, and health tooling.
+- `cloud/`: AWS SAM deployment for Telegram webhooks and S3-backed vault state.
+- `web/`: local browser UI for chat and knowledge dashboards.
+- `templates/`: canonical markdown note templates.
+- `config/obsidian/`: shareable Obsidian defaults.
+- `hooks/`: optional hook definitions for agent workflows.
+- `AGENTS.md`, `WIKI.md`, `CLAUDE.md`, `GEMINI.md`: agent operating contracts.
 
-- `items/`, `topics/`, `projects/`, `dashboards/`, `raw/`, `imports/`, and `outputs/`
-- `.vault/` compiled cache, event log, search index, reports, and local runtime metadata
-- `.env.local` and any other secret-bearing env files
-- `hot.md`, `index.md`, and `log.md`
-- Obsidian local state and dependency directories
+Ignored by design:
 
-## Model And Agent Path
+- `raw/`, `imports/`, `items/`, `topics/`, `projects/`, `dashboards/`, `outputs/`, `memory/`
+- `.vault/`, `.runtime/`, `.obsidian/`, `node_modules/`, `.aws-sam/`
+- `.env.local`, `.env`, and all secret-bearing env files
+- `hot.md`, `index.md`, `log.md`
 
-- primary agent model: `gpt-5.4`
-- agent runtime for Telegram ingestion: Codex SDK
-- browser fallback for weak pages: Playwright
+Your personal vault data should never be committed.
 
-The browser fallback is intentionally focused on recent material. The current policy is to run Playwright enrichment only for notes discovered in the last 30 days, with special attention to X and other pages that are weak or blocked under plain HTTP fetches.
+## Requirements
 
-The query path is cost-first: before calling GPT-5.4, the vault compiles a machine-facing cache under `.vault/cache/`, runs local SQLite FTS/BM25 search with recency/diversity ranking, and injects only the most relevant context into the Codex agent.
+- Node.js 22 or newer
+- Python 3.10 or newer
+- npm
+- Optional: Obsidian for browsing the markdown vault
+- Optional: Telegram bot token from BotFather
+- Optional: AWS CLI, AWS SAM CLI, and Docker for always-on cloud ingestion
+- Optional: Google Workspace CLI auth for Google Calendar actions
+- Optional: Playwright browsers for local browser enrichment
 
-Borrowed and adapted from the `claude-obsidian` pattern:
+## Quick Start
 
-- `hot.md` as a cross-session cache
-- `dashboards/dashboard.base` as a native Obsidian Bases view
-- `dashboards/vault-health.md` as a lint-style maintenance surface
-- tracked Obsidian config templates plus a setup script
-- multi-agent bootstrap docs so different tools share the same vault contract
+```bash
+git clone https://github.com/suraj-ranganath/my-vault.git
+cd my-vault
+npm ci
+cp .env.example .env.local
+npm run vault:setup
+npm run vault:compile
+npm run vault:web
+```
+
+Then open `http://localhost:4318`.
+
+At minimum, set this in `.env.local` before using agent-backed flows:
+
+```bash
+OPENAI_API_KEY=your_openai_api_key
+```
+
+## Configure Environment
+
+`.env.example` documents the supported knobs. Common local values:
+
+```bash
+OPENAI_API_KEY=your_openai_api_key
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_ALLOWED_CHAT_IDS=your_numeric_chat_id
+VAULT_QUERY_PORT=4318
+VAULT_QUERY_DEFAULT_MODEL=gpt-5.4
+VAULT_PROFILE_HINT_FILES=raw/docs/my-profile.md,raw/docs/preferences.md
+```
+
+For cloud deployment:
+
+```bash
+AWS_REGION=us-west-2
+STACK_NAME=vault-lens-telegram
+TELEGRAM_WEBHOOK_SECRET=generated_or_left_blank_for_deploy_script
+```
+
+For Google Calendar, prefer a service account shared onto the target calendar:
+
+```bash
+GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON='{"type":"service_account","...":"..."}'
+VAULT_CALENDAR_ID=your_calendar_id@example.com
+```
+
+Do not commit `.env.local`.
 
 ## Core Workflows
 
-### 0. Install local Obsidian defaults
+### Build Or Refresh The Vault Index
 
 ```bash
-npm run vault:setup
+npm run rebuild:dashboards
+npm run vault:compile
+npm run vault:health
 ```
 
-### 1. Ingest a chat export
+This refreshes machine-facing cache files, Obsidian dashboards, task ledgers, source indexes, and health reports.
+
+### Run Local Web Chat
+
+```bash
+npm run vault:web
+```
+
+The web UI has two main surfaces:
+
+- **Chat**: asks a Codex-backed agent to search the vault, cite sources, and answer with trace visibility.
+- **Knowledge**: browses the compiled markdown knowledge base with filters, saved views, and source links.
+
+### Ingest Chat Exports
+
+Place exports under `imports/chat-exports/` or `raw/chat-exports/`, then run the relevant importer:
 
 ```bash
 python3 tools/ingest_chat_export.py --help
 python3 tools/ingest_whatsapp_inbox.py --vault-root .
 ```
 
-### 2. Rebuild dashboards from current notes
+After ingest:
 
 ```bash
 npm run rebuild:dashboards
 npm run vault:compile
 ```
 
-This rebuild also refreshes:
-
-- `hot.md`
-- `index.md`
-- `dashboards/dashboard.base`
-- `dashboards/dashboard.md`
-- `dashboards/vault-health.md`
-
-### 3. Enrich recent weak links with Playwright
-
-```bash
-npm run enrich:browser:recent
-```
-
-Equivalent direct command:
-
-```bash
-node tools/enrich_with_browser.mjs . 120 4 30
-```
-
-Arguments are:
-
-1. vault root
-2. max notes to inspect
-3. concurrency
-4. lookback window in days
-
-### 4. Run Telegram ingestion
-
-```bash
-cp .env.example .env.local
-```
-
-Set `OPENAI_API_KEY` and `TELEGRAM_BOT_TOKEN`, then:
+### Ingest From Telegram Locally
 
 ```bash
 npm run telegram:sync
 npm run telegram:run
 ```
 
-The Telegram receiver stores raw updates locally, appends a normalized inbox stream, lets a local Codex agent decide how to classify or file each message, and acknowledges successful ingestion with `👍`. If the machine is down, the next sync catches up from Telegram history.
+Telegram messages can include plain notes, links, screenshots, images with captions, job posts, reminders, questions, and calendar requests. The agent decides how to route each message and writes durable context back into the vault.
 
-Telegram also has a cheap command-center path that bypasses the LLM for operational actions:
+Useful Telegram commands:
 
-- `/today`: urgent tasks and one recommended read, with compact `Details` buttons.
-- `/queue`: latest saved items first as separate cards; each card has its own attached `Prioritize`, `Mark read/done`, and `Open source` buttons.
-- `/status`: vault bot health, open task count, queued outbound messages, and cache freshness.
-- `/trace`: recent Telegram agent decisions and tool calls for the current chat.
+- `/today`: urgent items and one high-signal read.
+- `/queue`: recent saved items with action buttons.
+- `/status`: bot and vault health.
+- `/trace`: recent agent decisions and tool activity.
 
-Calendar requests sent to Telegram use a separate confirmation-first flow. The agent can extract event details from text or image context, ask for missing details, ask you to confirm the final event plan, and then call Google Calendar through `gws`. Created event IDs are logged so follow-up messages like "move the previous event" have concrete history to work from.
-
-X/Twitter links are normalized to stable `x.com/<handle>/status/<id>` URLs and enriched through `tools/x_content.py`. The adapter uses local `xurl` when available, otherwise falls back to Twitter's public oEmbed endpoint, so Telegram/cloud ingestion can usually recover post text, author, published date, source links, and retrieval context without Playwright.
-
-### 4b. Deploy Telegram ingestion to AWS webhooks
-
-For always-on cloud ingestion without an always-on server:
+### Deploy Always-On Telegram Ingestion To AWS
 
 ```bash
 npm run cloud:deploy
 npm run cloud:sync-state
 ```
 
-See [cloud/README.md](cloud/README.md) for the AWS Lambda Function URL + S3 state architecture. The cloud path uses Telegram webhooks, validates a Telegram webhook secret, invokes a single-concurrency processor, and runs the same Codex-backed Telegram agent used locally.
+See [cloud/README.md](cloud/README.md) for the full AWS setup. The deployment uses:
 
-To receive the focused daily 8am Telegram brief from the AWS-canonical vault, set `HEARTBEAT_ENABLED=true`, `TELEGRAM_HEARTBEAT_CHAT_ID=<your chat id>`, and redeploy. The brief is agent-written: the deterministic layer only gathers candidate reminders, deadlines, jobs, opportunities, today's Google Calendar events, recent saves, and profile context; the Codex morning agent decides what is actually urgent, high-impact, and personalized enough to send.
+- Lambda Function URL for the Telegram webhook
+- one receiver Lambda
+- one single-concurrency processor Lambda
+- S3 for canonical ignored vault state and raw webhook events
+- optional EventBridge Scheduler for the morning brief
 
-### 5. Run a health check directly
+### Enrich Weak Links Locally
 
 ```bash
-npm run vault:health
-npm run vault:search -- "technical AI safety"
-npm run vault:heartbeat -- --dry-run
-npm run vault:trajectory -- <run-id>
+npm run enrich:browser:recent
+```
+
+This uses Playwright for recent links that are weak, dynamic, blocked, or social-post-heavy. Browser artifacts should be treated as source evidence and stored under ignored vault state, not Git.
+
+### Search From The CLI
+
+```bash
+npm run vault:search -- "agent memory systems"
 npm run x:fetch -- https://x.com/example/status/123
+npm run vault:heartbeat -- --dry-run
 ```
 
-The compiled cache is written atomically so Telegram/web queries never read half-built indexes. It also emits `.vault/reports/` health views for claim quality, stale claims, open questions, contradictions, and the memory-palace map. Optional semantic search is available by setting `VAULT_EMBEDDINGS_ENABLED=true`; embeddings are cached in `.vault/cache/embedding-cache.sqlite` and merged with BM25/MMR retrieval.
+## Architecture
 
-Web, Telegram, and morning-brief agent runs write redacted trajectory sidecars under `.vault/trajectories/`. Export one with `npm run vault:trajectory -- <run-id>`. Telegram outbound messages use a durable local queue under `.vault/telegram-delivery-queue/` so failed sends can be retried on the next worker run.
+```mermaid
+flowchart LR
+  Capture["Telegram, chat exports, URLs, images, docs"] --> Raw["raw/ and imports/"]
+  Raw --> Agent["Ingest and enrichment agents"]
+  Agent --> Notes["items/, topics/, projects/"]
+  Notes --> Cache[".vault/cache, search.sqlite, source index"]
+  Cache --> Surfaces["Web chat, Obsidian, Telegram, dashboards"]
+  Surfaces --> Outputs["outputs/ and decisions"]
+  Outputs --> Notes
+```
 
-### 6. Run the local web interface
+Design principles:
+
+- Files over app databases.
+- Explicit memory over hidden personalization.
+- Search and cache before expensive model calls.
+- Durable source artifacts over brittle live URLs.
+- Agent traces and event logs over invisible automation.
+- Cloud canonical state for always-on Telegram, with local mirrors for development and Obsidian.
+
+## Data And Privacy Model
+
+- Personal data lives in ignored vault directories and, if enabled, your private S3 bucket.
+- Secrets live in `.env.local` or encrypted Lambda environment variables.
+- GitHub should contain only code, docs, templates, and public configuration.
+- Browser-captured artifacts, Telegram updates, image OCR, calendar action logs, and answer traces are vault state, not repo state.
+- If you plan to make a fork public, run a secret scan and inspect `git status --ignored` before publishing.
+
+## Testing
 
 ```bash
-npm run vault:web
+npm test
+python3 -m unittest tools.test_vault_infra
+node --check tools/telegram_codex_agent.mjs
+node --check tools/vault_query_server.mjs
 ```
 
-Then open `http://localhost:4318`.
+## Contributing
 
-The web interface has two workspaces:
+Contributions are welcome if they keep the project file-first, inspectable, and cost-aware.
 
-- `Chat`: a Codex-backed query route over the vault for retrieval-first answering
-- `Knowledge`: a visual dashboard over the compiled markdown knowledge base with saved views, filters, source links, vault-rendered previews, and custom dashboard creation
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). Good first contribution areas:
 
-The Knowledge workspace is meant to be the browser surface for the AWS-backed markdown vault. It reads the current local mirror of the canonical state and writes custom dashboards as markdown under `dashboards/custom/`, so they remain visible in Obsidian and portable to other agents.
+- safer importers for more source formats
+- better source extraction and citation quality
+- stronger health checks and duplicate detection
+- UI improvements for the web dashboard
+- cheaper retrieval and caching strategies
+- clearer setup docs for non-expert users
 
-The Chat workspace is designed for retrieval-first answering:
+Please do not include real personal vault data, API keys, Telegram payloads, calendar exports, or private screenshots in issues or pull requests.
 
-- AWS-backed markdown vault files are the source of truth; local files are the working mirror used by this web server
-- the agent starts from the compiled `.vault/cache/agent-digest.json`, SQLite FTS retrieval, `hot.md`, dashboards, and canonical notes
-- answers return citations to vault files plus a live agent feed
-- the live feed shows reasoning summaries, plan updates, shell commands, web searches, MCP calls, and surfaced agent messages
-- useful answers can be filed back into `outputs/` directly from the UI
-- web search fallback is on by default, but the agent is still instructed to treat the vault as the source of truth first
+## License
 
-Environment knobs:
-
-- `VAULT_QUERY_PORT`
-- `VAULT_QUERY_DEFAULT_MODEL`
-- `OPENAI_API_KEY`
-
-## Runtime Cache And Observability
-
-Generated, ignored, and synced as vault state:
-
-- `.vault/cache/agent-digest.json`: compact machine-readable page catalog
-- `.vault/cache/claims.jsonl`: claim-level evidence, confidence, and freshness records
-- `.vault/cache/source-index.jsonl`: primary-source URL index for citations
-- `.vault/cache/search.sqlite`: local FTS search index used before model calls
-- `.vault/cache/browser-enrichment-queue.jsonl`: recent weak/browser-first links for local Playwright enrichment
-- `.vault/events/agent-events.jsonl`: unified web/Telegram/heartbeat event log
-- `.vault/reports/`: cache health reports for claims and open questions
-
-## Knowledge Design Principles
-
-- explicit and inspectable over hidden memory
-- file over app
-- local-first ownership of data
-- newest shared material should surface first in dashboards
-- job notes should preserve website-posted date when known
-- decisions and systems should be first-class notes
-- recent context should be available through a compact hot cache
-- machine-facing cache should be refreshed after ingest so query agents avoid broad scans
-- maintenance should be explicit through a lint-style health page
-- outputs from future queries should be filed back into the wiki so the corpus compounds
+MIT. See [LICENSE](LICENSE).
