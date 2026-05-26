@@ -25,13 +25,16 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          npm ci
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
 
       - name: Python tests
         run: npm test
 
       - name: Python compile check
-        run: python3 -m py_compile tools/*.py
+        run: python3 -m py_compile tools/*.py cloud/*.py
 
       - name: JavaScript syntax check
         run: |
