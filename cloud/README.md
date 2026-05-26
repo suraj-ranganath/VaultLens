@@ -130,13 +130,13 @@ The script uploads one compressed `state/vault-state.tar.gz` bundle containing:
 
 ## Optional Daily Morning Brief
 
-Daily morning briefs are off by default to keep costs down. To enable the focused 8am Pacific Telegram brief, deploy with:
+Daily morning briefs are off by default to keep costs down. To enable the focused 9am Pacific Telegram brief, deploy with:
 
 ```bash
 HEARTBEAT_ENABLED=true TELEGRAM_HEARTBEAT_CHAT_ID=123456789 bun run cloud:deploy
 ```
 
-The schedule defaults to `cron(0 8 * * ? *)` in `America/Los_Angeles`. Override with `HEARTBEAT_SCHEDULE` and `HEARTBEAT_SCHEDULE_TIMEZONE` if needed.
+The schedule defaults to `cron(0 9 * * ? *)` in `America/Los_Angeles`. Override with `HEARTBEAT_SCHEDULE` and `HEARTBEAT_SCHEDULE_TIMEZONE` if needed.
 
 The heartbeat path reuses the processor function and runs `tools/vault_heartbeat.py`. That script cheaply builds a candidate pack from deadlines, reminders, jobs, opportunities, today's Google Calendar events, recent saves, profile context, dashboards, and hot context, then calls `tools/vault_morning_brief_agent.mjs` to choose and write the actual brief. The deterministic layer is only a shortlist; the agent decides what is relevant and personalized enough to send. Web search is disabled for the scheduled brief by default to keep it cheap and grounded in the canonical vault.
 

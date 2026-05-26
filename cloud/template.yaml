@@ -63,7 +63,7 @@ Parameters:
     Description: Telegram chat ID that should receive heartbeat alerts when enabled.
   HeartbeatSchedule:
     Type: String
-    Default: cron(0 8 * * ? *)
+    Default: cron(0 9 * * ? *)
     Description: EventBridge Scheduler expression for the focused daily morning brief.
   HeartbeatScheduleTimezone:
     Type: String

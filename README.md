@@ -1,30 +1,92 @@
 # VaultLens
 
-VaultLens is a self-hosted, agent-maintained markdown knowledge base for everything you want to revisit later: links, articles, tweets, jobs, events, screenshots, notes to self, reminders, decisions, and recurring systems.
+VaultLens is a self-hosted, Telegram-first personal agent for the things you do not want to lose: events, screenshots, job posts, opportunity deadlines, articles, tweets, reminders, notes to self, decisions, and recurring systems.
 
-The core idea is simple: keep your long-term memory as explicit files, then let agents maintain, search, and surface those files. No opaque app memory. No provider lock-in. The vault is just markdown, images, JSONL logs, SQLite indexes, and portable source artifacts.
+Send something to your Telegram bot, and VaultLens decides what to do with it: save it to your knowledge base, extract a deadline, create a job/opportunity note, ask a clarifying question, add an event to Google Calendar after confirmation, or answer from your existing vault.
+
+## Start Here: The Daily Utility Loop
+
+VaultLens is most useful when Telegram becomes your capture surface and the agent becomes your daily filter.
+
+- **Save calendar events from text or screenshots.** Send an event flyer, a screenshot, a QR/event page, or a message like "save this to my calendar." The bot extracts title, date, time, location, recurrence, and notes, asks for missing details when needed, then creates the Google Calendar event after you confirm.
+- **Wake up to a focused 9am brief.** Configure the daily Telegram digest for 9am so it checks today's calendar, upcoming deadlines, urgent opportunities, reminders, recent saves, and your profile/preferences, then sends only the few things worth paying attention to.
+- **Track opportunities without a spreadsheet.** Drop job links, fellowships, hackathons, events, application pages, and "maybe apply" notes into Telegram. VaultLens keeps the ledger organized by posted date, deadline, status, and priority.
+- **Build an explicit "about you" memory.** The vault stores profile context, interests, decisions, systems, taste, past reasoning, and active projects as markdown so future answers are personalized without depending on opaque app memory.
+- **Ask the bot questions later.** Use Telegram or the local web chat to ask things like "what should I apply to this week?", "what did I save about AI agents?", or "what is the most useful thing I read recently?"
+
+Useful links:
+
+- [Telegram ingestion](#ingest-from-telegram-locally)
+- [Always-on AWS Telegram webhook](#deploy-always-on-telegram-ingestion-to-aws)
+- [Google Calendar actions](cloud/README.md#google-calendar-actions)
+- [Daily morning brief](cloud/README.md#optional-daily-morning-brief)
+- [Local web chat](#run-local-web-chat)
+- [Data and privacy model](#data-and-privacy-model)
+
+## Example: Screenshot To Calendar
+
+```text
+You: [upload screenshot of an event flyer]
+Caption: Save this to my calendar if the details are clear.
+
+VaultLens: I found "AI Builders Night" on June 4 from 6:30 PM to 8:30 PM at Shack15.
+Should I add this to your calendar?
+
+You: yes
+
+VaultLens: Added to Google Calendar.
+```
+
+The same flow works for single events, recurring classes, multi-day event batches, and modifications like "move the previous event to Friday" when the target event can be resolved from context. If details are ambiguous, the bot should ask before writing to the calendar.
+
+## Example: 9am Daily Brief
+
+```text
+Morning brief | Tuesday
+
+Today:
+- 10:30 AM: Research sync.
+- 4:00 PM: Swimming class.
+
+Do first:
+- Apply to the role with a deadline this week.
+- Decide whether to pursue the fellowship you saved yesterday.
+
+One useful read:
+- The recent technical article you saved on agent memory, because it connects to your current VaultLens work.
+```
+
+The brief is agentic, not just a deterministic reminder list. Cheap code builds a candidate pack from calendars, deadlines, jobs, reminders, recent links, dashboards, and profile context; the agent chooses what is actually relevant enough to send.
+
+## The Knowledge Base Underneath
+
+VaultLens is also an agent-maintained markdown knowledge base for everything you want to revisit later. The core idea is simple: keep your long-term memory as explicit files, then let agents maintain, search, and surface those files. No opaque app memory. No provider lock-in. The vault is just markdown, images, JSONL logs, SQLite indexes, and portable source artifacts.
 
 ## Why VaultLens Exists
 
 Most people save useful links into chats, notes apps, bookmarks, or screenshots and never see them again. VaultLens turns that messy capture stream into a personal wiki that agents can actually use:
 
+- **Ingest from Telegram first** so capture works from your phone for links, notes, screenshots, jobs, events, reminders, and questions.
+- **Create calendar actions safely** by extracting event details, asking for clarification when needed, and requiring confirmation before Google Calendar writes.
+- **Send a high-signal daily brief** with calendar context, urgent deadlines, opportunities, reminders, and one useful recent read.
 - **Ingest anything** from chat exports, Telegram messages, URLs, screenshots, documents, and notes.
 - **Compile structured markdown** with frontmatter, backlinks, summaries, source links, and durable context.
 - **Ask questions** through a local web chat that searches the vault first and cites sources.
-- **Surface what matters** through dashboards, task ledgers, deadline views, reading queues, and an optional morning Telegram brief.
+- **Surface what matters** through dashboards, task ledgers, deadline views, reading queues, and the optional Telegram brief.
 - **Track decisions** so future agents can reuse prior reasoning instead of researching from scratch.
 - **Stay portable** because your knowledge base is a normal file tree that works with Obsidian, editors, CLIs, and different AI providers.
 
 ## What You Get
 
-- Markdown-first vault structure for `raw/`, `items/`, `topics/`, `projects/`, `dashboards/`, `outputs/`, and `.vault/`.
 - Telegram ingestion with an agentic first-pass router for links, questions, screenshots, reminders, jobs, and calendar requests.
+- Confirmation-first Google Calendar creation for event screenshots, event links, natural-language requests, recurring events, and event edits.
+- Daily Telegram digest that can include today's important events, urgent opportunity deadlines, explicit reminders, high-impact applications, and one recommended reading.
 - Optional AWS Lambda webhook deployment so Telegram ingestion works even when your laptop is off.
 - Local web interface for vault Q&A, chat history, citations, traces, and knowledge dashboards.
+- Markdown-first vault structure for `raw/`, `items/`, `topics/`, `projects/`, `dashboards/`, `outputs/`, and `.vault/`.
 - Obsidian-friendly dashboards and templates.
 - Local search/index pipeline using compact agent digests, SQLite FTS/BM25, source indexes, and health reports.
 - Optional Playwright enrichment for dynamic or blocked pages.
-- Optional Google Calendar integration for confirmation-first event creation and daily brief context.
 
 ## Repository Scope
 
