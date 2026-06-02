@@ -34,10 +34,6 @@ DEFAULT_TIMEZONE_LABEL = "America/Los_Angeles"
 DISPLAY_TITLE_LIMIT = 120
 
 
-def js_runtime() -> str:
-    return os.environ.get("VAULT_JS_RUNTIME", "bun")
-
-
 @dataclass
 class Note:
     path: Path
@@ -559,10 +555,6 @@ def run_morning_brief_agent(
             raise RuntimeError("VAULT_MORNING_BRIEF_AGENT_MOCK_JSON must be a JSON object")
         return parsed
 
-    script = vault_root / "tools" / "vault_morning_brief_agent.mjs"
-    if not script.exists():
-        raise RuntimeError(f"Missing morning brief agent script: {script}")
-
     payload = {
         "workingDirectory": str(vault_root),
         "today": today.isoformat(),
@@ -571,19 +563,24 @@ def run_morning_brief_agent(
         "candidateReadings": candidate_readings,
         "candidateCalendarEvents": candidate_calendar_events,
         "calendarError": calendar_error,
-        "model": os.environ.get("VAULT_MORNING_BRIEF_MODEL") or os.environ.get("VAULT_AGENT_MODEL") or "gpt-5.4",
+        "model": os.environ.get("VAULT_MORNING_BRIEF_MODEL") or os.environ.get("VAULT_CODEX_MODEL") or os.environ.get("VAULT_AGENT_MODEL") or "auto",
         "reasoningEffort": os.environ.get("VAULT_MORNING_BRIEF_REASONING_EFFORT")
         or os.environ.get("VAULT_AGENT_REASONING_EFFORT")
         or "medium",
     }
-    env = os.environ.copy()
     result = subprocess.run(
-        [js_runtime(), str(script)],
+        [
+            os.environ.get("VAULT_PYTHON_RUNTIME", "uv"),
+            "run",
+            "python",
+            str(vault_root / "tools" / "codex_agent_runner.py"),
+            "morning-brief",
+        ],
         input=json.dumps(payload),
         text=True,
         capture_output=True,
         cwd=vault_root,
-        env=env,
+        env=os.environ.copy(),
         timeout=int(os.environ.get("VAULT_MORNING_BRIEF_TIMEOUT_SECONDS", "240")),
         check=False,
     )

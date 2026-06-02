@@ -194,7 +194,6 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             env = os.environ.copy()
-            env["OPENAI_API_KEY"] = "test-key"
             env["VAULT_QUERY_CONTEXT_ONLY"] = "1"
             proc = subprocess.run(
                 ["bun", str(REPO_ROOT / "tools" / "telegram_vault_query.mjs")],
@@ -863,7 +862,6 @@ application_status: to_apply
                     ingest_after_sync=True,
                     agent_model="gpt-5.4",
                     agent_reasoning_effort="medium",
-                    openai_api_key="",
                     updates=[update],
                     mode="test",
                 )
@@ -931,7 +929,6 @@ application_status: to_apply
                     ingest_after_sync=True,
                     agent_model="gpt-5.4",
                     agent_reasoning_effort="medium",
-                    openai_api_key="",
                     updates=[update],
                     mode="test",
                 )
@@ -1004,7 +1001,6 @@ application_status: to_apply
                     ingest_after_sync=True,
                     agent_model="gpt-5.4",
                     agent_reasoning_effort="medium",
-                    openai_api_key="",
                     updates=[update],
                     mode="test",
                 )
@@ -1034,7 +1030,6 @@ application_status: to_apply
                     ingest_after_sync=True,
                     agent_model="gpt-5.4",
                     agent_reasoning_effort="medium",
-                    openai_api_key="",
                     updates=[apply_update],
                     mode="test",
                 )
@@ -1074,7 +1069,6 @@ application_status: to_apply
             root = Path(tmp)
             tools = root / "tools"
             tools.mkdir()
-            (tools / "vault_dream_agent.mjs").write_text((REPO_ROOT / "tools" / "vault_dream_agent.mjs").read_text(), encoding="utf-8")
             (tools / "vault_events.py").write_text((REPO_ROOT / "tools" / "vault_events.py").read_text(), encoding="utf-8")
             mock_result = {
                 "durable_facts": ["Suraj wants the vault to be agent-first."],

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import mimetypes
 import json
@@ -65,7 +64,7 @@ PROCESSED_UPDATES_FILE_NAME = ".telegram_processed_updates.jsonl"
 AGENT_DECISIONS_FILE_NAME = "telegram-agent-decisions.jsonl"
 CALENDAR_ACTIONS_FILE_NAME = "telegram-calendar-actions.jsonl"
 AGENT_EVENTS_FILE_NAME = "agent-events.jsonl"
-DEFAULT_AGENT_MODEL = "gpt-5.4"
+DEFAULT_AGENT_MODEL = "auto"
 ATTACHMENT_ANALYSIS_MAX_BYTES = 8 * 1024 * 1024
 ATTACHMENT_ANALYSIS_TIMEOUT_SECONDS = 90
 DEFAULT_CALENDAR_ID = os.environ.get("VAULT_CALENDAR_ID") or os.environ.get("VAULT_BRIEF_CALENDAR_ID") or "primary"
@@ -109,6 +108,38 @@ COMMAND_ITEM_LIMIT = 5
 
 def js_runtime() -> str:
     return os.environ.get("VAULT_JS_RUNTIME", "bun")
+
+
+def codex_runner_command(vault_root: Path, command: str) -> list[str]:
+    return [
+        os.environ.get("VAULT_PYTHON_RUNTIME", "uv"),
+        "run",
+        "python",
+        str(vault_root / "tools" / "codex_agent_runner.py"),
+        command,
+    ]
+
+
+def invoke_codex_runner(vault_root: Path, command: str, payload: dict[str, Any], *, timeout: int = 180) -> dict[str, Any]:
+    result = subprocess.run(
+        codex_runner_command(vault_root, command),
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        cwd=vault_root,
+        env=os.environ.copy(),
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"Codex runner {command} failed")
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Codex runner {command} returned invalid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"Codex runner {command} did not return a JSON object")
+    return parsed
 
 
 def read_json(path: Path, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -365,9 +396,9 @@ def response_output_text(payload: dict[str, Any]) -> str:
     return "\n".join(chunk.strip() for chunk in chunks if chunk.strip()).strip()
 
 
-def summarize_attachment_with_openai(
+def summarize_attachment_with_codex(
     *,
-    openai_api_key: str,
+    vault_root: Path,
     model: str,
     artifact_path: Path,
     mime_type: str,
@@ -386,66 +417,19 @@ def summarize_attachment_with_openai(
             "needs_manual_review": True,
         }
 
-    encoded = base64.b64encode(content_bytes).decode("ascii")
-    prompt = (
-        "Analyze this Telegram attachment for a personal knowledge vault.\n"
-        "Return strict JSON with keys: summary, extracted_text, urls, qr_values, event_clues, job_clues, "
-        "reminder_clues, needs_manual_review.\n"
-        "Use short strings. event_clues, job_clues, reminder_clues must be arrays of short bullet-like strings.\n"
-        "The Telegram message context is user intent, not background noise. Let it decide what details matter most.\n"
-        "If the caption asks to create, save, add, schedule, or modify a calendar event, prioritize calendar extraction: "
-        "title, exact dates, start/end times, timezone clues, recurrence rules, class schedules, location, organizer, "
-        "registration/check-in URLs, and ambiguity that requires confirmation.\n"
-        "If the caption asks about recurring classes, extract every date/time pattern and whether a single recurrence rule or "
-        "multiple separate events is more appropriate.\n"
-        "If the caption asks to remember, revisit, summarize, apply, or follow up, prioritize the fields needed for that task.\n"
-        "If this looks like a screenshot of a job post or application status, extract role/company/status/date clues.\n"
-        "If this looks like an event screenshot or flyer, extract event/date/time/location/registration clues.\n"
-        "If there is a QR code, decode it if possible and include the resolved text or URL in qr_values.\n"
-        "If there is visible text, place the useful text in extracted_text.\n"
-        "Do not invent details."
-    )
-    context = str(original_text or "").strip()
-    user_parts: list[dict[str, Any]] = [
+    return invoke_codex_runner(
+        vault_root,
+        "vision-attachment",
         {
-            "type": "input_text",
-            "text": (
-                "Telegram message context / user instruction:\n"
-                f"{context or '(no caption or text supplied)'}\n\n"
-                "Extract image details that best satisfy this instruction. If the instruction is calendar-related, make "
-                "event_clues maximally useful for creating accurate calendar events."
-            ),
-        },
-        {
-            "type": "input_image",
-            "image_url": f"data:{mime_type};base64,{encoded}",
-        },
-    ]
-    response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers={
-            "Authorization": f"Bearer {openai_api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
             "model": model,
-            "input": [
-                {"role": "system", "content": [{"type": "input_text", "text": prompt}]},
-                {"role": "user", "content": user_parts},
-            ],
-            "text": {"format": {"type": "json_object"}},
+            "reasoningEffort": os.environ.get("VAULT_VISION_REASONING_EFFORT", "low"),
+            "workingDirectory": str(vault_root),
+            "artifactPath": str(artifact_path),
+            "mimeType": mime_type,
+            "originalText": original_text,
         },
-        timeout=ATTACHMENT_ANALYSIS_TIMEOUT_SECONDS,
+        timeout=ATTACHMENT_ANALYSIS_TIMEOUT_SECONDS + 90,
     )
-    response.raise_for_status()
-    payload = response.json()
-    text = response_output_text(payload)
-    if not text:
-        raise RuntimeError("OpenAI attachment analysis returned no text")
-    parsed = json.loads(text)
-    if not isinstance(parsed, dict):
-        raise RuntimeError("OpenAI attachment analysis did not return a JSON object")
-    return parsed
 
 
 def clean_attachment_list(value: Any, *, limit: int = 5, item_limit: int = 180) -> list[str]:
@@ -551,7 +535,6 @@ def enrich_message_attachments(
     *,
     vault_root: Path,
     token: str,
-    openai_api_key: str,
     attachment_model: str,
     update: dict[str, Any],
     normalized_message: dict[str, Any],
@@ -583,8 +566,8 @@ def enrich_message_attachments(
             enriched["artifact_path"] = artifact_path.relative_to(vault_root).as_posix()
             if attachment.get("is_image"):
                 mime_type = str(attachment.get("mime_type") or mimetypes.guess_type(artifact_path.name)[0] or "image/jpeg")
-                analysis = summarize_attachment_with_openai(
-                    openai_api_key=openai_api_key,
+                analysis = summarize_attachment_with_codex(
+                    vault_root=vault_root,
                     model=attachment_model,
                     artifact_path=artifact_path,
                     mime_type=mime_type,
@@ -1706,14 +1689,12 @@ def plan_calendar_target_clarification(plan: dict[str, Any], history: list[dict[
 
 def invoke_calendar_agent(
     vault_root: Path,
-    openai_api_key: str,
     message: dict[str, Any],
     pending_request: dict[str, Any] | None,
     history: list[dict[str, Any]],
     model: str,
     reasoning_effort: str,
 ) -> dict[str, Any]:
-    script_path = vault_root / "tools" / "telegram_calendar_agent.mjs"
     payload = {
         "model": model,
         "reasoningEffort": reasoning_effort,
@@ -1725,23 +1706,7 @@ def invoke_calendar_agent(
         "targetCalendarId": DEFAULT_CALENDAR_ID,
         "currentDate": CURRENT_DATE.isoformat(),
     }
-    env = os.environ.copy()
-    env["OPENAI_API_KEY"] = openai_api_key
-    result = subprocess.run(
-        [js_runtime(), str(script_path)],
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-        cwd=vault_root,
-        env=env,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Calendar agent process failed")
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Calendar agent returned invalid JSON: {exc}") from exc
+    return invoke_codex_runner(vault_root, "calendar-plan", payload)
 
 
 def gws_command(vault_root: Path) -> list[str]:
@@ -1958,14 +1923,12 @@ def confirmed_calendar_plan_from_pending(pending_request: dict[str, Any]) -> dic
 
 def invoke_vault_query_agent(
     vault_root: Path,
-    openai_api_key: str,
     question: str,
     model: str,
     reasoning_effort: str,
     prior_thread_id: str | None,
     recent_conversation_context: str = "",
 ) -> dict[str, Any]:
-    script_path = vault_root / "tools" / "telegram_vault_query.mjs"
     resume_threads = os.environ.get("VAULT_DISABLE_CODEX_THREAD_RESUME", "").strip() != "1"
     payload = {
         "model": model,
@@ -1976,23 +1939,7 @@ def invoke_vault_query_agent(
         "includeWebSearch": True,
         "recentConversationContext": recent_conversation_context,
     }
-    env = os.environ.copy()
-    env["OPENAI_API_KEY"] = openai_api_key
-    result = subprocess.run(
-        [js_runtime(), str(script_path)],
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-        cwd=vault_root,
-        env=env,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Vault query agent process failed")
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Vault query agent returned invalid JSON: {exc}") from exc
+    return invoke_codex_runner(vault_root, "vault-query", payload)
 
 
 def format_telegram_query_response(query_result: dict[str, Any]) -> str:
@@ -2165,13 +2112,11 @@ def invoke_codex_agent(
     session_name: str,
     agent_model: str,
     agent_reasoning_effort: str,
-    openai_api_key: str,
     message: dict[str, Any],
     known_chats: dict[str, Any],
     prior_thread_id: str | None,
     recent_conversation_context: str = "",
 ) -> dict[str, Any]:
-    script_path = vault_root / "tools" / "telegram_codex_agent.mjs"
     resume_threads = os.environ.get("VAULT_DISABLE_CODEX_THREAD_RESUME", "").strip() != "1"
     payload = {
         "model": agent_model,
@@ -2191,23 +2136,7 @@ def invoke_codex_agent(
         "knownChats": known_chats,
         "recentConversationContext": recent_conversation_context,
     }
-    env = os.environ.copy()
-    env["OPENAI_API_KEY"] = openai_api_key
-    result = subprocess.run(
-        [js_runtime(), str(script_path)],
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-        cwd=vault_root,
-        env=env,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Codex agent process failed")
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Codex agent returned invalid JSON: {exc}") from exc
+    return invoke_codex_runner(vault_root, "telegram-router", payload)
 
 
 def execute_agent_actions(
@@ -2217,7 +2146,6 @@ def execute_agent_actions(
     decision: dict[str, Any],
     actions: list[dict[str, str]],
     state: dict[str, Any],
-    openai_api_key: str,
     agent_model: str,
     agent_reasoning_effort: str,
 ) -> list[dict[str, Any]]:
@@ -2345,7 +2273,6 @@ def execute_agent_actions(
             )
             query_result = invoke_vault_query_agent(
                 vault_root=vault_root,
-                openai_api_key=openai_api_key,
                 question=normalized_message["raw_text"],
                 model=agent_model,
                 reasoning_effort=agent_reasoning_effort,
@@ -2364,7 +2291,7 @@ def execute_agent_actions(
                     "thread_id": thread_id,
                     "reply_text": format_telegram_query_response(query_result),
                     "usage": query_result.get("usage"),
-                    "cost": query_result.get("cost"),
+                    "billing": query_result.get("billing"),
                 }
             )
             continue
@@ -2430,7 +2357,6 @@ def handle_calendar_flow(
     session_name: str,
     normalized_message: dict[str, Any],
     state: dict[str, Any],
-    openai_api_key: str,
     agent_model: str,
     agent_reasoning_effort: str,
 ) -> dict[str, Any] | None:
@@ -2471,7 +2397,6 @@ def handle_calendar_flow(
     else:
         calendar_result = invoke_calendar_agent(
             vault_root=vault_root,
-            openai_api_key=openai_api_key,
             message=normalized_message,
             pending_request=pending_request,
             history=calendar_history,
@@ -2761,7 +2686,6 @@ def sync_once(
     ingest_after_sync: bool,
     agent_model: str,
     agent_reasoning_effort: str,
-    openai_api_key: str,
     mode: str = "sync",
 ) -> dict[str, Any]:
     inbox_dir, raw_updates_dir = ensure_directories(vault_root)
@@ -2780,7 +2704,6 @@ def sync_once(
         ingest_after_sync=ingest_after_sync,
         agent_model=agent_model,
         agent_reasoning_effort=agent_reasoning_effort,
-        openai_api_key=openai_api_key,
         updates=updates,
         mode=mode,
     )
@@ -2794,7 +2717,6 @@ def process_update_batch(
     ingest_after_sync: bool,
     agent_model: str,
     agent_reasoning_effort: str,
-    openai_api_key: str,
     updates: list[dict[str, Any]],
     mode: str,
 ) -> dict[str, Any]:
@@ -2972,7 +2894,6 @@ def process_update_batch(
         normalized = enrich_message_attachments(
             vault_root=vault_root,
             token=token,
-            openai_api_key=openai_api_key,
             attachment_model=agent_model,
             update=update,
             normalized_message=normalized,
@@ -2985,7 +2906,6 @@ def process_update_batch(
             session_name=session_name,
             normalized_message=normalized,
             state=state,
-            openai_api_key=openai_api_key,
             agent_model=agent_model,
             agent_reasoning_effort=agent_reasoning_effort,
         )
@@ -3038,7 +2958,6 @@ def process_update_batch(
             session_name=session_name,
             agent_model=agent_model,
             agent_reasoning_effort=agent_reasoning_effort,
-            openai_api_key=openai_api_key,
             message=normalized,
             known_chats=state.get("known_chats", {}),
             prior_thread_id=prior_thread_id,
@@ -3139,7 +3058,6 @@ def process_update_batch(
                 decision=decision,
                 actions=actions,
                 state=state,
-                openai_api_key=openai_api_key,
                 agent_model=agent_model,
                 agent_reasoning_effort=agent_reasoning_effort,
             )
@@ -3264,7 +3182,7 @@ def process_update_batch(
                 "stored": bool(decision.get("storeInVault")),
                 "answered": bool(query_result),
                 "actions": [action["tool"] for action in actions],
-                "cost": query_result.get("cost") if query_result else None,
+                "billing": query_result.get("billing") if query_result else None,
             },
         )
         append_trajectory_event(
@@ -3314,7 +3232,6 @@ def run_loop(
     ingest_after_sync: bool,
     agent_model: str,
     agent_reasoning_effort: str,
-    openai_api_key: str,
 ) -> None:
     while True:
         result = sync_once(
@@ -3326,7 +3243,6 @@ def run_loop(
             ingest_after_sync=ingest_after_sync,
             agent_model=agent_model,
             agent_reasoning_effort=agent_reasoning_effort,
-            openai_api_key=openai_api_key,
             mode="run",
         )
         print(json.dumps(result, indent=2), flush=True)
@@ -3341,7 +3257,6 @@ def main() -> None:
     common.add_argument("--vault-root", type=Path, default=Path.cwd())
     common.add_argument("--session-name", default=DEFAULT_SESSION_NAME)
     common.add_argument("--bot-token", default=os.environ.get("TELEGRAM_BOT_TOKEN", ""))
-    common.add_argument("--openai-api-key", default=os.environ.get("OPENAI_API_KEY", ""))
     common.add_argument("--agent-model", default=DEFAULT_AGENT_MODEL)
     common.add_argument("--agent-reasoning-effort", default="medium")
     common.add_argument(
@@ -3379,9 +3294,6 @@ def main() -> None:
     token = str(args.bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
     if not token:
         raise SystemExit("Missing Telegram bot token. Set TELEGRAM_BOT_TOKEN or pass --bot-token.")
-    openai_api_key = str(args.openai_api_key or os.environ.get("OPENAI_API_KEY", "")).strip()
-    if not openai_api_key:
-        raise SystemExit("Missing OpenAI API key. Set OPENAI_API_KEY or pass --openai-api-key.")
 
     allowed_chat_ids = parse_allowed_chat_ids(args.allowed_chat_ids)
     ingest_after_sync = not args.no_ingest
@@ -3396,7 +3308,6 @@ def main() -> None:
             ingest_after_sync=ingest_after_sync,
             agent_model=args.agent_model,
             agent_reasoning_effort=args.agent_reasoning_effort,
-            openai_api_key=openai_api_key,
         )
         print(json.dumps(result, indent=2))
         return
@@ -3415,7 +3326,6 @@ def main() -> None:
             ingest_after_sync=ingest_after_sync,
             agent_model=args.agent_model,
             agent_reasoning_effort=args.agent_reasoning_effort,
-            openai_api_key=openai_api_key,
             updates=updates,
             mode="webhook",
         )
@@ -3433,7 +3343,6 @@ def main() -> None:
             ingest_after_sync=ingest_after_sync,
             agent_model=args.agent_model,
             agent_reasoning_effort=args.agent_reasoning_effort,
-            openai_api_key=openai_api_key,
         )
 
 

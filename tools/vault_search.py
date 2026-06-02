@@ -10,7 +10,6 @@ import re
 import sqlite3
 import subprocess
 import sys
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -134,81 +133,12 @@ def search_vault(vault_root: Path, query: str, limit: int) -> list[dict[str, Any
 def query_embeddings(conn: sqlite3.Connection, query: str, limit: int) -> list[dict[str, Any]]:
     if os.environ.get("VAULT_EMBEDDINGS_ENABLED", "").strip().lower() not in {"1", "true", "yes"}:
         return []
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY") or ""
-    if not api_key.strip() or not table_exists(conn, "document_embeddings"):
-        return []
-    model = os.environ.get("VAULT_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip() or DEFAULT_EMBEDDING_MODEL
-    query_vec = fetch_query_embedding(api_key=api_key, model=model, query=query)
-    if not query_vec:
-        return []
-    rows = conn.execute(
-        """
-        SELECT d.*, e.embedding
-        FROM document_embeddings e
-        JOIN documents d ON d.path = e.path
-        WHERE e.model = ?
-        """,
-        (model,),
-    ).fetchall()
-    results = []
-    for row in rows:
-        try:
-            doc_vec = [float(value) for value in json.loads(row["embedding"])]
-        except Exception:
-            continue
-        vector_score = cosine_similarity(query_vec, doc_vec)
-        if not math.isfinite(vector_score):
-            continue
-        recency = temporal_multiplier(row["published_on"] or row["discovered_on"], row["type"])
-        priority = priority_multiplier(row["priority"] if "priority" in row.keys() else "")
-        score = vector_score * recency * priority
-        results.append(
-            {
-                "path": row["path"],
-                "title": row["title"],
-                "type": row["type"],
-                "url": row["url"] or None,
-                "published_on": row["published_on"] or None,
-                "discovered_on": row["discovered_on"] or None,
-                "deadline": row["deadline"] or None,
-                "score": score,
-                "text_score": 0,
-                "vector_score": vector_score,
-                "snippet": best_snippet(row["summary"] or row["body"] or "", query_terms(query)),
-                "tags": parse_json_list(row["tags"]),
-                "topics": parse_json_list(row["topics"]),
-                "retrieval_sources": ["embedding"],
-            }
-        )
-    results.sort(key=lambda item: item["score"], reverse=True)
-    return results[:limit]
+    raise RuntimeError("VAULT_EMBEDDINGS_ENABLED is no longer supported with OpenAI API embeddings. Use BM25/SQLite search or add a local embedding backend.")
 
 
 def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)).fetchone()
     return row is not None
-
-
-def fetch_query_embedding(*, api_key: str, model: str, query: str) -> list[float]:
-    payload = json.dumps({"model": model, "input": query}).encode("utf-8")
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/embeddings",
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        return []
-    data = body.get("data") or []
-    if not data or not isinstance(data[0], dict):
-        return []
-    return [float(value) for value in data[0].get("embedding", [])]
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:

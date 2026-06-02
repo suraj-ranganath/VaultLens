@@ -12,7 +12,7 @@ This deploys the VaultLens Telegram agent as a webhook-first AWS path.
 - The Telegram worker uses preview-message edits for progress, then edits that same preview into the final answer or acknowledgement when possible.
 - Telegram command-center requests (`/today`, `/queue`, `/status`, `/trace`) and inline button callbacks are handled by deterministic local code inside the same processor, so common state updates do not spend LLM tokens.
 - The query path compiles `.vault/cache/`, runs local SQLite FTS retrieval, and only then calls the Codex-backed answer agent.
-- Cache compilation writes digest/search/report artifacts atomically and produces claim-health reports for contradictions, stale claims, open questions, and low-confidence evidence. Optional semantic embeddings are gated by `VAULT_EMBEDDINGS_ENABLED=true` to avoid surprise daily cloud cost.
+- Cache compilation writes digest/search/report artifacts atomically and produces claim-health reports for contradictions, stale claims, open questions, and low-confidence evidence. Search defaults to local SQLite FTS/BM25; OpenAI API embeddings have been removed.
 - Web, Telegram, and morning-brief runs write redacted trajectory sidecars under `.vault/trajectories/`; Telegram outbound messages are queued under `.vault/telegram-delivery-queue/` if sendMessage fails and retried on the next worker run.
 - X/Twitter links use the lightweight `tools/x_content.py` adapter during metadata enrichment. In cloud this normally uses public oEmbed; locally it can use `xurl` first when installed and authenticated.
 - After processing, the processor writes one compressed state bundle back to S3.
@@ -39,13 +39,15 @@ This is optimized for a personal bot with occasional bursts. If usage becomes he
 - `.env.local` containing:
 
 ```bash
-OPENAI_API_KEY=...
+CODEX_ACCESS_TOKEN=...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_CHAT_IDS=123456789
 AWS_REGION=us-west-2
 STACK_NAME=vault-lens-telegram
 HEARTBEAT_ENABLED=false
 ```
+
+`CODEX_ACCESS_TOKEN` is passed as a no-echo CloudFormation parameter and used by the Codex Python SDK in Lambda. Do not copy `~/.codex/auth.json` into AWS. Local development should use `codex login --device-auth` instead.
 
 `TELEGRAM_ALLOWED_CHAT_IDS` is optional, but strongly recommended so only your Telegram chat can use the bot.
 
@@ -138,7 +140,7 @@ HEARTBEAT_ENABLED=true TELEGRAM_HEARTBEAT_CHAT_ID=123456789 bun run cloud:deploy
 
 The schedule defaults to `cron(0 9 * * ? *)` in `America/Los_Angeles`. Override with `HEARTBEAT_SCHEDULE` and `HEARTBEAT_SCHEDULE_TIMEZONE` if needed.
 
-The heartbeat path reuses the processor function and runs `tools/vault_heartbeat.py`. That script cheaply builds a candidate pack from deadlines, reminders, jobs, opportunities, today's Google Calendar events, recent saves, profile context, dashboards, and hot context, then calls `tools/vault_morning_brief_agent.mjs` to choose and write the actual brief. The deterministic layer is only a shortlist; the agent decides what is relevant and personalized enough to send. Web search is disabled for the scheduled brief by default to keep it cheap and grounded in the canonical vault.
+The heartbeat path reuses the processor function and runs `tools/vault_heartbeat.py`. That script cheaply builds a candidate pack from deadlines, reminders, jobs, opportunities, today's Google Calendar events, recent saves, profile context, dashboards, and hot context, then calls the shared Codex Python runner to choose and write the actual brief. The deterministic layer is only a shortlist; the agent decides what is relevant and personalized enough to send. Web search is disabled for the scheduled brief by default to keep it grounded in the canonical vault.
 
 Calendar events are fetched through the same `gws` credentials used by Telegram calendar actions. The default calendar is `VAULT_CALENDAR_ID`, falling back to `VAULT_BRIEF_CALENDAR_ID`, then `primary`. Set `VAULT_BRIEF_INCLUDE_CALENDAR=false` to disable calendar fetching if credentials are unavailable.
 
@@ -156,4 +158,4 @@ bun run telegram:webhook:test < /tmp/telegram-update.json
 - Telegram retries failed webhook deliveries, and the local processed-update ledger prevents duplicate processing once state has been synced.
 - Playwright browser enrichment is intentionally not bundled with browsers in this Lambda image. Browser-heavy enrichment should stay local or move to a separate scheduled worker if it becomes essential in the cloud.
 - X/Twitter post text does not require Playwright in the common case: the cloud worker first tries the `x_content` adapter through live metadata enrichment. Browser enrichment remains the local fallback for posts that oEmbed/live adapters cannot recover.
-- `.vault/events/agent-events.jsonl` is the cross-surface event log for web queries, Telegram processing, costs, and future diagnostics.
+- `.vault/events/agent-events.jsonl` is the cross-surface event log for web queries, Telegram processing, Codex usage, and future diagnostics.

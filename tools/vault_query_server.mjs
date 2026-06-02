@@ -8,7 +8,6 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { Codex } from "@openai/codex-sdk";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,31 +23,8 @@ const customDashboardRoot = path.join(vaultRoot, "dashboards", "custom");
 loadEnvFile(path.join(vaultRoot, ".env.local"));
 
 const PORT = Number.parseInt(process.env.VAULT_QUERY_PORT || "4318", 10);
-const DEFAULT_MODEL = (process.env.VAULT_QUERY_DEFAULT_MODEL || "gpt-5.4").trim();
-const codex = new Codex({
-  apiKey: (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || "").trim(),
-});
-
-const MODEL_PRICING = {
-  "gpt-5.4": {
-    inputPer1M: 2.5,
-    cachedInputPer1M: 0.25,
-    outputPer1M: 15,
-    source: "https://openai.com/api/pricing/",
-  },
-  "gpt-5.4-mini": {
-    inputPer1M: 0.75,
-    cachedInputPer1M: 0.075,
-    outputPer1M: 4.5,
-    source: "https://openai.com/api/pricing/",
-  },
-  "gpt-5.4-nano": {
-    inputPer1M: 0.2,
-    cachedInputPer1M: 0.02,
-    outputPer1M: 1.25,
-    source: "https://openai.com/api/pricing/",
-  },
-};
+const DEFAULT_MODEL = (process.env.VAULT_QUERY_DEFAULT_MODEL || process.env.VAULT_CODEX_MODEL || "auto").trim();
+const CODEX_RUNNER = path.join(vaultRoot, "tools", "codex_agent_runner.py");
 
 const QUERY_SCHEMA = {
   type: "object",
@@ -100,7 +76,8 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         port: PORT,
         model: DEFAULT_MODEL,
-        hasApiKey: Boolean((process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || "").trim()),
+        hasCodexAuth: hasCodexAuth(),
+        billingMode: "codex_subscription",
       });
     }
 
@@ -174,40 +151,35 @@ async function handleQuery(req, res) {
     return json(res, 400, { error: "Missing `question`." });
   }
 
-  const apiKey = (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || "").trim();
-  if (!apiKey) {
-    return json(res, 500, { error: "Missing OPENAI_API_KEY or CODEX_API_KEY in .env.local." });
+  if (!hasCodexAuth()) {
+    return json(res, 500, { error: "Missing Codex auth. Run `codex login --device-auth` locally or set CODEX_ACCESS_TOKEN in cloud." });
   }
 
   const startedAt = Date.now();
-  const vaultContext = await buildVaultContextPack(question);
-  const threadOptions = {
-    model,
+  const runnerResult = await runCodexRunnerJson("vault-query", {
     workingDirectory: vaultRoot,
-    skipGitRepoCheck: true,
-    approvalPolicy: "never",
-    sandboxMode: "read-only",
-    networkAccessEnabled: includeWebSearch,
-    webSearchEnabled: includeWebSearch,
-    modelReasoningEffort: reasoningEffort,
-  };
-
-  const thread = threadId ? codex.resumeThread(threadId, threadOptions) : codex.startThread(threadOptions);
-  const turn = await thread.run(buildPrompt(question, includeWebSearch, vaultContext), { outputSchema: QUERY_SCHEMA });
-  const answer = await hydrateAnswer(parseJson(turn.finalResponse));
-  const cost = calculateCost(model, turn.usage);
+    question,
+    threadId,
+    reasoningEffort,
+    includeWebSearch,
+    model,
+  });
+  const answer = await hydrateAnswer(runnerResult.answer || {});
+  const usage = runnerResult.usage || null;
+  const billing = normalizeBilling(runnerResult.billing, usage);
+  const effectiveThreadId = runnerResult.threadId || threadId || randomId();
   const persisted = await persistChatTurn({
-    threadId: thread.id || randomId(),
+    threadId: effectiveThreadId,
     question,
     answer,
-    trace: summarizeTrace(turn.items),
-    usage: turn.usage,
-    cost,
+    trace: runnerResult.trace || [],
+    usage,
+    billing,
     meta: {
-      model,
+      model: runnerResult.meta?.model || model,
       reasoningEffort,
       includeWebSearch,
-      vaultContextBytes: Buffer.byteLength(vaultContext, "utf8"),
+      vaultContextBytes: runnerResult.meta?.vaultContextBytes || 0,
       durationMs: Date.now() - startedAt,
     },
     feed: [],
@@ -216,25 +188,25 @@ async function handleQuery(req, res) {
   });
   await appendAgentEvent({
     event: "web.query.completed",
-    thread_id: thread.id,
+    thread_id: effectiveThreadId,
     question,
-    model,
+    model: runnerResult.meta?.model || model,
     reasoning_effort: reasoningEffort,
     include_web_search: includeWebSearch,
     duration_ms: Date.now() - startedAt,
-    cost,
+    billing,
   });
 
   return json(res, 200, {
     ok: true,
-    threadId: thread.id,
+    threadId: effectiveThreadId,
     answer,
-    trace: summarizeTrace(turn.items),
-    usage: turn.usage,
-    cost,
+    trace: runnerResult.trace || [],
+    usage,
+    billing,
     chat: buildChatSummary(persisted),
     meta: {
-      model,
+      model: runnerResult.meta?.model || model,
       reasoningEffort,
       includeWebSearch,
       durationMs: Date.now() - startedAt,
@@ -251,10 +223,6 @@ async function handleQueryStream(req, res) {
 
   const { question, threadId, reasoningEffort, includeWebSearch, model } = validated;
   const startedAt = Date.now();
-  const vaultContext = await buildVaultContextPack(question);
-  const threadOptions = buildThreadOptions({ model, reasoningEffort, includeWebSearch });
-  const thread = threadId ? codex.resumeThread(threadId, threadOptions) : codex.startThread(threadOptions);
-  const { events } = await thread.runStreamed(buildPrompt(question, includeWebSearch, vaultContext), { outputSchema: QUERY_SCHEMA });
 
   res.writeHead(200, {
     "Content-Type": "application/x-ndjson; charset=utf-8",
@@ -262,116 +230,84 @@ async function handleQueryStream(req, res) {
     Connection: "keep-alive",
   });
 
-  const completedItems = [];
-  let finalResponse = "";
-  let usage = null;
   const feed = [];
+  const completedTrace = [];
+  let resultEvent = null;
 
   try {
-    for await (const event of events) {
-      if (event.type === "thread.started") {
-        const payload = { type: "thread.started", threadId: event.thread_id };
-        feed.push(payload);
-        writeNdjson(res, payload);
-        continue;
-      }
-      if (event.type === "turn.started") {
-        const payload = { type: "turn.started" };
-        feed.push(payload);
-        writeNdjson(res, payload);
-        continue;
-      }
-      if (event.type === "turn.completed") {
-        usage = event.usage;
-        const payload = { type: "turn.completed", usage };
-        feed.push(payload);
-        writeNdjson(res, payload);
-        continue;
-      }
-      if (event.type === "turn.failed") {
-        const payload = { type: "turn.failed", error: event.error.message };
-        feed.push(payload);
-        writeNdjson(res, payload);
-        break;
-      }
-      if (event.type === "error") {
-        if ((event.message || "").includes("[features].collab")) {
-          continue;
-        }
-        const payload = { type: "error", message: event.message };
-        feed.push(payload);
-        writeNdjson(res, payload);
-        continue;
-      }
-      if (event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed") {
-        if (event.type === "item.completed") {
-          completedItems.push(event.item);
-          if (event.item.type === "agent_message") {
-            finalResponse = event.item.text;
-          }
-        }
-        const normalizedItem = normalizeThreadItem(event.item);
-        if (normalizedItem) {
-          const payload = {
-            type: "item",
-            phase: event.type.split(".")[1],
-            item: normalizedItem,
+    await runCodexRunnerStream(
+      "vault-query-stream",
+      {
+        workingDirectory: vaultRoot,
+        question,
+        threadId,
+        reasoningEffort,
+        includeWebSearch,
+        model,
+      },
+      async (event) => {
+        if (event.type === "result") {
+          const answer = await hydrateAnswer(event.answer || {});
+          const usage = event.usage || null;
+          const billing = normalizeBilling(event.billing, usage);
+          const trace = Array.isArray(event.trace) ? event.trace : completedTrace;
+          const persisted = await persistChatTurn({
+            threadId: event.threadId || threadId || randomId(),
+            question,
+            answer,
+            trace,
+            usage,
+            billing,
+            meta: {
+              ...(event.meta || {}),
+              model: event.meta?.model || model,
+              reasoningEffort,
+              includeWebSearch,
+              durationMs: Date.now() - startedAt,
+            },
+            feed,
+            startedAt: new Date(startedAt).toISOString(),
+            completedAt: new Date().toISOString(),
+          });
+          await appendAgentEvent({
+            event: "web.query.completed",
+            thread_id: event.threadId,
+            question,
+            model: event.meta?.model || model,
+            reasoning_effort: reasoningEffort,
+            include_web_search: includeWebSearch,
+            duration_ms: Date.now() - startedAt,
+            billing,
+          });
+          resultEvent = {
+            ...event,
+            answer,
+            trace,
+            usage,
+            billing,
+            chat: buildChatSummary(persisted),
+            meta: {
+              ...(event.meta || {}),
+              model: event.meta?.model || model,
+              reasoningEffort,
+              includeWebSearch,
+              durationMs: Date.now() - startedAt,
+            },
           };
-          feed.push(payload);
-          writeNdjson(res, payload);
+          writeNdjson(res, resultEvent);
+          return;
         }
-      }
-    }
 
-    if (!finalResponse) {
-      throw new Error("Codex did not return a final structured response.");
+        if (event.type === "item" && event.phase === "completed" && event.item) {
+          completedTrace.push(event.item);
+        }
+        feed.push(event);
+        writeNdjson(res, event);
+      },
+    );
+    if (!resultEvent) {
+      throw new Error("Codex runner completed without a final result.");
     }
-
-    const answer = await hydrateAnswer(parseJson(finalResponse));
-    const cost = calculateCost(model, usage);
-    const persisted = await persistChatTurn({
-      threadId: thread.id || randomId(),
-      question,
-      answer,
-      trace: summarizeTrace(completedItems),
-      usage,
-      cost,
-      meta: {
-        model,
-        reasoningEffort,
-        includeWebSearch,
-        vaultContextBytes: Buffer.byteLength(vaultContext, "utf8"),
-        durationMs: Date.now() - startedAt,
-      },
-      feed,
-      startedAt: new Date(startedAt).toISOString(),
-      completedAt: new Date().toISOString(),
-    });
-    await appendAgentEvent({
-      event: "web.query.completed",
-      thread_id: thread.id,
-      question,
-      model,
-      reasoning_effort: reasoningEffort,
-      include_web_search: includeWebSearch,
-      duration_ms: Date.now() - startedAt,
-      cost,
-    });
-    writeNdjson(res, {
-      type: "result",
-      threadId: thread.id,
-      answer,
-      trace: summarizeTrace(completedItems),
-      usage,
-      cost,
-      chat: buildChatSummary(persisted),
-      meta: {
-        model,
-        reasoningEffort,
-        includeWebSearch,
-        durationMs: Date.now() - startedAt,
-      },
-    });
   } catch (error) {
     writeNdjson(res, {
       type: "error",
@@ -1181,7 +1117,7 @@ async function writeSavedAnswer({ question, answer, trace, meta, threadId }) {
   };
 }
 
-async function persistChatTurn({ threadId, question, answer, trace, usage, cost, meta, feed, startedAt, completedAt }) {
+async function persistChatTurn({ threadId, question, answer, trace, usage, billing, meta, feed, startedAt, completedAt }) {
   await fsp.mkdir(chatTraceRoot, { recursive: true });
   const safeId = sanitizeChatId(threadId || randomId());
   const targetPath = path.join(chatTraceRoot, `${safeId}.json`);
@@ -1217,7 +1153,7 @@ async function persistChatTurn({ threadId, question, answer, trace, usage, cost,
     answer,
     trace,
     usage,
-    cost,
+    billing,
     meta,
     feed,
     startedAt,
@@ -1233,7 +1169,7 @@ async function persistChatTurn({ threadId, question, answer, trace, usage, cost,
     answer,
     trace,
     usage,
-    cost,
+    billing,
     meta,
     feed,
     startedAt,
@@ -1247,7 +1183,7 @@ async function persistChatTurn({ threadId, question, answer, trace, usage, cost,
       threadId: safeId,
       confidence: answer?.confidence || "",
       citationCount: Array.isArray(answer?.citations) ? answer.citations.length : 0,
-      cost,
+      billing,
     },
   });
   return chat;
@@ -1422,7 +1358,7 @@ function buildChatSummary(chat) {
     model: chat.model,
     lastQuestion: lastTurn?.question || "",
     lastAnswer: lastTurn?.answer?.concise_answer || lastTurn?.answer?.answer_markdown || "",
-    lastCost: lastTurn?.cost || null,
+    lastBilling: lastTurn?.billing || null,
   };
 }
 
@@ -2609,6 +2545,106 @@ function loadEnvFile(filePath) {
   }
 }
 
+function hasCodexAuth() {
+  if (String(process.env.CODEX_ACCESS_TOKEN || "").trim()) {
+    return true;
+  }
+  const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || "", ".codex");
+  return Boolean(codexHome && fs.existsSync(path.join(codexHome, "auth.json")));
+}
+
+function pythonRunnerCommand() {
+  return {
+    command: "uv",
+    args: ["run", "python", CODEX_RUNNER],
+  };
+}
+
+async function runCodexRunnerJson(commandName, payload) {
+  const command = pythonRunnerCommand();
+  const stdout = await runWithInput({
+    command: command.command,
+    args: [...command.args, commandName],
+    cwd: vaultRoot,
+    env: process.env,
+    input: JSON.stringify(payload),
+    timeoutMs: 180_000,
+  });
+  return JSON.parse(stdout);
+}
+
+function runCodexRunnerStream(commandName, payload, onEvent) {
+  return new Promise((resolve, reject) => {
+    const command = pythonRunnerCommand();
+    const child = spawn(command.command, [...command.args, commandName], {
+      cwd: vaultRoot,
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdoutBuffer = "";
+    let stderr = "";
+    let settled = false;
+    const finishError = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", async (chunk) => {
+      child.stdout.pause();
+      try {
+        stdoutBuffer += chunk;
+        let newlineIndex = stdoutBuffer.indexOf("\n");
+        while (newlineIndex >= 0) {
+          const line = stdoutBuffer.slice(0, newlineIndex).trim();
+          stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+          if (line) {
+            await onEvent(JSON.parse(line));
+          }
+          newlineIndex = stdoutBuffer.indexOf("\n");
+        }
+      } catch (error) {
+        child.kill("SIGTERM");
+        finishError(error);
+      } finally {
+        child.stdout.resume();
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", finishError);
+    child.on("close", async (code) => {
+      if (settled) return;
+      try {
+        const tail = stdoutBuffer.trim();
+        if (tail) {
+          await onEvent(JSON.parse(tail));
+        }
+        if (code === 0) {
+          settled = true;
+          resolve();
+        } else {
+          finishError(new Error(stderr.trim() || `${command.command} exited with code ${code}`));
+        }
+      } catch (error) {
+        finishError(error);
+      }
+    });
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
+
+function normalizeBilling(billing, usage) {
+  return {
+    billingMode: "codex_subscription",
+    note: "Usage is charged against Codex/ChatGPT limits, not OpenAI API credits.",
+    ...(billing && typeof billing === "object" ? billing : {}),
+    usage: usage || billing?.usage || null,
+  };
+}
+
 function buildOutputTitle(question) {
   const text = question.replace(/\s+/g, " ").trim();
   if (!text) {
@@ -2671,9 +2707,8 @@ function validateQueryRequest(body) {
     return { error: "Missing `question`.", status: 400 };
   }
 
-  const apiKey = (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || "").trim();
-  if (!apiKey) {
-    return { error: "Missing OPENAI_API_KEY or CODEX_API_KEY in .env.local.", status: 500 };
+  if (!hasCodexAuth()) {
+    return { error: "Missing Codex auth. Run `codex login --device-auth` locally or set CODEX_ACCESS_TOKEN in cloud.", status: 500 };
   }
 
   return {
@@ -2685,56 +2720,15 @@ function validateQueryRequest(body) {
   };
 }
 
-function buildThreadOptions({ model, reasoningEffort, includeWebSearch }) {
-  return {
-    model,
-    workingDirectory: vaultRoot,
-    skipGitRepoCheck: true,
-    approvalPolicy: "never",
-    sandboxMode: "read-only",
-    networkAccessEnabled: includeWebSearch,
-    webSearchEnabled: includeWebSearch,
-    modelReasoningEffort: reasoningEffort,
-  };
-}
-
-function calculateCost(model, usage) {
-  const pricing = MODEL_PRICING[String(model || "").toLowerCase()];
-  if (!pricing || !usage) {
-    return null;
-  }
-
-  const cachedInputTokens = Number(usage.cached_input_tokens || 0);
-  const totalInputTokens = Number(usage.input_tokens || 0);
-  const uncachedInputTokens = Math.max(0, totalInputTokens - cachedInputTokens);
-  const outputTokens = Number(usage.output_tokens || 0);
-
-  const inputCost = (uncachedInputTokens / 1_000_000) * pricing.inputPer1M;
-  const cachedInputCost = (cachedInputTokens / 1_000_000) * pricing.cachedInputPer1M;
-  const outputCost = (outputTokens / 1_000_000) * pricing.outputPer1M;
-  const totalCost = inputCost + cachedInputCost + outputCost;
-
-  return {
-    currency: "USD",
-    assumption: "standard pricing under 272K context window",
-    source: pricing.source,
-    inputTokens: uncachedInputTokens,
-    cachedInputTokens,
-    outputTokens,
-    inputUsd: inputCost,
-    cachedInputUsd: cachedInputCost,
-    outputUsd: outputCost,
-    totalUsd: totalCost,
-  };
-}
-
 async function hydrateAnswer(answer) {
   const citations = [];
   for (const citation of Array.isArray(answer.citations) ? answer.citations : []) {
-    const sourceUrl = citation.source_url || (await readPrimaryUrlForCitation(citation.path));
-    const vaultUrl = buildVaultUrl(citation.path);
+    const citationPath = normalizeVaultPath(citation.path);
+    const sourceUrl = citation.source_url || (await readPrimaryUrlForCitation(citationPath));
+    const vaultUrl = buildVaultUrl(citationPath);
     citations.push({
       ...citation,
+      path: citationPath,
       vault_url: vaultUrl,
       source_url: sourceUrl || null,
       citation_url: sourceUrl || vaultUrl,
@@ -2783,7 +2777,8 @@ function rewriteAnswerMarkdownLinks(markdown, citations) {
   );
 
   normalized = normalized.replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, (_full, target, label) => {
-    const citationUrl = byPath.get(target) || buildVaultUrl(target);
+    const normalizedTarget = normalizeVaultPath(target);
+    const citationUrl = byPath.get(normalizedTarget) || buildVaultUrl(normalizedTarget);
     return `[${label}](${citationUrl})`;
   });
 
@@ -2795,14 +2790,15 @@ function rewriteAnswerMarkdownLinks(markdown, citations) {
     if (trimmedHref.startsWith("http://") || trimmedHref.startsWith("https://")) {
       return full;
     }
-    if (byPath.has(trimmedHref)) {
-      return `[${label}](${byPath.get(trimmedHref)})`;
+    const normalizedHref = normalizeVaultPath(trimmedHref);
+    if (byPath.has(normalizedHref)) {
+      return `[${label}](${byPath.get(normalizedHref)})`;
     }
     if (byVaultUrl.has(trimmedHref)) {
       return `[${label}](${byVaultUrl.get(trimmedHref)})`;
     }
-    if (trimmedHref.endsWith(".md")) {
-      return `[${label}](${byPath.get(trimmedHref) || buildVaultUrl(trimmedHref)})`;
+    if (normalizedHref.endsWith(".md")) {
+      return `[${label}](${byPath.get(normalizedHref) || buildVaultUrl(normalizedHref)})`;
     }
     return full;
   });
@@ -2811,7 +2807,32 @@ function rewriteAnswerMarkdownLinks(markdown, citations) {
 }
 
 function buildVaultUrl(relativePath) {
-  return `/vault/${encodeURI(String(relativePath || "").replace(/^\/+/, ""))}`;
+  return `/vault/${encodeURI(normalizeVaultPath(relativePath))}`;
+}
+
+function normalizeVaultPath(value) {
+  const raw = String(value || "").trim().replace(/^file:\/\//, "");
+  if (!raw) {
+    return "";
+  }
+  if (raw.startsWith("/vault/")) {
+    return raw.replace(/^\/vault\/+/, "");
+  }
+  try {
+    if (path.isAbsolute(raw)) {
+      const resolved = path.resolve(raw);
+      const root = path.resolve(vaultRoot);
+      if (resolved === root) {
+        return "";
+      }
+      if (resolved.startsWith(`${root}${path.sep}`)) {
+        return path.relative(root, resolved).split(path.sep).join("/");
+      }
+    }
+  } catch {
+    // Fall through to string cleanup.
+  }
+  return raw.replace(/^\/+/, "");
 }
 
 function buildContextualVaultUrl(relativePath, context = {}) {

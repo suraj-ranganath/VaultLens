@@ -11,10 +11,6 @@ from pathlib import Path
 from typing import Any
 
 
-def js_runtime() -> str:
-    return os.environ.get("VAULT_JS_RUNTIME", "bun")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a reviewable vault dreaming pass.")
     parser.add_argument("--vault-root", type=Path, default=Path.cwd())
@@ -32,14 +28,19 @@ def run_dream(vault_root: Path, *, mock_json: str = "") -> dict[str, Any]:
         append_event(vault_root, dream, output_path)
         return {"ok": True, "output": output_path.relative_to(vault_root).as_posix(), "dream": dream}
 
-    script = vault_root / "tools" / "vault_dream_agent.mjs"
     payload: dict[str, Any] = {
         "workingDirectory": str(vault_root),
-        "model": os.environ.get("VAULT_DREAM_MODEL") or os.environ.get("VAULT_AGENT_MODEL") or "gpt-5.4",
+        "model": os.environ.get("VAULT_DREAM_MODEL") or os.environ.get("VAULT_CODEX_MODEL") or os.environ.get("VAULT_AGENT_MODEL") or "auto",
         "reasoningEffort": os.environ.get("VAULT_DREAM_REASONING_EFFORT") or "low",
     }
     proc = subprocess.run(
-        [js_runtime(), str(script)],
+        [
+            os.environ.get("VAULT_PYTHON_RUNTIME", "uv"),
+            "run",
+            "python",
+            str(vault_root / "tools" / "codex_agent_runner.py"),
+            "dream",
+        ],
         input=json.dumps(payload),
         text=True,
         capture_output=True,

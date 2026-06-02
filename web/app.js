@@ -250,7 +250,7 @@ async function onSubmit(event) {
     trace: [],
     feed: [],
     usage: null,
-    cost: null,
+    billing: null,
     meta: {
       model: state.health?.model || els.modelName.textContent || "-",
       reasoningEffort: els.reasoning.value,
@@ -397,6 +397,19 @@ function handleStreamEvent(event) {
     return;
   }
 
+  if (event.type === "thread.token_usage.updated") {
+    appendFeed({
+      type: "system",
+      phase: "updated",
+      title: "Token usage updated",
+      body: formatUsage(event.usage),
+    });
+    if (state.pendingTurn) {
+      state.pendingTurn.usage = event.usage;
+    }
+    return;
+  }
+
   if (event.type === "turn.failed") {
     appendFeed({
       type: "error",
@@ -431,7 +444,7 @@ function handleStreamEvent(event) {
     if (state.pendingTurn) {
       state.pendingTurn.answer = event.answer;
       state.pendingTurn.usage = event.usage;
-      state.pendingTurn.cost = event.cost;
+      state.pendingTurn.billing = event.billing;
       state.pendingTurn.meta = event.meta;
       state.pendingTurn.completedAt = new Date().toISOString();
       state.pendingTurn.feed = state.feed.slice();
@@ -1081,13 +1094,20 @@ function renderAssistantMeta(turn, answer) {
   if (turn.usage) {
     pills.push(`<div class="meta-pill">${escapeHtml(formatUsage(turn.usage))}</div>`);
   }
-  if (turn.cost?.totalUsd != null) {
-    pills.push(`<div class="meta-pill">$${escapeHtml(turn.cost.totalUsd.toFixed(4))}</div>`);
+  if (turn.billing?.billingMode) {
+    pills.push(`<div class="meta-pill">${escapeHtml(formatBillingMode(turn.billing.billingMode))}</div>`);
   }
   if (turn.meta?.model) {
     pills.push(`<div class="meta-pill">${escapeHtml(turn.meta.model)}</div>`);
   }
   return pills.length ? `<div class="assistant-meta">${pills.join("")}</div>` : "";
+}
+
+function formatBillingMode(value) {
+  if (value === "codex_subscription") {
+    return "Codex limits";
+  }
+  return String(value || "").replaceAll("_", " ");
 }
 
 function renderGaps(gaps) {
@@ -1319,6 +1339,9 @@ function normalizeSavedFeed(feed) {
           if (entry?.type === "turn.completed") {
             return { type: "system", phase: "completed", title: "Turn completed", body: `usage: ${formatUsage(entry.usage)}` };
           }
+          if (entry?.type === "thread.token_usage.updated") {
+            return { type: "system", phase: "updated", title: "Token usage updated", body: formatUsage(entry.usage) };
+          }
           if (entry?.type === "error" || entry?.type === "turn.failed") {
             return { type: "error", phase: "failed", title: "Agent error", body: entry.message || entry.error || "" };
           }
@@ -1520,8 +1543,9 @@ function formatUsage(usage) {
   if (!usage) {
     return "usage unavailable";
   }
-  const cached = usage.cached_input_tokens || 0;
-  return `${usage.input_tokens || 0} in • ${cached} cached • ${usage.output_tokens || 0} out`;
+  const bucket = usage.total || usage.last || usage;
+  const cached = bucket.cached_input_tokens || 0;
+  return `${bucket.input_tokens || 0} in • ${cached} cached • ${bucket.output_tokens || 0} out`;
 }
 
 function groupChatsByRecency(chats) {

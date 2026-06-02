@@ -3,10 +3,10 @@ Transform: AWS::Serverless-2016-10-31
 Description: Cost-effective Telegram webhook deployment for VaultLens.
 
 Parameters:
-  OpenAIApiKey:
+  CodexAccessToken:
     Type: String
     NoEcho: true
-    Description: OpenAI API key used by the Codex SDK agent.
+    Description: Codex access token used by the Codex Python SDK agent.
   TelegramBotToken:
     Type: String
     NoEcho: true
@@ -28,10 +28,10 @@ Parameters:
     Type: String
     Default: primary
     Description: Google Calendar ID used by Telegram calendar actions and morning briefs.
-  VaultAgentModel:
+  VaultCodexModel:
     Type: String
-    Default: gpt-5.4
-    Description: Model used by the Telegram routing and query agents.
+    Default: auto
+    Description: Codex model used by the Telegram routing and query agents. Use auto to pick the best visible top-level model.
   VaultAgentReasoningEffort:
     Type: String
     Default: medium
@@ -79,13 +79,14 @@ Globals:
       - arm64
     Environment:
       Variables:
-        OPENAI_API_KEY: !Ref OpenAIApiKey
+        CODEX_ACCESS_TOKEN: !Ref CodexAccessToken
         TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
         TELEGRAM_ALLOWED_CHAT_IDS: !Ref TelegramAllowedChatIds
         TELEGRAM_WEBHOOK_SECRET: !Ref TelegramWebhookSecret
         GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON: !Ref GoogleWorkspaceCliCredentialsJson
         VAULT_CALENDAR_ID: !Ref VaultCalendarId
-        VAULT_AGENT_MODEL: !Ref VaultAgentModel
+        VAULT_CODEX_MODEL: !Ref VaultCodexModel
+        VAULT_AGENT_MODEL: !Ref VaultCodexModel
         VAULT_AGENT_REASONING_EFFORT: !Ref VaultAgentReasoningEffort
         VAULT_STATE_BUCKET: !Ref VaultStateBucket
         VAULT_STATE_PREFIX: state

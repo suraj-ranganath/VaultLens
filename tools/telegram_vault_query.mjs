@@ -6,29 +6,8 @@ import path from "node:path";
 import process from "node:process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { Codex } from "@openai/codex-sdk";
 
 const execFileAsync = promisify(execFile);
-const MODEL_PRICING = {
-  "gpt-5.4": {
-    inputPer1M: 2.5,
-    cachedInputPer1M: 0.25,
-    outputPer1M: 15,
-    source: "https://openai.com/api/pricing/",
-  },
-  "gpt-5.4-mini": {
-    inputPer1M: 0.75,
-    cachedInputPer1M: 0.075,
-    outputPer1M: 4.5,
-    source: "https://openai.com/api/pricing/",
-  },
-  "gpt-5.4-nano": {
-    inputPer1M: 0.2,
-    cachedInputPer1M: 0.02,
-    outputPer1M: 1.25,
-    source: "https://openai.com/api/pricing/",
-  },
-};
 
 const QUERY_SCHEMA = {
   type: "object",
@@ -214,57 +193,6 @@ ${vaultContext || "(No preloaded vault context was found.)"}
 User question:
 ${question}
 `.trim();
-}
-
-function buildThreadOptions({ model, reasoningEffort, includeWebSearch, workingDirectory }) {
-  return {
-    model,
-    workingDirectory,
-    additionalDirectories: [
-      path.join(workingDirectory, "items"),
-      path.join(workingDirectory, "topics"),
-      path.join(workingDirectory, "projects"),
-      path.join(workingDirectory, "dashboards"),
-      path.join(workingDirectory, "outputs"),
-      path.join(workingDirectory, "imports"),
-      path.join(workingDirectory, "raw", "docs"),
-    ].filter((dir) => fs.existsSync(dir)),
-    skipGitRepoCheck: true,
-    approvalPolicy: "never",
-    sandboxMode: "read-only",
-    networkAccessEnabled: includeWebSearch,
-    webSearchEnabled: includeWebSearch,
-    modelReasoningEffort: reasoningEffort,
-  };
-}
-
-function calculateCost(model, usage) {
-  const pricing = MODEL_PRICING[String(model || "").toLowerCase()];
-  if (!pricing || !usage) {
-    return null;
-  }
-
-  const cachedInputTokens = Number(usage.cached_input_tokens || 0);
-  const totalInputTokens = Number(usage.input_tokens || 0);
-  const uncachedInputTokens = Math.max(0, totalInputTokens - cachedInputTokens);
-  const outputTokens = Number(usage.output_tokens || 0);
-
-  const inputCost = (uncachedInputTokens / 1_000_000) * pricing.inputPer1M;
-  const cachedInputCost = (cachedInputTokens / 1_000_000) * pricing.cachedInputPer1M;
-  const outputCost = (outputTokens / 1_000_000) * pricing.outputPer1M;
-
-  return {
-    currency: "USD",
-    assumption: "standard pricing under 272K context window",
-    source: pricing.source,
-    inputTokens: uncachedInputTokens,
-    cachedInputTokens,
-    outputTokens,
-    inputUsd: inputCost,
-    cachedInputUsd: cachedInputCost,
-    outputUsd: outputCost,
-    totalUsd: inputCost + cachedInputCost + outputCost,
-  };
 }
 
 async function buildVaultContextPack(vaultRoot, question, recentConversationContext = "") {
@@ -875,11 +803,6 @@ async function main() {
   const raw = await readStdin();
   const payload = parseJson(raw);
 
-  const apiKey = (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY || "").trim();
-  if (!apiKey) {
-    throw new Error("Missing OPENAI_API_KEY or CODEX_API_KEY for vault query runner");
-  }
-
   const vaultRoot = path.resolve(payload.workingDirectory || process.cwd());
   const question = String(payload.question || "").trim();
   if (!question) {
@@ -887,7 +810,7 @@ async function main() {
   }
 
   const includeWebSearch = Boolean(payload.includeWebSearch ?? true);
-  const model = String(payload.model || "gpt-5.4").trim() || "gpt-5.4";
+  const model = String(payload.model || "auto").trim() || "auto";
   const reasoningEffort = String(payload.reasoningEffort || "medium").trim() || "medium";
   const recentConversationContext = String(payload.recentConversationContext || "");
   const vaultContext = await buildVaultContextPack(vaultRoot, question, recentConversationContext);
@@ -906,41 +829,7 @@ async function main() {
     return;
   }
 
-  const codex = new Codex({ apiKey });
-  const threadOptions = buildThreadOptions({
-    model,
-    reasoningEffort,
-    includeWebSearch,
-    workingDirectory: vaultRoot,
-  });
-
-  const thread = payload.threadId ? codex.resumeThread(payload.threadId, threadOptions) : codex.startThread(threadOptions);
-  const startedAt = Date.now();
-  const turn = await thread.run(buildPrompt(question, includeWebSearch, vaultContext), { outputSchema: QUERY_SCHEMA });
-  const answer = await hydrateAnswer(extractJson(turn.finalResponse), vaultRoot);
-  const usage = turn.usage || null;
-  const cost = calculateCost(model, usage);
-
-  process.stdout.write(
-    JSON.stringify(
-      {
-        threadId: thread.id,
-        answer,
-        usage,
-        cost,
-        trace: summarizeTrace(turn.items),
-        meta: {
-          model,
-          reasoningEffort,
-          includeWebSearch,
-          vaultContextBytes: Buffer.byteLength(vaultContext, "utf8"),
-          durationMs: Date.now() - startedAt,
-        },
-      },
-      null,
-      2,
-    ) + "\n",
-  );
+  throw new Error("tools/telegram_vault_query.mjs is now context-only. Use tools/codex_agent_runner.py vault-query for model-backed answers.");
 }
 
 main().catch((error) => {

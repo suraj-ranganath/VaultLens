@@ -9,7 +9,6 @@ import os
 import re
 import sqlite3
 import tempfile
-import urllib.request
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -508,64 +507,7 @@ def build_search_index(vault_root: Path, pages: list[Page]) -> None:
 def build_embedding_index(vault_root: Path, conn: sqlite3.Connection, pages: list[Page]) -> None:
     if os.environ.get("VAULT_EMBEDDINGS_ENABLED", "").strip().lower() not in {"1", "true", "yes"}:
         return
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY") or ""
-    if not api_key.strip():
-        return
-    model = os.environ.get("VAULT_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip() or DEFAULT_EMBEDDING_MODEL
-    cache_db = vault_root / EMBEDDING_CACHE_SQLITE
-    cache_db.parent.mkdir(parents=True, exist_ok=True)
-    cache_conn = sqlite3.connect(cache_db)
-    try:
-        cache_conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS embedding_cache (
-              model TEXT NOT NULL,
-              text_hash TEXT NOT NULL,
-              embedding TEXT NOT NULL,
-              updated_at TEXT NOT NULL,
-              PRIMARY KEY (model, text_hash)
-            )
-            """
-        )
-        entries = [
-            {
-                "path": page.path,
-                "text": embedding_text(page),
-            }
-            for page in pages
-        ]
-        entries = [{**entry, "hash": hashlib.sha256(entry["text"].encode("utf-8")).hexdigest()} for entry in entries if entry["text"]]
-        cached = load_embedding_cache(cache_conn, model, [entry["hash"] for entry in entries])
-        missing = [entry for entry in entries if entry["hash"] not in cached]
-        for batch in chunks(missing, 32):
-            try:
-                embeddings = fetch_openai_embeddings(api_key=api_key, model=model, inputs=[entry["text"] for entry in batch])
-            except Exception:
-                break
-            now = datetime.now(timezone.utc).isoformat()
-            for entry, embedding in zip(batch, embeddings):
-                cached[entry["hash"]] = embedding
-                cache_conn.execute(
-                    """
-                    INSERT INTO embedding_cache (model, text_hash, embedding, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(model, text_hash) DO UPDATE SET
-                      embedding=excluded.embedding,
-                      updated_at=excluded.updated_at
-                    """,
-                    (model, entry["hash"], json.dumps(embedding), now),
-                )
-            cache_conn.commit()
-        for entry in entries:
-            embedding = cached.get(entry["hash"])
-            if not embedding:
-                continue
-            conn.execute(
-                "INSERT INTO document_embeddings(path, model, text_hash, embedding) VALUES (?, ?, ?, ?)",
-                (entry["path"], model, entry["hash"], json.dumps(embedding)),
-            )
-    finally:
-        cache_conn.close()
+    raise RuntimeError("VAULT_EMBEDDINGS_ENABLED is no longer supported with OpenAI API embeddings. Use BM25/SQLite search or add a local embedding backend.")
 
 
 def embedding_text(page: Page) -> str:
@@ -603,24 +545,6 @@ def load_embedding_cache(conn: sqlite3.Connection, model: str, hashes: list[str]
             if isinstance(embedding, list):
                 out[str(text_hash)] = [float(value) for value in embedding]
     return out
-
-
-def fetch_openai_embeddings(*, api_key: str, model: str, inputs: list[str]) -> list[list[float]]:
-    payload = json.dumps({"model": model, "input": inputs}).encode("utf-8")
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/embeddings",
-        data=payload,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        body = json.loads(response.read().decode("utf-8"))
-    data = body.get("data") or []
-    by_index = sorted((item for item in data if isinstance(item, dict)), key=lambda item: int(item.get("index") or 0))
-    return [[float(value) for value in item.get("embedding", [])] for item in by_index]
 
 
 def chunks(items: list[Any], size: int) -> list[list[Any]]:

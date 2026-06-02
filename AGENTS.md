@@ -54,6 +54,7 @@ This vault is an AWS-backed, agent-maintained markdown wiki for personal knowled
 - Any local workflow that changes vault content must be designed to sync changes back to the canonical AWS state.
 - Browser automation enrichment may remain local-only when that is materially cheaper or operationally simpler, but any durable metadata or note updates produced from it should be written back into canonical state.
 - Browser automation should write browser artifact packs under `raw/web-clips/browser-artifacts/` when it gets past blocked or dynamic pages. These packs are durable evidence, not just summaries.
+- Model-backed agent turns should go through `tools/codex_agent_runner.py` and the Codex Python SDK. Local auth uses `codex login --device-auth`; AWS auth uses `CODEX_ACCESS_TOKEN`. Do not reintroduce OpenAI API-key or API-credit-backed calls.
 
 ## Source Handling
 
@@ -287,14 +288,14 @@ When answering questions:
   - active projects
   - prior decisions and verdicts
   - repeated mentions across exports
-- Morning briefs must be agentic, not deterministic. Deterministic code may shortlist candidates and enforce cost/recency bounds, but the Codex morning brief agent should make the final call using the user's profile, decisions, reminders, current interests, jobs, today's Google Calendar events, recent saves, and active systems.
+- Morning briefs must be agentic, not deterministic. Deterministic code may shortlist candidates and enforce recency bounds, but the Codex morning brief agent should make the final call using the user's profile, decisions, reminders, current interests, jobs, today's Google Calendar events, recent saves, and active systems.
 - Scheduled morning briefs should be concise and intentional: only urgent next actions, high-impact opportunities, explicit reminders, and at most one genuinely valuable recent reading.
 - When the user asks about a topic, look for both direct matches and adjacent topics that often co-occur in saved items.
 - When the user asks for advice or ideation, privilege pages that capture taste, preferences, prior inspirations, and explicit decisions.
 - Refresh `hot.md`, the native Bases dashboard, and the health report after substantial ingest or enrichment changes.
 - Treat `.vault/reports/claim-health.md`, `.vault/reports/contradictions.md`, `.vault/reports/low-confidence.md`, `.vault/reports/stale-claims.md`, and `.vault/reports/memory-palace.md` as first-pass diagnostic context when answer quality, freshness, or contradictions matter.
 - Cache/index writers should use atomic temp-file replacement. Do not leave half-written `agent-digest.json`, `claims.jsonl`, or `search.sqlite` artifacts.
-- Optional semantic search is controlled by `VAULT_EMBEDDINGS_ENABLED=true`; keep it off for cost-sensitive cloud paths unless deliberately enabled.
+- `VAULT_EMBEDDINGS_ENABLED=true` is currently unsupported because OpenAI API embeddings were removed. Use BM25/SQLite search until a local embedding backend is added.
 - Web, Telegram, and morning-brief runs should leave redacted trajectory events under `.vault/trajectories/` so agent behavior is inspectable later.
 - Web and Telegram runs should also leave structured `.vault/events/agent-events.jsonl` records with `run_id`, `seq`, and `stream` so tool calls and lifecycle state are easy to inspect.
 - The task ledger lives under `.vault/tasks/` and renders a human-facing view at `dashboards/tasks.md`.

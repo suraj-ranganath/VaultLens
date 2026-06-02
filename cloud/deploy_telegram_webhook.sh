@@ -11,12 +11,13 @@ if [ -f .env.local ]; then
   set +a
 fi
 
-: "${OPENAI_API_KEY:?Missing OPENAI_API_KEY. Put it in .env.local or export it.}"
+: "${CODEX_ACCESS_TOKEN:?Missing CODEX_ACCESS_TOKEN. Put it in .env.local or export it.}"
 : "${TELEGRAM_BOT_TOKEN:?Missing TELEGRAM_BOT_TOKEN. Put it in .env.local or export it.}"
 
 STACK_NAME="${STACK_NAME:-vault-lens-telegram}"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
-VAULT_AGENT_MODEL="${VAULT_AGENT_MODEL:-gpt-5.4}"
+VAULT_CODEX_MODEL="${VAULT_CODEX_MODEL:-${VAULT_AGENT_MODEL:-auto}}"
+VAULT_AGENT_MODEL="$VAULT_CODEX_MODEL"
 VAULT_AGENT_REASONING_EFFORT="${VAULT_AGENT_REASONING_EFFORT:-medium}"
 TELEGRAM_ALLOWED_CHAT_IDS="${TELEGRAM_ALLOWED_CHAT_IDS:-}"
 HEARTBEAT_ENABLED="${HEARTBEAT_ENABLED:-false}"
@@ -45,10 +46,11 @@ if [ -z "${TELEGRAM_WEBHOOK_SECRET:-}" ]; then
   printf "Generated TELEGRAM_WEBHOOK_SECRET and appended it to .env.local\n"
 fi
 
-export OPENAI_API_KEY
+export CODEX_ACCESS_TOKEN
 export TELEGRAM_BOT_TOKEN
 export TELEGRAM_WEBHOOK_SECRET
 export TELEGRAM_ALLOWED_CHAT_IDS
+export VAULT_CODEX_MODEL
 export VAULT_AGENT_MODEL
 export VAULT_AGENT_REASONING_EFFORT
 export HEARTBEAT_ENABLED
@@ -140,10 +142,10 @@ def toml_string(value):
     return json.dumps(str(value))
 
 overrides = {
-    "OpenAIApiKey": os.environ["OPENAI_API_KEY"],
+    "CodexAccessToken": os.environ["CODEX_ACCESS_TOKEN"],
     "TelegramBotToken": os.environ["TELEGRAM_BOT_TOKEN"],
     "TelegramWebhookSecret": os.environ["TELEGRAM_WEBHOOK_SECRET"],
-    "VaultAgentModel": os.environ["VAULT_AGENT_MODEL"],
+    "VaultCodexModel": os.environ["VAULT_CODEX_MODEL"],
     "VaultAgentReasoningEffort": os.environ["VAULT_AGENT_REASONING_EFFORT"],
     "HeartbeatEnabled": os.environ["HEARTBEAT_ENABLED"],
     "HeartbeatSchedule": os.environ["HEARTBEAT_SCHEDULE"],

@@ -138,32 +138,37 @@ bun run vault:web
 
 Then open `http://localhost:4318`.
 
-At minimum, set this in `.env.local` before using agent-backed flows:
+Before using agent-backed flows locally, authenticate Codex once:
 
 ```bash
-OPENAI_API_KEY=your_openai_api_key
+codex login --device-auth
 ```
+
+The Python Codex SDK reuses your local `~/.codex/auth.json`. VaultLens does not require OpenAI API keys and should not spend OpenAI API credits.
 
 ## Configure Environment
 
 `.env.example` documents the supported knobs. Common local values:
 
 ```bash
-OPENAI_API_KEY=your_openai_api_key
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_ALLOWED_CHAT_IDS=your_numeric_chat_id
 VAULT_QUERY_PORT=4318
-VAULT_QUERY_DEFAULT_MODEL=gpt-5.4
+VAULT_CODEX_MODEL=auto
+VAULT_QUERY_DEFAULT_MODEL=auto
 VAULT_PROFILE_HINT_FILES=raw/docs/my-profile.md,raw/docs/preferences.md
 ```
 
 For cloud deployment:
 
 ```bash
+CODEX_ACCESS_TOKEN=your_codex_access_token_for_aws
 AWS_REGION=us-west-2
 STACK_NAME=vault-lens-telegram
 TELEGRAM_WEBHOOK_SECRET=generated_or_left_blank_for_deploy_script
 ```
+
+Use `CODEX_ACCESS_TOKEN` for AWS instead of copying `~/.codex/auth.json`; rotate the token when needed.
 
 For Google Calendar, prefer a service account shared onto the target calendar:
 
@@ -295,7 +300,7 @@ Design principles:
 ```bash
 bun run test
 uv run python -m unittest tools.test_vault_infra
-node --check tools/telegram_codex_agent.mjs
+uv run python -m py_compile tools/codex_agent_runner.py
 node --check tools/vault_query_server.mjs
 ```
 

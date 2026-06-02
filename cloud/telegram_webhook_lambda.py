@@ -415,7 +415,7 @@ def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[
         directory.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
-    env.setdefault("OPENAI_API_KEY", required_env("OPENAI_API_KEY"))
+    env.setdefault("CODEX_ACCESS_TOKEN", required_env("CODEX_ACCESS_TOKEN"))
     env.setdefault("TELEGRAM_BOT_TOKEN", required_env("TELEGRAM_BOT_TOKEN"))
     prepend_venv_path(env)
     env["HOME"] = str(home_dir)
@@ -437,7 +437,7 @@ def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[
         "--session-name",
         os.environ.get("TELEGRAM_SESSION_NAME", "telegram-live"),
         "--agent-model",
-        os.environ.get("VAULT_AGENT_MODEL", "gpt-5.4"),
+        os.environ.get("VAULT_CODEX_MODEL") or os.environ.get("VAULT_AGENT_MODEL", "auto"),
         "--agent-reasoning-effort",
         os.environ.get("VAULT_AGENT_REASONING_EFFORT", "medium"),
     ]

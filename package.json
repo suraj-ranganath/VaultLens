@@ -45,8 +45,7 @@
   "homepage": "https://github.com/suraj-ranganath/VaultLens#readme",
   "type": "commonjs",
   "dependencies": {
-    "@googleworkspace/cli": "^0.22.5",
-    "@openai/codex-sdk": "^0.134.0"
+    "@googleworkspace/cli": "^0.22.5"
   },
   "devDependencies": {
     "playwright": "^1.60.0"
