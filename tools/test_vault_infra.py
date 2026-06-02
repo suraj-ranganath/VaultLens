@@ -247,6 +247,64 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
         self.assertTrue(captured["key"].startswith("webhook-events/2026/04/26/"))
         self.assertNotIn("webhook-events//", captured["key"])
 
+    def test_lambda_restores_codex_auth_from_s3_when_no_access_token(self) -> None:
+        import sys
+        import types
+        from unittest import mock
+
+        sys.path.insert(0, str(REPO_ROOT))
+        sys.modules.setdefault("boto3", types.SimpleNamespace(client=lambda *_args, **_kwargs: None))
+        from cloud import telegram_webhook_lambda as webhook  # type: ignore
+
+        auth_payload = b'{"tokens":{"id_token":"redacted"},"last_refresh":"2026-06-02T00:00:00Z"}'
+
+        class Body:
+            def read(self) -> bytes:
+                return auth_payload
+
+        class FakeS3:
+            def get_object(self, **kwargs):
+                self.kwargs = kwargs
+                return {"Body": Body()}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / ".codex"
+            env = {"CODEX_ACCESS_TOKEN": ""}
+            fake_s3 = FakeS3()
+            with mock.patch.dict(
+                webhook.os.environ,
+                {
+                    "CODEX_ACCESS_TOKEN": "",
+                    "VAULT_STATE_BUCKET": "bucket",
+                    "VAULT_CODEX_AUTH_S3_KEY": "codex-auth/auth.json",
+                },
+                clear=True,
+            ), mock.patch.object(webhook.boto3, "client", return_value=fake_s3):
+                webhook.prepare_codex_auth(codex_home, env)
+
+            self.assertNotIn("CODEX_ACCESS_TOKEN", env)
+            self.assertEqual((codex_home / "auth.json").read_bytes(), auth_payload)
+
+    def test_lambda_prefers_codex_access_token_when_present(self) -> None:
+        import sys
+        import types
+        from unittest import mock
+
+        sys.path.insert(0, str(REPO_ROOT))
+        sys.modules.setdefault("boto3", types.SimpleNamespace(client=lambda *_args, **_kwargs: None))
+        from cloud import telegram_webhook_lambda as webhook  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = Path(tmp) / ".codex"
+            env: dict[str, str] = {}
+            with mock.patch.dict(webhook.os.environ, {"CODEX_ACCESS_TOKEN": "token"}, clear=True), mock.patch.object(
+                webhook.boto3, "client", side_effect=AssertionError("S3 should not be used when token is present")
+            ):
+                webhook.prepare_codex_auth(codex_home, env)
+
+            self.assertEqual(env["CODEX_ACCESS_TOKEN"], "token")
+            self.assertFalse((codex_home / "auth.json").exists())
+
     def test_daily_brief_delegates_final_selection_to_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

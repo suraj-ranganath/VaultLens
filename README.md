@@ -162,13 +162,13 @@ VAULT_PROFILE_HINT_FILES=raw/docs/my-profile.md,raw/docs/preferences.md
 For cloud deployment:
 
 ```bash
-CODEX_ACCESS_TOKEN=your_codex_access_token_for_aws
 AWS_REGION=us-west-2
 STACK_NAME=vault-lens-telegram
 TELEGRAM_WEBHOOK_SECRET=generated_or_left_blank_for_deploy_script
+VAULT_CODEX_AUTH_S3_KEY=codex-auth/auth.json
 ```
 
-Use `CODEX_ACCESS_TOKEN` for AWS instead of copying `~/.codex/auth.json`; rotate the token when needed.
+For ChatGPT Pro/Plus accounts, run `codex login --device-auth` locally and let `bun run cloud:deploy` sync your local `~/.codex/auth.json` into the private S3 state bucket before Telegram webhooks are installed. If you have a Business/Enterprise Codex access token, you can set `CODEX_ACCESS_TOKEN` instead and skip the auth-file fallback.
 
 For Google Calendar, prefer a service account shared onto the target calendar:
 
@@ -240,6 +240,8 @@ Useful Telegram commands:
 bun run cloud:deploy
 bun run cloud:sync-state
 ```
+
+`cloud:deploy` automatically runs `cloud:sync-codex-auth` when `CODEX_ACCESS_TOKEN` is not set. Re-run `bun run cloud:sync-codex-auth` after `codex login --device-auth` refreshes your local Codex auth.
 
 See [cloud/README.md](cloud/README.md) for the full AWS setup. The deployment uses:
 

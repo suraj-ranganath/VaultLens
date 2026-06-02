@@ -415,8 +415,8 @@ def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[
         directory.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
-    env.setdefault("CODEX_ACCESS_TOKEN", required_env("CODEX_ACCESS_TOKEN"))
     env.setdefault("TELEGRAM_BOT_TOKEN", required_env("TELEGRAM_BOT_TOKEN"))
+    prepare_codex_auth(codex_home, env)
     prepend_venv_path(env)
     env["HOME"] = str(home_dir)
     env["CODEX_HOME"] = str(codex_home)
@@ -463,12 +463,15 @@ def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[
 
 def run_heartbeat(*, dry_run: bool = False) -> dict[str, Any]:
     home_dir = WORK_ROOT / ".home"
+    codex_home = WORK_ROOT / ".codex"
     uv_cache = WORK_ROOT / ".uv-cache"
-    for directory in (home_dir, uv_cache):
+    for directory in (home_dir, codex_home, uv_cache):
         directory.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.setdefault("TELEGRAM_BOT_TOKEN", required_env("TELEGRAM_BOT_TOKEN"))
+    prepare_codex_auth(codex_home, env)
     env["HOME"] = str(home_dir)
+    env["CODEX_HOME"] = str(codex_home)
     env["VAULT_ROOT"] = str(WORK_ROOT)
     env["UV_CACHE_DIR"] = str(uv_cache)
     prepend_venv_path(env)
@@ -495,6 +498,31 @@ def run_heartbeat(*, dry_run: bool = False) -> dict[str, Any]:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "vault heartbeat failed")
     return parse_json_output(result.stdout)
+
+
+def prepare_codex_auth(codex_home: Path, env: dict[str, str]) -> None:
+    codex_home.mkdir(parents=True, exist_ok=True)
+    access_token = os.environ.get("CODEX_ACCESS_TOKEN", "").strip()
+    if access_token:
+        env["CODEX_ACCESS_TOKEN"] = access_token
+        return
+
+    env.pop("CODEX_ACCESS_TOKEN", None)
+    key = os.environ.get("VAULT_CODEX_AUTH_S3_KEY", "codex-auth/auth.json").strip().lstrip("/")
+    if not key:
+        raise RuntimeError("Missing Codex auth: set CODEX_ACCESS_TOKEN or VAULT_CODEX_AUTH_S3_KEY.")
+
+    bucket = required_env("VAULT_STATE_BUCKET")
+    target = codex_home / "auth.json"
+    try:
+        obj = boto3.client("s3").get_object(Bucket=bucket, Key=key)
+        target.write_bytes(obj["Body"].read())
+        target.chmod(0o600)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Missing Codex ChatGPT auth at s3://{bucket}/{key}. "
+            "Run `bun run cloud:sync-codex-auth` after `codex login --device-auth`."
+        ) from exc
 
 
 def state_prefix() -> str:

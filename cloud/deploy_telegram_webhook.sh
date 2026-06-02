@@ -11,11 +11,14 @@ if [ -f .env.local ]; then
   set +a
 fi
 
-: "${CODEX_ACCESS_TOKEN:?Missing CODEX_ACCESS_TOKEN. Put it in .env.local or export it.}"
 : "${TELEGRAM_BOT_TOKEN:?Missing TELEGRAM_BOT_TOKEN. Put it in .env.local or export it.}"
 
 STACK_NAME="${STACK_NAME:-vault-lens-telegram}"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-west-2}}"
+CODEX_ACCESS_TOKEN="${CODEX_ACCESS_TOKEN:-}"
+VAULT_CODEX_AUTH_S3_KEY="${VAULT_CODEX_AUTH_S3_KEY:-codex-auth/auth.json}"
+DEFAULT_CODEX_HOME="${CODEX_HOME:-${HOME:-}/.codex}"
+CODEX_AUTH_JSON="${CODEX_AUTH_JSON:-${DEFAULT_CODEX_HOME}/auth.json}"
 VAULT_CODEX_MODEL="${VAULT_CODEX_MODEL:-${VAULT_AGENT_MODEL:-auto}}"
 VAULT_AGENT_MODEL="$VAULT_CODEX_MODEL"
 VAULT_AGENT_REASONING_EFFORT="${VAULT_AGENT_REASONING_EFFORT:-medium}"
@@ -25,6 +28,14 @@ TELEGRAM_HEARTBEAT_CHAT_ID="${TELEGRAM_HEARTBEAT_CHAT_ID:-}"
 HEARTBEAT_SCHEDULE="${HEARTBEAT_SCHEDULE:-cron(0 9 * * ? *)}"
 HEARTBEAT_SCHEDULE_TIMEZONE="${HEARTBEAT_SCHEDULE_TIMEZONE:-${HEARTBEAT_TIMEZONE:-America/Los_Angeles}}"
 VAULT_CALENDAR_ID="${VAULT_CALENDAR_ID:-${VAULT_BRIEF_CALENDAR_ID:-primary}}"
+
+if [ -z "$CODEX_ACCESS_TOKEN" ] && [ ! -f "$CODEX_AUTH_JSON" ]; then
+  echo "Missing Codex cloud auth." >&2
+  echo "Set CODEX_ACCESS_TOKEN for Business/Enterprise, or run 'codex login --device-auth' and make sure CODEX_AUTH_JSON points to your local auth file." >&2
+  echo "Expected auth file: $CODEX_AUTH_JSON" >&2
+  exit 1
+fi
+
 AWS_ACCOUNT_ID="$(
   aws sts get-caller-identity \
     --query Account \
@@ -47,9 +58,11 @@ if [ -z "${TELEGRAM_WEBHOOK_SECRET:-}" ]; then
 fi
 
 export CODEX_ACCESS_TOKEN
+export CODEX_AUTH_JSON
 export TELEGRAM_BOT_TOKEN
 export TELEGRAM_WEBHOOK_SECRET
 export TELEGRAM_ALLOWED_CHAT_IDS
+export VAULT_CODEX_AUTH_S3_KEY
 export VAULT_CODEX_MODEL
 export VAULT_AGENT_MODEL
 export VAULT_AGENT_REASONING_EFFORT
@@ -142,7 +155,8 @@ def toml_string(value):
     return json.dumps(str(value))
 
 overrides = {
-    "CodexAccessToken": os.environ["CODEX_ACCESS_TOKEN"],
+    "CodexAccessToken": os.environ.get("CODEX_ACCESS_TOKEN", ""),
+    "CodexAuthS3Key": os.environ["VAULT_CODEX_AUTH_S3_KEY"],
     "TelegramBotToken": os.environ["TELEGRAM_BOT_TOKEN"],
     "TelegramWebhookSecret": os.environ["TELEGRAM_WEBHOOK_SECRET"],
     "VaultCodexModel": os.environ["VAULT_CODEX_MODEL"],
@@ -195,9 +209,28 @@ WEBHOOK_URL="$(
     --output text
 )"
 
+VAULT_STATE_BUCKET="$(
+  aws cloudformation describe-stacks \
+    --stack-name "$STACK_NAME" \
+    --region "$AWS_REGION" \
+    --query "Stacks[0].Outputs[?OutputKey=='VaultStateBucketName'].OutputValue" \
+    --cli-connect-timeout 5 \
+    --cli-read-timeout 20 \
+    --output text
+)"
+
 if [ -z "$WEBHOOK_URL" ] || [ "$WEBHOOK_URL" = "None" ]; then
   echo "Could not resolve ReceiverFunctionUrl from CloudFormation output." >&2
   exit 1
+fi
+
+if [ -z "$VAULT_STATE_BUCKET" ] || [ "$VAULT_STATE_BUCKET" = "None" ]; then
+  echo "Could not resolve VaultStateBucketName from CloudFormation output." >&2
+  exit 1
+fi
+
+if [ -z "$CODEX_ACCESS_TOKEN" ]; then
+  VAULT_STATE_BUCKET="$VAULT_STATE_BUCKET" bash cloud/sync_codex_auth_to_s3.sh
 fi
 
 export WEBHOOK_URL
@@ -228,12 +261,7 @@ if not body.get("ok"):
 PY
 
 printf "\nTelegram webhook installed: %s\n" "$WEBHOOK_URL"
-printf "State bucket: "
-aws cloudformation describe-stacks \
-  --stack-name "$STACK_NAME" \
-  --region "$AWS_REGION" \
-  --query "Stacks[0].Outputs[?OutputKey=='VaultStateBucketName'].OutputValue" \
-  --cli-connect-timeout 5 \
-  --cli-read-timeout 20 \
-  --output text
-printf "\n"
+printf "State bucket: %s\n" "$VAULT_STATE_BUCKET"
+if [ -z "$CODEX_ACCESS_TOKEN" ]; then
+  printf "Codex auth fallback: s3://%s/%s\n" "$VAULT_STATE_BUCKET" "$VAULT_CODEX_AUTH_S3_KEY"
+fi

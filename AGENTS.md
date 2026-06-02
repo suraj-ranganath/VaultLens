@@ -54,7 +54,7 @@ This vault is an AWS-backed, agent-maintained markdown wiki for personal knowled
 - Any local workflow that changes vault content must be designed to sync changes back to the canonical AWS state.
 - Browser automation enrichment may remain local-only when that is materially cheaper or operationally simpler, but any durable metadata or note updates produced from it should be written back into canonical state.
 - Browser automation should write browser artifact packs under `raw/web-clips/browser-artifacts/` when it gets past blocked or dynamic pages. These packs are durable evidence, not just summaries.
-- Model-backed agent turns should go through `tools/codex_agent_runner.py` and the Codex Python SDK. Local auth uses `codex login --device-auth`; AWS auth uses `CODEX_ACCESS_TOKEN`. Do not reintroduce OpenAI API-key or API-credit-backed calls.
+- Model-backed agent turns should go through `tools/codex_agent_runner.py` and the Codex Python SDK. Local auth uses `codex login --device-auth`; AWS auth uses `CODEX_ACCESS_TOKEN` when available or the private S3-synced Codex `auth.json` fallback for Pro/Plus accounts. Do not reintroduce OpenAI API-key or API-credit-backed calls.
 
 ## Source Handling
 

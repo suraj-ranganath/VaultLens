@@ -6,7 +6,12 @@ Parameters:
   CodexAccessToken:
     Type: String
     NoEcho: true
+    Default: ""
     Description: Codex access token used by the Codex Python SDK agent.
+  CodexAuthS3Key:
+    Type: String
+    Default: codex-auth/auth.json
+    Description: S3 key for Pro/Plus Codex ChatGPT auth.json fallback in the private vault state bucket.
   TelegramBotToken:
     Type: String
     NoEcho: true
@@ -84,6 +89,7 @@ Globals:
         TELEGRAM_ALLOWED_CHAT_IDS: !Ref TelegramAllowedChatIds
         TELEGRAM_WEBHOOK_SECRET: !Ref TelegramWebhookSecret
         GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON: !Ref GoogleWorkspaceCliCredentialsJson
+        VAULT_CODEX_AUTH_S3_KEY: !Ref CodexAuthS3Key
         VAULT_CALENDAR_ID: !Ref VaultCalendarId
         VAULT_CODEX_MODEL: !Ref VaultCodexModel
         VAULT_AGENT_MODEL: !Ref VaultCodexModel

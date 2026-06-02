@@ -38,6 +38,7 @@ If a secret was committed, rotate it immediately. Removing it from the latest co
 - The AWS deployment uses encrypted Lambda environment variables by default.
 - S3 buckets created by the template block public access and enable server-side encryption.
 - The processor Lambda uses single concurrency to reduce state-write races.
+- ChatGPT Pro/Plus cloud auth stores `~/.codex/auth.json` as a private encrypted object in the S3 state bucket. Treat that object like a bearer credential; re-run `bun run cloud:sync-codex-auth` after local reauth and rotate/revoke ChatGPT sessions if it is exposed.
 - `TELEGRAM_ALLOWED_CHAT_IDS` is strongly recommended for any bot that is reachable from Telegram.
 - Service-account calendar credentials should be scoped by sharing only the required calendar, not an entire Google Workspace domain.
 

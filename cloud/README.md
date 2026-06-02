@@ -36,18 +36,19 @@ This is optimized for a personal bot with occasional bursts. If usage becomes he
 - AWS CLI configured with the account that has your AWS credits.
 - AWS SAM CLI installed.
 - Docker installed for Lambda image builds.
+- Local Codex ChatGPT auth from `codex login --device-auth`, unless you have `CODEX_ACCESS_TOKEN`.
 - `.env.local` containing:
 
 ```bash
-CODEX_ACCESS_TOKEN=...
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALLOWED_CHAT_IDS=123456789
 AWS_REGION=us-west-2
 STACK_NAME=vault-lens-telegram
+VAULT_CODEX_AUTH_S3_KEY=codex-auth/auth.json
 HEARTBEAT_ENABLED=false
 ```
 
-`CODEX_ACCESS_TOKEN` is passed as a no-echo CloudFormation parameter and used by the Codex Python SDK in Lambda. Do not copy `~/.codex/auth.json` into AWS. Local development should use `codex login --device-auth` instead.
+For ChatGPT Pro/Plus, `bun run cloud:deploy` uploads your local `~/.codex/auth.json` to the private state bucket at `VAULT_CODEX_AUTH_S3_KEY`, then Lambda restores it into `CODEX_HOME` at runtime. For ChatGPT Business/Enterprise, `CODEX_ACCESS_TOKEN` remains supported and is passed as a no-echo CloudFormation parameter instead.
 
 `TELEGRAM_ALLOWED_CHAT_IDS` is optional, but strongly recommended so only your Telegram chat can use the bot.
 
@@ -102,7 +103,14 @@ The deploy script:
 - generates `TELEGRAM_WEBHOOK_SECRET` if it is missing and appends it to `.env.local`
 - builds the Lambda container image
 - deploys the CloudFormation stack
+- syncs local Codex ChatGPT auth to the private state bucket when `CODEX_ACCESS_TOKEN` is not set
 - registers the Lambda Function URL with Telegram via `setWebhook`
+
+If you re-run `codex login --device-auth`, rotate ChatGPT auth, or see cloud auth failures, refresh the uploaded auth file:
+
+```bash
+bun run cloud:sync-codex-auth
+```
 
 ## Seed Or Refresh Cloud Vault State
 
