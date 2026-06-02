@@ -111,13 +111,12 @@ def js_runtime() -> str:
 
 
 def codex_runner_command(vault_root: Path, command: str) -> list[str]:
-    return [
-        os.environ.get("VAULT_PYTHON_RUNTIME", "uv"),
-        "run",
-        "python",
-        str(vault_root / "tools" / "codex_agent_runner.py"),
-        command,
-    ]
+    runtime = os.environ.get("VAULT_PYTHON_RUNTIME", "uv").strip() or "uv"
+    script = str(vault_root / "tools" / "codex_agent_runner.py")
+    runtime_name = Path(runtime).name
+    if runtime in {"python", "python3"} or runtime_name.startswith("python"):
+        return [runtime, script, command]
+    return [runtime, "run", "python", script, command]
 
 
 def invoke_codex_runner(vault_root: Path, command: str, payload: dict[str, Any], *, timeout: int = 180) -> dict[str, Any]:

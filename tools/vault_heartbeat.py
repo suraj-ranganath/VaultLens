@@ -34,6 +34,15 @@ DEFAULT_TIMEZONE_LABEL = "America/Los_Angeles"
 DISPLAY_TITLE_LIMIT = 120
 
 
+def codex_runner_command(vault_root: Path, command: str) -> list[str]:
+    runtime = os.environ.get("VAULT_PYTHON_RUNTIME", "uv").strip() or "uv"
+    script = str(vault_root / "tools" / "codex_agent_runner.py")
+    runtime_name = Path(runtime).name
+    if runtime in {"python", "python3"} or runtime_name.startswith("python"):
+        return [runtime, script, command]
+    return [runtime, "run", "python", script, command]
+
+
 @dataclass
 class Note:
     path: Path
@@ -569,13 +578,7 @@ def run_morning_brief_agent(
         or "medium",
     }
     result = subprocess.run(
-        [
-            os.environ.get("VAULT_PYTHON_RUNTIME", "uv"),
-            "run",
-            "python",
-            str(vault_root / "tools" / "codex_agent_runner.py"),
-            "morning-brief",
-        ],
+        codex_runner_command(vault_root, "morning-brief"),
         input=json.dumps(payload),
         text=True,
         capture_output=True,

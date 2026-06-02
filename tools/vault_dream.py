@@ -11,6 +11,15 @@ from pathlib import Path
 from typing import Any
 
 
+def codex_runner_command(vault_root: Path, command: str) -> list[str]:
+    runtime = os.environ.get("VAULT_PYTHON_RUNTIME", "uv").strip() or "uv"
+    script = str(vault_root / "tools" / "codex_agent_runner.py")
+    runtime_name = Path(runtime).name
+    if runtime in {"python", "python3"} or runtime_name.startswith("python"):
+        return [runtime, script, command]
+    return [runtime, "run", "python", script, command]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a reviewable vault dreaming pass.")
     parser.add_argument("--vault-root", type=Path, default=Path.cwd())
@@ -34,13 +43,7 @@ def run_dream(vault_root: Path, *, mock_json: str = "") -> dict[str, Any]:
         "reasoningEffort": os.environ.get("VAULT_DREAM_REASONING_EFFORT") or "low",
     }
     proc = subprocess.run(
-        [
-            os.environ.get("VAULT_PYTHON_RUNTIME", "uv"),
-            "run",
-            "python",
-            str(vault_root / "tools" / "codex_agent_runner.py"),
-            "dream",
-        ],
+        codex_runner_command(vault_root, "dream"),
         input=json.dumps(payload),
         text=True,
         capture_output=True,

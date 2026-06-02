@@ -427,6 +427,7 @@ def run_telegram_webhook(update: dict[str, Any] | list[dict[str, Any]]) -> dict[
     env["XDG_DATA_HOME"] = str(WORK_ROOT / ".local" / "share")
     env["VAULT_DISABLE_CODEX_THREAD_RESUME"] = "1"
     env["VAULT_ROOT"] = str(WORK_ROOT)
+    env.setdefault("VAULT_PYTHON_RUNTIME", python_executable())
 
     command = [
         python_executable(),
@@ -474,6 +475,7 @@ def run_heartbeat(*, dry_run: bool = False) -> dict[str, Any]:
     env["CODEX_HOME"] = str(codex_home)
     env["VAULT_ROOT"] = str(WORK_ROOT)
     env["UV_CACHE_DIR"] = str(uv_cache)
+    env.setdefault("VAULT_PYTHON_RUNTIME", python_executable())
     prepend_venv_path(env)
     command = [
         python_executable(),

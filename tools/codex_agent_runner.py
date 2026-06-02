@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from openai_codex import ApprovalMode, Codex, LocalImageInput, Sandbox, TextInput, retry_on_overload
+from openai_codex.client import CodexConfig
 from openai_codex.types import Personality, ReasoningEffort, ReasoningSummary
 
 
@@ -332,6 +333,13 @@ def reasoning_summary(value: str = "concise") -> ReasoningSummary:
     return ReasoningSummary.model_validate(value)
 
 
+def codex_client() -> Codex:
+    codex_bin = str(os.environ.get("VAULT_CODEX_BIN") or os.environ.get("CODEX_BIN") or "").strip()
+    if codex_bin:
+        return Codex(CodexConfig(codex_bin=codex_bin))
+    return Codex()
+
+
 def pick_model(codex: Codex, requested: str | None = None) -> str:
     value = str(requested or DEFAULT_MODEL or "auto").strip()
     if value and value.lower() != "auto":
@@ -380,7 +388,7 @@ def run_structured(
     images: list[str] | None = None,
 ) -> tuple[Any, dict[str, Any], str, str]:
     effort_value = str(payload.get("reasoningEffort") or default_effort).strip().lower()
-    with Codex() as codex:
+    with codex_client() as codex:
         selected_model = pick_model(codex, payload.get("model"))
         thread = thread_for(codex, payload, model=selected_model, effort=effort_value, include_web_search=include_web_search)
         input_value: str | list[Any]
@@ -761,14 +769,14 @@ def build_dream_context(vault_root: Path) -> str:
 
 
 def handle_health(_payload: dict[str, Any]) -> None:
-    with Codex() as codex:
+    with codex_client() as codex:
         account = model_dump(codex.account())
         model = pick_model(codex, os.environ.get("VAULT_CODEX_MODEL", "auto"))
         write_json({"ok": True, "auth": "codex", "billingMode": "codex_subscription", "model": model, "account": account})
 
 
 def handle_models(_payload: dict[str, Any]) -> None:
-    with Codex() as codex:
+    with codex_client() as codex:
         models = codex.models(include_hidden=True)
         write_json({"ok": True, "models": model_dump(models)})
 
@@ -807,7 +815,7 @@ def handle_query(payload: dict[str, Any], *, stream: bool = False) -> None:
     effort_value = str(payload.get("reasoningEffort") or os.environ.get("VAULT_QUERY_REASONING_EFFORT", "medium")).strip().lower()
     started_at = time.time()
 
-    with Codex() as codex:
+    with codex_client() as codex:
         selected_model = pick_model(codex, payload.get("model"))
         thread = thread_for(codex, payload, model=selected_model, effort=effort_value, include_web_search=include_web_search)
         if stream:
