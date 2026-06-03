@@ -56,7 +56,9 @@ This vault is an AWS-backed, agent-maintained markdown wiki for personal knowled
 - Browser automation should write browser artifact packs under `raw/web-clips/browser-artifacts/` when it gets past blocked or dynamic pages. These packs are durable evidence, not just summaries.
 - Model-backed agent turns should go through `tools/codex_agent_runner.py` and the Codex Python SDK. Local live agent runs require `uv sync --extra codex` and `codex login --device-auth`; default `uv sync` remains CI-safe and non-live. AWS auth uses `CODEX_ACCESS_TOKEN` when available or the private S3-synced Codex `auth.json` fallback for Pro/Plus accounts. Do not reintroduce OpenAI API-key or API-credit-backed calls.
 - Codex cloud turns default to `VAULT_CODEX_SANDBOX=full_access`. This gives full filesystem and shell freedom inside the Lambda or worker runtime, not broad AWS account permissions.
-- Codex may write canonical markdown notes, topics, dashboards, outputs, caches, traces, task state, and browser artifacts inside the restored vault working tree. Deterministic code remains responsible for Telegram sends, S3 sync, Google Calendar mutations, and webhook acknowledgement.
+- Codex is expected to use that freedom. For saved Telegram content, the router may classify the message, but the durable filing pass is `vault-work`: a full-access Codex turn that can inspect the vault, run shell workflows, follow links, write notes, synthesize topics, update decisions/systems, improve memory-review artifacts, adjust dashboards/templates/indexes, and adapt the vault organization when retrieval would benefit.
+- Codex may write canonical markdown notes, topics, dashboards, outputs, caches, traces, task state, browser artifacts, templates, indexes, profile/person context, decisions, systems, and memory-review artifacts inside the restored vault working tree.
+- The only reserved boundary is irreversible external side effects: deterministic code remains responsible for Telegram sends, S3 upload/download, Google Calendar mutations, and webhook acknowledgement.
 
 ## Source Handling
 
@@ -241,6 +243,8 @@ When the user provides a new export:
 - New interfaces should read from and write to canonical AWS state, either directly or through a sync layer that preserves cloud canon.
 - Prefer designs that expose agent traces, citations, decisions, and retrieval context cleanly across Telegram and web surfaces.
 - Keep the fast Telegram processor lightweight. If a source needs browser extraction, queue or invoke the browser enrichment worker instead of blocking webhook acknowledgement.
+- Do not reduce Telegram ingestion to deterministic scripts. Basic ingest and metadata scripts may create a first draft, but saved content should normally receive an agentic `vault-work` pass unless `VAULT_AGENTIC_WORK_AUTO=false`.
+- The `vault-work` pass should be allowed to change how information is stored when the current structure is weak. If it adds or changes durable organization, it must update the relevant indexes/backlinks/dashboards/templates so future agents can find the context.
 - Browser-heavy enrichment should use the cloud browser worker or local Playwright, capture artifact packs, update canonical notes, rebuild caches/dashboards, and sync back to S3.
 - When adding features, prioritize:
   - better canonical data quality
@@ -275,7 +279,7 @@ When answering questions:
    - prior verdicts and recurring systems
 8. Cite canonical notes, not imports, whenever possible.
 9. If the answer creates durable value, file it into `topics/`, `projects/`, or `outputs/`.
-8. Use `memory/` and `outputs/dreams/` as reviewable personalization surfaces; do not hide durable user understanding in opaque app memory.
+10. Use `memory/` and `outputs/dreams/` as reviewable personalization surfaces; do not hide durable user understanding in opaque app memory.
 
 ## Surfacing Rules
 

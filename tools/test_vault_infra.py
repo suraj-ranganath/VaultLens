@@ -322,8 +322,11 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
             sandbox_name="full_access",
         )
         self.assertIn("Current sandbox profile: full_access", instructions)
-        self.assertIn("You may write canonical vault notes", instructions)
-        self.assertIn("External side effects are controlled by deterministic VaultLens code", instructions)
+        self.assertIn("You have full autonomy inside the restored vault working tree", instructions)
+        self.assertIn("You may adapt the vault organization itself", instructions)
+        self.assertIn("External side effects outside the restored vault are committed by deterministic VaultLens code", instructions)
+        action_enum = codex_agent_runner.ROUTER_SCHEMA["properties"]["actions"]["items"]["properties"]["tool"]["enum"]
+        self.assertIn("agentic_vault_work", action_enum)
 
     def test_cloud_template_wires_full_access_browser_worker(self) -> None:
         template = (REPO_ROOT / "cloud" / "template.yaml").read_text(encoding="utf-8")

@@ -100,6 +100,9 @@ Globals:
         VAULT_AGENT_MODEL: !Ref VaultCodexModel
         VAULT_AGENT_REASONING_EFFORT: !Ref VaultAgentReasoningEffort
         VAULT_CODEX_SANDBOX: full_access
+        VAULT_AGENTIC_WORK_AUTO: "true"
+        VAULT_WORK_WEB_SEARCH_ENABLED: "true"
+        VAULT_WORK_REASONING_EFFORT: !Ref VaultAgentReasoningEffort
         VAULT_STATE_BUCKET: !Ref VaultStateBucket
         VAULT_STATE_PREFIX: state
         VAULT_WEBHOOK_EVENTS_PREFIX: webhook-events

@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,7 @@ ROUTER_SCHEMA: dict[str, Any] = {
                             "refresh_live_metadata_jobs_recent",
                             "refresh_live_metadata_knowledge_all",
                             "refresh_live_metadata_current_links",
+                            "agentic_vault_work",
                             "answer_vault_query",
                             "update_task_ledger",
                         ],
@@ -124,6 +126,45 @@ ROUTER_SCHEMA: dict[str, Any] = {
         "artifactPreference",
         "actions",
     ],
+    "additionalProperties": False,
+}
+
+
+VAULT_WORK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "telegram_summary": {"type": "string"},
+        "durable_changes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "change_type": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["path", "change_type", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "sources_considered": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "used_for": {"type": "string"},
+                },
+                "required": ["source", "kind", "used_for"],
+                "additionalProperties": False,
+            },
+        },
+        "unresolved_items": {"type": "array", "items": {"type": "string"}},
+        "next_actions": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["summary", "telegram_summary", "durable_changes", "sources_considered", "unresolved_items", "next_actions"],
     "additionalProperties": False,
 }
 
@@ -466,7 +507,7 @@ def thread_for(codex: Codex, payload: dict[str, Any], *, model: str, effort: str
 
 
 def thread_developer_instructions(*, include_web_search: bool, sandbox_name: str | None = None) -> str:
-    web_search_policy = "enabled only when vault context is insufficient" if include_web_search else "disabled"
+    web_search_policy = "enabled when it materially improves filing, enrichment, or answering" if include_web_search else "disabled"
     sandbox_policy = sandbox_name or DEFAULT_SANDBOX
     return f"""
 You are the VaultLens retrieval and filing agent.
@@ -474,13 +515,14 @@ You are the VaultLens retrieval and filing agent.
 Harness policy:
 - Work inside the configured vault cwd.
 - Current sandbox profile: {sandbox_policy}.
-- Use the Codex shell/file harness when a task needs more evidence than the supplied context pack.
-- Prefer efficient commands such as rg, rg --files, sed, targeted file reads, small Python/Node helpers, and existing repo scripts.
-- You may write canonical vault notes, topics, dashboards, outputs, traces, task state, cache records, and browser artifact records when that creates durable value.
+- You have full autonomy inside the restored vault working tree: read files, write files, run shell commands, call existing scripts, create helper scripts, and use multi-step workflows.
+- Prefer efficient commands such as rg, rg --files, sed, targeted file reads, small Python/Node helpers, and existing repo scripts, but do not stop there when deeper work is needed.
+- You may write canonical vault notes, topics, dashboards, outputs, traces, task state, cache records, browser artifact records, templates, indexes, profile/person context, decisions, systems, and memory-review artifacts when that creates durable value.
+- You may adapt the vault organization itself when a better retrieval structure is warranted; update indexes/backlinks/dashboards/templates so future agents can understand the change.
 - Treat user-provided raw sources and import logs as immutable evidence. Add new artifacts instead of rewriting or deleting raw inputs.
-- External side effects are controlled by deterministic VaultLens code: do not directly send Telegram messages, mutate Google Calendar, or sync S3 unless the caller explicitly invokes that deterministic tool path.
-- For links, follow redirects and nested links when needed. For X/LinkedIn/dynamic pages, prefer lightweight adapters first and enqueue/browser-enrich when browser evidence is required.
-- Web search is {web_search_policy}; use it only for missing public context, never as a replacement for vault memory.
+- External side effects outside the restored vault are committed by deterministic VaultLens code: prepare data freely, but do not directly send Telegram messages, mutate Google Calendar, or upload S3 state unless that deterministic tool path is explicitly invoked by the caller.
+- For links, follow redirects and nested links when needed. For X/LinkedIn/dynamic pages, use lightweight adapters, HTTP, browser artifacts, and/or enqueue/browser-enrich as appropriate instead of giving up early.
+- Web search is {web_search_policy}; use it as a complement to vault memory, not as a replacement for it.
 - If a tool path is unavailable, continue from supplied context and citations; do not expose generic tool availability caveats to the user.
 """.strip()
 
@@ -664,11 +706,14 @@ Available local actions:
 4. refresh_live_metadata_jobs_recent
 5. refresh_live_metadata_knowledge_all
 6. refresh_live_metadata_current_links
-7. answer_vault_query
-8. update_task_ledger
+7. agentic_vault_work
+8. answer_vault_query
+9. update_task_ledger
 
 Rules:
 - If the message should become part of the vault, set storeInVault=true and include append_message_to_stream plus run_vault_ingest.
+- Use agentic_vault_work when the item deserves real filing/synthesis beyond basic ingest: links, jobs, articles, images, screenshots, personal facts, preferences, decisions, systems, reminders, events, or anything that should improve future personalization.
+- agentic_vault_work is allowed to run shell/file/browser workflows and modify the vault; do not avoid it just because deterministic ingest can create a first draft.
 - If the message is asking a question that should be answered from the vault, request answer_vault_query.
 - Resolve follow-ups like "this", "that", "the link", "that screenshot", or "that role" from recent Telegram context.
 - If the user says they completed/applied/read/cancelled/skipped/handled something, request update_task_ledger and treat it as authoritative.
@@ -689,6 +734,49 @@ Recent Telegram context:
 
 Incoming message:
 {json.dumps(payload.get("message") or {}, indent=2)}
+""".strip()
+
+
+def build_vault_work_prompt(payload: dict[str, Any]) -> str:
+    return f"""
+You are the full-power VaultLens filing and enrichment agent.
+
+This is not a classifier turn. Actually do the work before returning JSON.
+
+Mission:
+- Inspect the current Telegram message, attachments, recent conversation context, and existing vault.
+- Decide the best durable representation for what the user sent or implied.
+- Create or update the right markdown notes, topics, projects, decisions, systems, memories, dashboards, outputs, backlinks, and artifact references.
+- Preserve context about Suraj: preferences, recurring interests, relationships, taste, priorities, decisions, operating systems, and task state when the message reveals durable signal.
+- Improve the vault's retrieval structure if the current taxonomy is insufficient. It is acceptable to add or update templates, indexes, topic pages, dashboards, memory-review artifacts, and canonical note organization when that helps future agents.
+
+Tool freedom:
+- Use shell/file tools freely inside the vault cwd.
+- Use rg/rg --files, targeted reads, Python/Node/Bun helpers, existing repo scripts, HTTP fetches, and browser-oriented tools when available.
+- Follow redirects, nested links, quoted posts, X cards, LinkedIn/job-board redirects, QR-derived links, and article/source links when needed.
+- If browser work is needed but not available in this turn, create or update browser-enrichment queue/artifact notes clearly enough for the browser worker to finish the job.
+
+Quality rules:
+- Treat raw imports and raw source artifacts as immutable evidence; add new artifacts instead of rewriting user-provided raw data.
+- Do not invent dates, credentials, facts about people, deadlines, or relationship details.
+- Record uncertainty explicitly in frontmatter/body.
+- Prefer canonical notes over loose summaries. Link notes together so future agents can crawl quickly.
+- Rebuild dashboards/cache if you materially change canonical notes and the scripts are available.
+- Do not directly send Telegram messages, mutate Google Calendar, or upload S3. The caller will handle those external side effects after this turn.
+
+Return JSON only after completing the vault work.
+
+Current date: {payload.get("currentDate") or datetime.now().date().isoformat()}
+Default timezone: {payload.get("timezone") or os.environ.get("TZ") or "America/Los_Angeles"}
+
+Agent routing decision:
+{json.dumps(payload.get("decision") or {}, indent=2)}
+
+Incoming Telegram message:
+{json.dumps(payload.get("message") or {}, indent=2)}
+
+Recent Telegram context:
+{str(payload.get("recentConversationContext") or "").strip() or "(No recent context supplied.)"}
 """.strip()
 
 
@@ -741,7 +829,7 @@ Search discipline:
 3. Resolve Telegram follow-up references from recent Telegram context before broad search.
 4. Use rg and rg --files before opening files.
 5. Prefer canonical notes under items/, topics/, projects/, outputs/, and dashboards/.
-6. Do not modify files.
+6. You may modify files when the question creates durable value: save a useful answer under outputs/, improve a topic/project page, update memory-review artifacts, or add backlinks. Do not force a write for throwaway questions.
 
 Answering rules:
 - treat the local vault as source of truth
@@ -915,9 +1003,30 @@ def handle_router(payload: dict[str, Any]) -> None:
         prompt=build_router_prompt(payload),
         schema=ROUTER_SCHEMA,
         default_effort=os.environ.get("VAULT_ROUTER_REASONING_EFFORT", "low"),
-        include_web_search=False,
+        include_web_search=bool(payload.get("includeWebSearch", os.environ.get("VAULT_ROUTER_WEB_SEARCH_ENABLED", "true").lower() != "false")),
     )
     write_json({"threadId": thread_id, "decision": decision, "finalResponse": result.final_response, "usage": normalize_usage(result.usage), "billing": billing(result.usage), "model": model})
+
+
+def handle_vault_work(payload: dict[str, Any]) -> None:
+    result, work, model, thread_id = run_structured(
+        payload=payload,
+        prompt=build_vault_work_prompt(payload),
+        schema=VAULT_WORK_SCHEMA,
+        default_effort=os.environ.get("VAULT_WORK_REASONING_EFFORT", "medium"),
+        include_web_search=bool(payload.get("includeWebSearch", True)),
+    )
+    write_json(
+        {
+            "threadId": thread_id,
+            "work": work,
+            "finalResponse": result.final_response,
+            "usage": normalize_usage(result.usage),
+            "billing": billing(result.usage),
+            "model": model,
+            "sandbox": sandbox_name_from_payload(payload),
+        }
+    )
 
 
 def handle_calendar(payload: dict[str, Any]) -> None:
@@ -1102,6 +1211,7 @@ HANDLERS = {
     "health": handle_health,
     "models": handle_models,
     "telegram-router": handle_router,
+    "vault-work": handle_vault_work,
     "calendar-plan": handle_calendar,
     "vault-query": lambda payload: handle_query(payload, stream=False),
     "vault-query-stream": lambda payload: handle_query(payload, stream=True),

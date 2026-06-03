@@ -159,6 +159,8 @@ VAULT_QUERY_PORT=4318
 VAULT_CODEX_MODEL=auto
 VAULT_QUERY_DEFAULT_MODEL=auto
 VAULT_CODEX_SANDBOX=full_access
+VAULT_AGENTIC_WORK_AUTO=true
+VAULT_WORK_WEB_SEARCH_ENABLED=true
 VAULT_BROWSER_AUTO_TRIGGER=true
 VAULT_PROFILE_HINT_FILES=raw/docs/my-profile.md,raw/docs/preferences.md
 ```
@@ -241,6 +243,8 @@ Useful Telegram commands:
 - `/status`: bot and vault health.
 - `/trace`: recent agent decisions and tool activity.
 
+For normal Telegram saves, VaultLens does not stop at deterministic parsing. The fast processor captures the message, then a full-access Codex `vault-work` pass can inspect the vault, run shell workflows, follow links, write canonical notes, update topics/projects/decisions/systems, improve memory-review artifacts, and adjust indexes/dashboards/templates when that makes the knowledge base easier for future agents to use.
+
 ### Deploy Always-On Telegram Ingestion To AWS
 
 ```bash
@@ -254,7 +258,7 @@ See [cloud/README.md](cloud/README.md) for the full AWS setup. The deployment us
 
 - Lambda Function URL for the Telegram webhook
 - one receiver Lambda
-- one single-concurrency processor Lambda
+- one single-concurrency processor Lambda that runs the router, basic ingest, and full-access Codex `vault-work` pass
 - one single-concurrency Playwright browser-worker Lambda for heavy extraction
 - S3 for canonical ignored vault state and raw webhook events
 - optional EventBridge Scheduler for the morning brief

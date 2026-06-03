@@ -1396,6 +1396,7 @@ def load_state(inbox_dir: Path) -> dict[str, Any]:
             "stream_file": "",
             "agent_threads": {},
             "query_threads": {},
+            "vault_work_threads": {},
             "calendar_pending": {},
             "calendar_history": [],
         },
@@ -1941,6 +1942,41 @@ def invoke_vault_query_agent(
     return invoke_codex_runner(vault_root, "vault-query", payload)
 
 
+def invoke_agentic_vault_work_agent(
+    *,
+    vault_root: Path,
+    message: dict[str, Any],
+    decision: dict[str, Any],
+    model: str,
+    reasoning_effort: str,
+    prior_thread_id: str | None,
+    recent_conversation_context: str,
+) -> dict[str, Any]:
+    resume_threads = os.environ.get("VAULT_DISABLE_CODEX_THREAD_RESUME", "").strip() != "1"
+    payload = {
+        "model": model,
+        "reasoningEffort": os.environ.get("VAULT_WORK_REASONING_EFFORT") or reasoning_effort,
+        "workingDirectory": str(vault_root),
+        "additionalDirectories": [
+            str(vault_root / "raw"),
+            str(vault_root / "imports"),
+            str(vault_root / "items"),
+            str(vault_root / "topics"),
+            str(vault_root / "projects"),
+            str(vault_root / "memory"),
+            str(vault_root / "outputs"),
+        ],
+        "threadId": prior_thread_id if resume_threads else None,
+        "includeWebSearch": os.environ.get("VAULT_WORK_WEB_SEARCH_ENABLED", "true").strip().lower() != "false",
+        "message": message,
+        "decision": decision,
+        "recentConversationContext": recent_conversation_context,
+        "currentDate": CURRENT_DATE.isoformat(),
+        "timezone": os.environ.get("TZ", "America/Los_Angeles"),
+    }
+    return invoke_codex_runner(vault_root, "vault-work", payload)
+
+
 def format_telegram_query_response(query_result: dict[str, Any]) -> str:
     answer = query_result.get("answer") or {}
     body = str(answer.get("concise_answer") or answer.get("answer_markdown") or "").strip()
@@ -2139,7 +2175,7 @@ def invoke_codex_agent(
         "instructions": {
             "ack_rule": "Send a thumbs up only after the message was successfully ingested and all requested local actions completed.",
             "message_context_rule": "Preserve user-written context or instructions that accompany links.",
-            "tool_scope_rule": "Only request the provided local actions; do not invent tools.",
+            "agentic_work_rule": "For saved content that deserves durable filing, synthesis, personalization, enrichment, or vault-structure updates, request agentic_vault_work. That follow-up Codex turn has full filesystem/shell freedom inside the restored vault.",
             "future_capture_rule": "Assume the user is sending future material that should usually be filed unless it is clearly ignorable.",
             "task_completion_rule": "If the user says they completed, applied to, submitted, read, skipped, cancelled, or handled something, request update_task_ledger and treat it as authoritative. Infer references like 'there', 'that one', and 'Anthropic' from the recent conversation where possible.",
             "priority_rule": "If the user explicitly says something is low, medium, high, or critical priority, request update_task_ledger so the matching vault note/task can be reprioritized.",
@@ -2308,6 +2344,46 @@ def execute_agent_actions(
             )
             continue
 
+        if tool == "agentic_vault_work":
+            chat_id = str(normalized_message["chat_id"])
+            prior_thread_id = (state.get("vault_work_threads") or {}).get(chat_id)
+            recent_context = build_recent_telegram_context(
+                vault_root=vault_root,
+                inbox_dir=inbox_dir,
+                session_name=session_name,
+                chat_id=int(normalized_message["chat_id"]),
+                normalized_message=normalized_message,
+            )
+            work_result = invoke_agentic_vault_work_agent(
+                vault_root=vault_root,
+                message=normalized_message,
+                decision=decision,
+                model=agent_model,
+                reasoning_effort=agent_reasoning_effort,
+                prior_thread_id=prior_thread_id,
+                recent_conversation_context=recent_context,
+            )
+            thread_id = str(work_result.get("threadId") or "").strip()
+            if thread_id:
+                state.setdefault("vault_work_threads", {})
+                state["vault_work_threads"][chat_id] = thread_id
+            work = work_result.get("work") or {}
+            results.append(
+                {
+                    "tool": tool,
+                    "status": "ok",
+                    "reason": reason,
+                    "thread_id": thread_id,
+                    "summary": work.get("summary"),
+                    "telegram_summary": work.get("telegram_summary"),
+                    "durable_changes": work.get("durable_changes") or [],
+                    "unresolved_items": work.get("unresolved_items") or [],
+                    "usage": work_result.get("usage"),
+                    "billing": work_result.get("billing"),
+                }
+            )
+            continue
+
         if tool == "update_task_ledger":
             context_text = recent_context_for_task_update(stream_file, normalized_message)
             task_proc = subprocess.run(
@@ -2352,6 +2428,7 @@ def execute_agent_actions(
             "refresh_live_metadata_jobs_recent",
             "refresh_live_metadata_knowledge_all",
             "refresh_live_metadata_current_links",
+            "agentic_vault_work",
             "update_task_ledger",
         }
         for result in results
@@ -3057,6 +3134,23 @@ def process_update_batch(
                 store_in_vault=bool(decision.get("storeInVault")),
                 include_ingest=ingest_after_sync,
             )
+        if (
+            decision.get("storeInVault")
+            and ingest_after_sync
+            and os.environ.get("VAULT_AGENTIC_WORK_AUTO", "true").strip().lower() != "false"
+            and not any(action["tool"] == "agentic_vault_work" for action in actions)
+        ):
+            actions = ensure_action_order(
+                actions
+                + [
+                    {
+                        "tool": "agentic_vault_work",
+                        "reason": "Let Codex perform full-power durable filing, enrichment, synthesis, personalization, and vault-structure updates for this saved item.",
+                    }
+                ],
+                store_in_vault=bool(decision.get("storeInVault")),
+                include_ingest=ingest_after_sync,
+            )
         tool_results: list[dict[str, Any]] = []
         if decision.get("storeInVault") or any(action.get("tool") in {"answer_vault_query", "update_task_ledger"} for action in actions):
             if any(action.get("tool") == "answer_vault_query" for action in actions):
@@ -3149,7 +3243,8 @@ def process_update_batch(
 
         ack_allowed = bool(decision.get("storeInVault")) and bool(decision.get("sendAck", True)) and ingest_after_sync
         if ack_allowed:
-            acknowledgement = str(decision.get("acknowledgement") or "👍")
+            work_result = next((result for result in tool_results if result.get("tool") == "agentic_vault_work" and result.get("status") == "ok"), None)
+            acknowledgement = str((work_result or {}).get("telegram_summary") or decision.get("acknowledgement") or "👍")
             if not query_result or not str(query_result.get("reply_text") or "").strip():
                 if not preview.finish(acknowledgement):
                     telegram_send_message(token, chat_id=chat_id, text=acknowledgement, reply_to_message_id=normalized["message_id"])

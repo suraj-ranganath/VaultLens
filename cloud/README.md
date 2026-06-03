@@ -10,6 +10,7 @@ This deploys the VaultLens Telegram agent as a webhook-first AWS path.
 - The processor Lambda restores the ignored vault state bundle from S3 into `/tmp/vault-lens`.
 - The processor waits briefly, collects pending webhook events from S3, then runs `tools/telegram_inbox.py webhook` with a small batch so rapid Telegram messages can be coalesced instead of forcing separate agent turns.
 - Codex runs default to `VAULT_CODEX_SANDBOX=full_access`, so the agent can write vault files and run multi-step shell workflows inside the restored working tree.
+- Saved Telegram content gets an agentic `vault-work` pass by default (`VAULT_AGENTIC_WORK_AUTO=true`). That pass can inspect the vault, run shell workflows, follow links, write canonical notes, update topics/projects/decisions/systems, improve memory-review artifacts, and adjust dashboards/templates/indexes when retrieval quality benefits.
 - The Telegram worker uses preview-message edits for progress, then edits that same preview into the final answer or acknowledgement when possible.
 - Telegram command-center requests (`/today`, `/queue`, `/status`, `/trace`) and inline button callbacks are handled by deterministic local code inside the same processor, so common state updates do not spend LLM tokens.
 - The query path compiles `.vault/cache/`, runs local SQLite FTS retrieval, and only then calls the Codex-backed answer agent.
@@ -49,6 +50,9 @@ AWS_REGION=us-west-2
 STACK_NAME=vault-lens-telegram
 VAULT_CODEX_AUTH_S3_KEY=codex-auth/auth.json
 VAULT_CODEX_SANDBOX=full_access
+VAULT_AGENTIC_WORK_AUTO=true
+VAULT_WORK_WEB_SEARCH_ENABLED=true
+VAULT_WORK_REASONING_EFFORT=medium
 VAULT_BROWSER_AUTO_TRIGGER=true
 HEARTBEAT_ENABLED=false
 ```
@@ -181,6 +185,7 @@ bun run telegram:webhook:test < /tmp/telegram-update.json
 - CloudWatch Logs for the processor show the Codex and ingest failures if a message fails.
 - Telegram retries failed webhook deliveries, and the local processed-update ledger prevents duplicate processing once state has been synced.
 - The processor image intentionally remains lightweight. Browser-heavy enrichment runs in `BrowserWorkerFunction`, which has Playwright Chromium installed and defaults to a small bounded pass over recent weak notes.
+- Set `VAULT_AGENTIC_WORK_AUTO=false` only if you want saved Telegram items to use deterministic ingest without the full Codex filing/synthesis pass. The default should remain `true` for a personalized, agent-maintained vault.
 - X/Twitter post text does not require Playwright in the common case: the processor first tries the `x_content` adapter through live metadata enrichment. Browser enrichment is the fallback for posts, cards, redirects, and linked targets that oEmbed/live adapters cannot recover.
 - Set `VAULT_BROWSER_AUTO_TRIGGER=false` if you want browser enrichment to be manual only. Tune `VAULT_BROWSER_ENRICH_LIMIT`, `VAULT_BROWSER_ENRICH_CONCURRENCY`, `VAULT_BROWSER_ENRICH_LOOKBACK_DAYS`, and `VAULT_BROWSER_MAX_LINK_HOPS` to control cost and runtime.
 - `.vault/events/agent-events.jsonl` is the cross-surface event log for web queries, Telegram processing, Codex usage, and future diagnostics.
