@@ -112,6 +112,7 @@ The deploy script:
 - generates `TELEGRAM_WEBHOOK_SECRET` if it is missing and appends it to `.env.local`
 - builds the Lambda container image
 - builds the separate browser-worker image with Playwright browsers
+- installs an ECR lifecycle policy so old deployment images do not accumulate indefinitely
 - deploys the CloudFormation stack
 - syncs local Codex ChatGPT auth to the private state bucket when `CODEX_ACCESS_TOKEN` is not set
 - registers the Lambda Function URL with Telegram via `setWebhook`
@@ -120,6 +121,37 @@ If you re-run `codex login --device-auth`, rotate ChatGPT auth, or see cloud aut
 
 ```bash
 bun run cloud:sync-codex-auth
+```
+
+### Cost Cleanup
+
+Deploys push container images to ECR. The current deploy script keeps a small rollback window by default:
+
+```bash
+ECR_KEEP_APP_IMAGES=4
+ECR_KEEP_BROWSER_IMAGES=2
+ECR_KEEP_TOTAL_IMAGES=6
+ECR_UNTAGGED_EXPIRE_DAYS=1
+```
+
+To apply lifecycle policies to current and legacy VaultLens repositories, prune stale images immediately, and disable old `my-vault-telegram-*` morning-brief schedules:
+
+```bash
+bun run cloud:cleanup
+```
+
+Preview first with:
+
+```bash
+bun run cloud:cleanup -- --dry-run
+```
+
+The cleanup command protects image digests still referenced by Lambda functions. It does not delete S3 vault state buckets, because old state bundles are safer to keep as recovery backups until you explicitly decide to remove them.
+
+If you also want to delete legacy ECR repositories that no Lambda function references anymore:
+
+```bash
+bun run cloud:cleanup -- --delete-unused-legacy-repos
 ```
 
 ## Seed Or Refresh Cloud Vault State

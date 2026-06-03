@@ -335,6 +335,68 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
         self.assertIn("cloud/browser-worker.Dockerfile", template)
         self.assertIn("VAULT_BROWSER_WORKER_FUNCTION_NAME", template)
 
+    def test_cleanup_lifecycle_policy_and_prune_protect_active_images(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "cloud"))
+        import cleanup_aws_resources  # type: ignore
+
+        policy = cleanup_aws_resources.lifecycle_policy(
+            untagged_days=1,
+            keep_app_images=4,
+            keep_browser_images=2,
+            keep_total_images=6,
+        )
+        self.assertEqual(policy["rules"][-1]["selection"]["tagStatus"], "any")
+        self.assertEqual(policy["rules"][-1]["rulePriority"], 100)
+        self.assertIn("browserworkerfunction-", policy["rules"][1]["selection"]["tagPrefixList"])
+        self.assertIn("processorfunction-", policy["rules"][2]["selection"]["tagPrefixList"])
+
+        images = [
+            {
+                "imageDigest": "sha256:active",
+                "imageTags": ["processorfunction-current"],
+                "imagePushedAt": "2026-06-03T02:00:00+00:00",
+                "imageSizeInBytes": 100,
+            },
+            {
+                "imageDigest": "sha256:browser-current",
+                "imageTags": ["browserworkerfunction-current"],
+                "imagePushedAt": "2026-06-03T01:00:00+00:00",
+                "imageSizeInBytes": 100,
+            },
+            {
+                "imageDigest": "sha256:app-old-1",
+                "imageTags": ["processorfunction-old-1"],
+                "imagePushedAt": "2026-06-02T01:00:00+00:00",
+                "imageSizeInBytes": 100,
+            },
+            {
+                "imageDigest": "sha256:app-old-2",
+                "imageTags": ["processorfunction-old-2"],
+                "imagePushedAt": "2026-06-01T01:00:00+00:00",
+                "imageSizeInBytes": 100,
+            },
+            {
+                "imageDigest": "sha256:browser-old-1",
+                "imageTags": ["browserworkerfunction-old-1"],
+                "imagePushedAt": "2026-05-31T01:00:00+00:00",
+                "imageSizeInBytes": 100,
+            },
+        ]
+        selected = cleanup_aws_resources.select_images_to_delete(
+            images,
+            protected_digests={"sha256:active"},
+            keep_app_images=1,
+            keep_browser_images=1,
+            keep_total_images=2,
+        )
+        selected_digests = {image["imageDigest"] for image in selected}
+        self.assertNotIn("sha256:active", selected_digests)
+        self.assertIn("sha256:app-old-1", selected_digests)
+        self.assertIn("sha256:app-old-2", selected_digests)
+        self.assertIn("sha256:browser-old-1", selected_digests)
+
     def test_browser_heavy_updates_trigger_browser_worker(self) -> None:
         import sys
         import types

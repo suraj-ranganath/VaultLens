@@ -47,6 +47,10 @@ AWS_ACCOUNT_ID="$(
 )"
 ECR_REPO="${STACK_NAME}-lambda"
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+ECR_UNTAGGED_EXPIRE_DAYS="${ECR_UNTAGGED_EXPIRE_DAYS:-1}"
+ECR_KEEP_APP_IMAGES="${ECR_KEEP_APP_IMAGES:-4}"
+ECR_KEEP_BROWSER_IMAGES="${ECR_KEEP_BROWSER_IMAGES:-2}"
+ECR_KEEP_TOTAL_IMAGES="${ECR_KEEP_TOTAL_IMAGES:-6}"
 
 if [ -z "${TELEGRAM_WEBHOOK_SECRET:-}" ]; then
   TELEGRAM_WEBHOOK_SECRET="$(openssl rand -hex 32)"
@@ -97,34 +101,76 @@ ensure_ecr_repo() {
 
 configure_ecr_lifecycle() {
   local repo_name="$1"
+  local lifecycle_policy
+  lifecycle_policy="$(
+    ECR_UNTAGGED_EXPIRE_DAYS="$ECR_UNTAGGED_EXPIRE_DAYS" \
+    ECR_KEEP_APP_IMAGES="$ECR_KEEP_APP_IMAGES" \
+    ECR_KEEP_BROWSER_IMAGES="$ECR_KEEP_BROWSER_IMAGES" \
+    ECR_KEEP_TOTAL_IMAGES="$ECR_KEEP_TOTAL_IMAGES" \
+    python3 - <<'PY'
+import json
+import os
+
+def env_int(name, default):
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+policy = {
+    "rules": [
+        {
+            "rulePriority": 1,
+            "description": "Expire untagged deployment layers quickly",
+            "selection": {
+                "tagStatus": "untagged",
+                "countType": "sinceImagePushed",
+                "countUnit": "days",
+                "countNumber": env_int("ECR_UNTAGGED_EXPIRE_DAYS", 1),
+            },
+            "action": {"type": "expire"},
+        },
+        {
+            "rulePriority": 10,
+            "description": "Keep only the latest browser-worker images",
+            "selection": {
+                "tagStatus": "tagged",
+                "tagPrefixList": ["browserworkerfunction-"],
+                "countType": "imageCountMoreThan",
+                "countNumber": env_int("ECR_KEEP_BROWSER_IMAGES", 2),
+            },
+            "action": {"type": "expire"},
+        },
+        {
+            "rulePriority": 20,
+            "description": "Keep only the latest app Lambda images",
+            "selection": {
+                "tagStatus": "tagged",
+                "tagPrefixList": ["processorfunction-"],
+                "countType": "imageCountMoreThan",
+                "countNumber": env_int("ECR_KEEP_APP_IMAGES", 4),
+            },
+            "action": {"type": "expire"},
+        },
+        {
+            "rulePriority": 100,
+            "description": "Hard cap retained deployment images",
+            "selection": {
+                "tagStatus": "any",
+                "countType": "imageCountMoreThan",
+                "countNumber": env_int("ECR_KEEP_TOTAL_IMAGES", 6),
+            },
+            "action": {"type": "expire"},
+        },
+    ]
+}
+print(json.dumps(policy))
+PY
+  )"
   aws ecr put-lifecycle-policy \
     --repository-name "$repo_name" \
     --region "$AWS_REGION" \
-    --lifecycle-policy-text '{
-      "rules": [
-        {
-          "rulePriority": 1,
-          "description": "Expire untagged deployment layers quickly",
-          "selection": {
-            "tagStatus": "untagged",
-            "countType": "sinceImagePushed",
-            "countUnit": "days",
-            "countNumber": 1
-          },
-          "action": { "type": "expire" }
-        },
-        {
-          "rulePriority": 2,
-          "description": "Keep only the latest deployment images",
-          "selection": {
-            "tagStatus": "any",
-            "countType": "imageCountMoreThan",
-            "countNumber": 8
-          },
-          "action": { "type": "expire" }
-        }
-      ]
-    }' \
+    --lifecycle-policy-text "$lifecycle_policy" \
     --cli-connect-timeout 5 \
     --cli-read-timeout 20 \
     --no-cli-pager >/dev/null

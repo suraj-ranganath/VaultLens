@@ -263,6 +263,8 @@ See [cloud/README.md](cloud/README.md) for the full AWS setup. The deployment us
 - S3 for canonical ignored vault state and raw webhook events
 - optional EventBridge Scheduler for the morning brief
 
+To keep deploy artifacts cheap, `cloud:deploy` installs ECR lifecycle policies. You can also run `bun run cloud:cleanup` to prune stale VaultLens container images and disable legacy `my-vault-telegram-*` schedules while preserving old S3 vault-state backups.
+
 ### Enrich Weak Links Locally
 
 ```bash
