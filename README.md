@@ -191,6 +191,8 @@ The Python Codex SDK reuses your local `~/.codex/auth.json`. VaultLens does not 
 ```bash
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_ALLOWED_CHAT_IDS=your_numeric_chat_id
+VAULT_TELEGRAM_STREAMING_ENABLED=true
+VAULT_TELEGRAM_STREAMING_TRANSPORT=auto
 VAULT_QUERY_PORT=4318
 VAULT_CODEX_MODEL=auto
 VAULT_QUERY_DEFAULT_MODEL=auto
@@ -208,6 +210,8 @@ AWS_REGION=us-west-2
 STACK_NAME=vault-lens-telegram
 TELEGRAM_WEBHOOK_SECRET=generated_or_left_blank_for_deploy_script
 VAULT_CODEX_AUTH_S3_KEY=codex-auth/auth.json
+VAULT_TELEGRAM_STREAMING_ENABLED=true
+VAULT_TELEGRAM_STREAMING_TRANSPORT=auto
 VAULT_BROWSER_ENRICH_LIMIT=24
 VAULT_BROWSER_ENRICH_CONCURRENCY=2
 VAULT_BROWSER_ENRICH_LOOKBACK_DAYS=30
@@ -270,7 +274,7 @@ bun run telegram:sync
 bun run telegram:run
 ```
 
-Telegram messages can include plain notes, links, screenshots, images with captions, job posts, reminders, questions, and calendar requests. The agent decides how to route each message and writes durable context back into the vault.
+Telegram messages can include plain notes, links, screenshots, images with captions, job posts, reminders, questions, and calendar requests. The agent decides how to route each message and writes durable context back into the vault. Vault Q&A answers stream back progressively in Telegram: private chats use Telegram draft streaming when available, and the bot falls back to edit-message streaming automatically.
 
 Useful Telegram commands:
 

@@ -104,6 +104,8 @@ COMMAND_RE = re.compile(r"^/(today|queue|status|trace)(?:@\w+)?(?:\s+(.*))?$", r
 COMMAND_CALLBACK_PREFIX = "vault:"
 COMMAND_CALLBACKS_FILE = Path(".vault") / "telegram-command-center" / "callbacks.json"
 COMMAND_ITEM_LIMIT = 5
+FALSE_ENV_VALUES = {"0", "false", "no", "off"}
+TELEGRAM_STREAM_TRANSPORTS = {"auto", "draft", "edit", "off"}
 
 
 def js_runtime() -> str:
@@ -117,6 +119,32 @@ def codex_runner_command(vault_root: Path, command: str) -> list[str]:
     if runtime in {"python", "python3"} or runtime_name.startswith("python"):
         return [runtime, script, command]
     return [runtime, "run", "python", script, command]
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in FALSE_ENV_VALUES
+
+
+def env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        value = int(str(os.environ.get(name, default)).strip())
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+def telegram_streaming_enabled() -> bool:
+    return env_bool("VAULT_TELEGRAM_STREAMING_ENABLED", True)
+
+
+def telegram_streaming_transport() -> str:
+    transport = str(os.environ.get("VAULT_TELEGRAM_STREAMING_TRANSPORT", "auto")).strip().lower()
+    if transport not in TELEGRAM_STREAM_TRANSPORTS:
+        return "auto"
+    return transport
 
 
 def invoke_codex_runner(vault_root: Path, command: str, payload: dict[str, Any], *, timeout: int = 180) -> dict[str, Any]:
@@ -604,13 +632,48 @@ def render_export_message(timestamp: datetime, sender: str, text: str) -> str:
     return "\n".join([first] + lines[1:])
 
 
+class TelegramAPIError(RuntimeError):
+    def __init__(self, method: str, payload: dict[str, Any] | None = None, status_code: int | None = None) -> None:
+        self.method = method
+        self.payload = payload or {}
+        self.status_code = status_code
+        super().__init__(f"Telegram API error for {method}: {self.payload or status_code}")
+
+    @property
+    def retry_after(self) -> int | None:
+        parameters = self.payload.get("parameters") if isinstance(self.payload, dict) else None
+        if not isinstance(parameters, dict):
+            return None
+        try:
+            return int(parameters.get("retry_after"))
+        except (TypeError, ValueError):
+            return None
+
+
+def parse_telegram_response(response: requests.Response, method: str) -> dict[str, Any]:
+    payload: dict[str, Any] | None
+    try:
+        parsed = response.json()
+        payload = parsed if isinstance(parsed, dict) else {"result": parsed}
+    except ValueError:
+        payload = None
+    if not response.ok:
+        raise TelegramAPIError(method, payload, response.status_code)
+    if payload is None:
+        raise TelegramAPIError(method, {"description": "Non-JSON response"}, response.status_code)
+    if not payload.get("ok"):
+        raise TelegramAPIError(method, payload, response.status_code)
+    return payload
+
+
 def telegram_api(token: str, method: str, **params: Any) -> dict[str, Any]:
     response = requests.get(f"{API_ROOT}/bot{token}/{method}", params=params, timeout=70)
-    response.raise_for_status()
-    payload = response.json()
-    if not payload.get("ok"):
-        raise RuntimeError(f"Telegram API error for {method}: {payload}")
-    return payload
+    return parse_telegram_response(response, method)
+
+
+def telegram_api_post(token: str, method: str, **params: Any) -> dict[str, Any]:
+    response = requests.post(f"{API_ROOT}/bot{token}/{method}", json=params, timeout=70)
+    return parse_telegram_response(response, method)
 
 
 def telegram_send_message(
@@ -632,6 +695,15 @@ def telegram_send_message(
 
 def telegram_edit_message_text(token: str, chat_id: int, message_id: int, text: str) -> dict[str, Any]:
     return telegram_api(token, "editMessageText", chat_id=chat_id, message_id=message_id, text=text)
+
+
+def telegram_delete_message(token: str, chat_id: int, message_id: int) -> dict[str, Any]:
+    return telegram_api_post(token, "deleteMessage", chat_id=chat_id, message_id=message_id)
+
+
+def telegram_send_message_draft(token: str, chat_id: int, draft_id: int, text: str) -> dict[str, Any]:
+    clean = str(text or "")[:4096]
+    return telegram_api_post(token, "sendMessageDraft", chat_id=chat_id, draft_id=max(1, int(draft_id)), text=clean)
 
 
 def telegram_send_chat_action(token: str, chat_id: int, action: str = "typing") -> dict[str, Any]:
@@ -723,6 +795,143 @@ class TelegramPreviewMessage:
             return True
         except Exception:
             return False
+
+
+def telegram_stream_draft_id(chat_id: int, reply_to_message_id: int | None) -> int:
+    seed = f"{chat_id}:{reply_to_message_id or 0}:{time.time_ns()}".encode("utf-8")
+    return int(hashlib.sha1(seed).hexdigest()[:8], 16) or 1
+
+
+def truncate_stream_frame(text: str, max_chars: int) -> str:
+    clean = str(text or "").strip()
+    if max_chars <= 0 or len(clean) <= max_chars:
+        return clean
+    return clean[: max(1, max_chars - 1)].rstrip() + "…"
+
+
+class TelegramAnswerStreamSink:
+    def __init__(
+        self,
+        *,
+        token: str,
+        chat_id: int,
+        chat_type: str,
+        reply_to_message_id: int | None,
+        preview: TelegramPreviewMessage,
+        transport: str | None = None,
+    ) -> None:
+        self.token = token
+        self.chat_id = chat_id
+        self.chat_type = str(chat_type or "")
+        self.reply_to_message_id = reply_to_message_id
+        self.preview = preview
+        self.enabled = telegram_streaming_enabled()
+        configured_transport = str(transport or telegram_streaming_transport()).strip().lower()
+        self.transport = configured_transport if configured_transport in TELEGRAM_STREAM_TRANSPORTS else "auto"
+        self.mode = self._initial_mode()
+        self.draft_id = telegram_stream_draft_id(chat_id, reply_to_message_id)
+        self.answer_text = ""
+        self.last_frame = ""
+        self.last_update_at = 0.0
+        self.max_chars = env_int("VAULT_TELEGRAM_STREAMING_MAX_CHARS", 3800, minimum=500)
+        self.draft_interval = env_int("VAULT_TELEGRAM_DRAFT_INTERVAL_MS", 250, minimum=50) / 1000.0
+        self.edit_interval = env_int("VAULT_TELEGRAM_EDIT_INTERVAL_MS", 1000, minimum=250) / 1000.0
+        self.delivered = False
+        self.draft_failed = False
+        self.backoff_until = 0.0
+
+    def _initial_mode(self) -> str:
+        if not self.enabled or self.transport == "off":
+            return "off"
+        if self.transport == "draft":
+            return "draft"
+        if self.transport == "edit":
+            return "edit"
+        return "draft" if self.chat_type == "private" else "edit"
+
+    def on_answer_delta(self, delta: str) -> None:
+        if self.mode == "off":
+            return
+        self.answer_text += str(delta or "")
+        self.flush(force=False)
+
+    def flush(self, *, force: bool = False) -> bool:
+        if self.mode == "off":
+            return False
+        frame = truncate_stream_frame(strip_markdown_for_telegram(self.answer_text), self.max_chars)
+        if not frame or (not force and frame == self.last_frame):
+            return False
+        now = time.time()
+        if not force and self.backoff_until and now < self.backoff_until:
+            return False
+        interval = self.draft_interval if self.mode == "draft" else self.edit_interval
+        if not force and self.last_update_at and now - self.last_update_at < interval:
+            return False
+        if self.mode == "draft":
+            if self._send_draft_frame(frame):
+                self.last_frame = frame
+                self.last_update_at = now
+                return True
+            self.mode = "edit"
+            self.draft_failed = True
+            if not force and self.backoff_until and now < self.backoff_until:
+                return False
+        self.preview.update(frame, force=force)
+        self.last_frame = frame
+        self.last_update_at = now
+        return True
+
+    def _send_draft_frame(self, frame: str) -> bool:
+        try:
+            telegram_send_message_draft(self.token, self.chat_id, self.draft_id, frame)
+            self._delete_preview_after_draft_success()
+            return True
+        except TelegramAPIError as exc:
+            retry_after = exc.retry_after
+            if retry_after:
+                self.backoff_until = time.time() + retry_after
+            return False
+        except Exception:
+            return False
+
+    def _delete_preview_after_draft_success(self) -> None:
+        message_id = self.preview.message_id
+        if message_id is None:
+            return
+        try:
+            telegram_delete_message(self.token, self.chat_id, message_id)
+            self.preview.message_id = None
+            self.preview.last_text = ""
+        except Exception:
+            pass
+
+    def finish(self, final_text: str) -> bool:
+        clean = str(final_text or "").strip()
+        if not clean:
+            return False
+        if self.mode == "draft" and not self.draft_failed:
+            self._delete_preview_after_draft_success()
+            telegram_send_long_message(self.token, self.chat_id, clean, reply_to_message_id=self.reply_to_message_id)
+            self.clear_draft()
+            self.delivered = True
+            return True
+        if self.mode == "edit":
+            telegram_deliver_long_message(
+                self.token,
+                chat_id=self.chat_id,
+                text=clean,
+                reply_to_message_id=self.reply_to_message_id,
+                preview=self.preview,
+            )
+            self.delivered = True
+            return True
+        return False
+
+    def clear_draft(self) -> None:
+        try:
+            telegram_send_message_draft(self.token, self.chat_id, self.draft_id, "")
+        except Exception:
+            pass
 
 
 def telegram_send_long_message(token: str, chat_id: int, text: str, reply_to_message_id: int | None = None) -> list[dict[str, Any]]:
@@ -1942,6 +2151,81 @@ def invoke_vault_query_agent(
     return invoke_codex_runner(vault_root, "vault-query", payload)
 
 
+def invoke_vault_query_agent_stream(
+    vault_root: Path,
+    question: str,
+    model: str,
+    reasoning_effort: str,
+    prior_thread_id: str | None,
+    recent_conversation_context: str,
+    stream_sink: TelegramAnswerStreamSink,
+) -> dict[str, Any]:
+    resume_threads = os.environ.get("VAULT_DISABLE_CODEX_THREAD_RESUME", "").strip() != "1"
+    payload = {
+        "model": model,
+        "reasoningEffort": reasoning_effort,
+        "workingDirectory": str(vault_root),
+        "question": question,
+        "threadId": prior_thread_id if resume_threads else None,
+        "includeWebSearch": True,
+        "recentConversationContext": recent_conversation_context,
+        "emitAnswerDeltas": True,
+    }
+    command = codex_runner_command(vault_root, "vault-query-stream")
+    stderr_lines: list[str] = []
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=vault_root,
+        env=os.environ.copy(),
+    )
+
+    def drain_stderr() -> None:
+        if proc.stderr is None:
+            return
+        for line in proc.stderr:
+            stderr_lines.append(line)
+
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_thread.start()
+    assert proc.stdin is not None
+    proc.stdin.write(json.dumps(payload))
+    proc.stdin.close()
+
+    final_result: dict[str, Any] | None = None
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        clean = line.strip()
+        if not clean:
+            continue
+        try:
+            event = json.loads(clean)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "answer.delta":
+            stream_sink.on_answer_delta(str(event.get("text") or ""))
+        elif event.get("type") == "result":
+            final_result = event
+
+    return_code = proc.wait()
+    stderr_thread.join(timeout=1)
+    if proc.stdout is not None:
+        proc.stdout.close()
+    if proc.stderr is not None:
+        proc.stderr.close()
+    if return_code != 0:
+        stderr_text = "".join(stderr_lines).strip()
+        raise RuntimeError(stderr_text or f"vault-query-stream exited with {return_code}")
+    if final_result is None:
+        raise RuntimeError("vault-query-stream completed without a final result")
+    return final_result
+
+
 def invoke_agentic_vault_work_agent(
     *,
     vault_root: Path,
@@ -2196,6 +2480,7 @@ def execute_agent_actions(
     state: dict[str, Any],
     agent_model: str,
     agent_reasoning_effort: str,
+    query_stream_sink: TelegramAnswerStreamSink | None = None,
 ) -> list[dict[str, Any]]:
     inbox_dir, _ = ensure_directories(vault_root)
     stream_file = stream_path(inbox_dir, session_name)
@@ -2319,25 +2604,65 @@ def execute_agent_actions(
                 chat_id=int(normalized_message["chat_id"]),
                 normalized_message=normalized_message,
             )
-            query_result = invoke_vault_query_agent(
-                vault_root=vault_root,
-                question=normalized_message["raw_text"],
-                model=agent_model,
-                reasoning_effort=agent_reasoning_effort,
-                prior_thread_id=prior_thread_id,
-                recent_conversation_context=recent_context,
-            )
+            stream_error = ""
+            streaming_attempted = False
+            query_result: dict[str, Any]
+            if query_stream_sink is not None and query_stream_sink.mode != "off":
+                streaming_attempted = True
+                try:
+                    query_result = invoke_vault_query_agent_stream(
+                        vault_root=vault_root,
+                        question=normalized_message["raw_text"],
+                        model=agent_model,
+                        reasoning_effort=agent_reasoning_effort,
+                        prior_thread_id=prior_thread_id,
+                        recent_conversation_context=recent_context,
+                        stream_sink=query_stream_sink,
+                    )
+                except Exception as exc:
+                    stream_error = f"{type(exc).__name__}: {exc}"
+                    query_result = invoke_vault_query_agent(
+                        vault_root=vault_root,
+                        question=normalized_message["raw_text"],
+                        model=agent_model,
+                        reasoning_effort=agent_reasoning_effort,
+                        prior_thread_id=prior_thread_id,
+                        recent_conversation_context=recent_context,
+                    )
+            else:
+                query_result = invoke_vault_query_agent(
+                    vault_root=vault_root,
+                    question=normalized_message["raw_text"],
+                    model=agent_model,
+                    reasoning_effort=agent_reasoning_effort,
+                    prior_thread_id=prior_thread_id,
+                    recent_conversation_context=recent_context,
+                )
             thread_id = str(query_result.get("threadId") or "").strip()
             if thread_id:
                 state.setdefault("query_threads", {})
                 state["query_threads"][str(normalized_message["chat_id"])] = thread_id
+            reply_text = format_telegram_query_response(query_result)
+            reply_delivered = False
+            if streaming_attempted and not stream_error and query_stream_sink is not None:
+                try:
+                    reply_delivered = query_stream_sink.finish(reply_text)
+                except Exception as exc:
+                    stream_error = f"{type(exc).__name__}: {exc}"
             results.append(
                 {
                     "tool": tool,
                     "status": "ok",
                     "reason": reason,
                     "thread_id": thread_id,
-                    "reply_text": format_telegram_query_response(query_result),
+                    "reply_text": reply_text,
+                    "reply_delivered": reply_delivered,
+                    "streaming": {
+                        "attempted": streaming_attempted,
+                        "transport": query_stream_sink.mode if query_stream_sink is not None else "off",
+                        "draft_id": query_stream_sink.draft_id if query_stream_sink is not None else None,
+                        "error": stream_error,
+                    },
                     "usage": query_result.get("usage"),
                     "billing": query_result.get("billing"),
                 }
@@ -3152,9 +3477,17 @@ def process_update_batch(
                 include_ingest=ingest_after_sync,
             )
         tool_results: list[dict[str, Any]] = []
+        query_stream_sink: TelegramAnswerStreamSink | None = None
         if decision.get("storeInVault") or any(action.get("tool") in {"answer_vault_query", "update_task_ledger"} for action in actions):
             if any(action.get("tool") == "answer_vault_query" for action in actions):
                 preview.update("Searching the compiled vault cache and building the answer…", force=True)
+                query_stream_sink = TelegramAnswerStreamSink(
+                    token=token,
+                    chat_id=chat_id,
+                    chat_type=str(normalized.get("chat_type") or ""),
+                    reply_to_message_id=int(normalized["message_id"]),
+                    preview=preview,
+                )
             elif any(action.get("tool") == "update_task_ledger" for action in actions):
                 preview.update("Updating the task ledger…", force=True)
             tool_results = execute_agent_actions(
@@ -3166,6 +3499,7 @@ def process_update_batch(
                 state=state,
                 agent_model=agent_model,
                 agent_reasoning_effort=agent_reasoning_effort,
+                query_stream_sink=query_stream_sink,
             )
             append_agent_event(
                 vault_root,
@@ -3232,13 +3566,14 @@ def process_update_batch(
 
         query_result = next((result for result in tool_results if result.get("tool") == "answer_vault_query" and result.get("status") == "ok"), None)
         if query_result and str(query_result.get("reply_text") or "").strip():
-            telegram_deliver_long_message(
-                token,
-                chat_id=chat_id,
-                text=str(query_result["reply_text"]),
-                reply_to_message_id=normalized["message_id"],
-                preview=preview,
-            )
+            if not query_result.get("reply_delivered"):
+                telegram_deliver_long_message(
+                    token,
+                    chat_id=chat_id,
+                    text=str(query_result["reply_text"]),
+                    reply_to_message_id=normalized["message_id"],
+                    preview=preview,
+                )
             answered += 1
 
         ack_allowed = bool(decision.get("storeInVault")) and bool(decision.get("sendAck", True)) and ingest_after_sync

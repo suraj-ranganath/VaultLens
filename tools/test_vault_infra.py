@@ -215,6 +215,258 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
             self.assertIn("telegram/recent-conversation-context", payload["vaultContext"])
             self.assertIn("Anthropic role", payload["vaultContext"])
 
+    def test_streaming_json_answer_extractor_emits_clean_deltas(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import codex_agent_runner  # type: ignore
+
+        extractor = codex_agent_runner.StreamingJsonAnswerExtractor()
+        chunks = [
+            '{"concise_an',
+            'swer":"Hello \\"Suraj\\"\\nemoji \\ud83d',
+            '\\ude04 and more", "answer_markdown":"ignored"}',
+        ]
+        combined = "".join(extractor.feed(chunk) for chunk in chunks)
+        self.assertEqual(combined, 'Hello "Suraj"\nemoji 😄 and more')
+        self.assertNotIn("concise_answer", combined)
+        self.assertNotIn("{", combined)
+
+    def test_streaming_json_answer_extractor_falls_back_to_answer_markdown(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import codex_agent_runner  # type: ignore
+
+        extractor = codex_agent_runner.StreamingJsonAnswerExtractor()
+        combined = "".join(
+            [
+                extractor.feed('{"confidence":"high","answer_markdown":"Fallback'),
+                extractor.feed(' answer\\ntext","citations":[]}'),
+            ]
+        )
+        self.assertEqual(combined, "Fallback answer\ntext")
+
+    def test_telegram_stream_sink_auto_draft_final_delivery_and_clear(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        draft_calls: list[dict[str, object]] = []
+        sent_calls: list[dict[str, object]] = []
+        deleted: list[int] = []
+        preview = telegram_inbox.TelegramPreviewMessage("token", 42, 99)
+        preview.message_id = 123
+
+        with mock.patch.dict(
+            telegram_inbox.os.environ,
+            {
+                "VAULT_TELEGRAM_STREAMING_ENABLED": "true",
+                "VAULT_TELEGRAM_STREAMING_TRANSPORT": "auto",
+                "VAULT_TELEGRAM_DRAFT_INTERVAL_MS": "50",
+                "VAULT_TELEGRAM_EDIT_INTERVAL_MS": "250",
+            },
+            clear=False,
+        ), mock.patch.object(
+            telegram_inbox,
+            "telegram_send_message_draft",
+            side_effect=lambda _token, chat_id, draft_id, text: draft_calls.append(
+                {"chat_id": chat_id, "draft_id": draft_id, "text": text}
+            )
+            or {"ok": True},
+        ), mock.patch.object(
+            telegram_inbox,
+            "telegram_delete_message",
+            side_effect=lambda _token, _chat_id, message_id: deleted.append(message_id) or {"ok": True},
+        ), mock.patch.object(
+            telegram_inbox,
+            "telegram_send_long_message",
+            side_effect=lambda _token, chat_id, text, reply_to_message_id=None: sent_calls.append(
+                {"chat_id": chat_id, "text": text, "reply_to_message_id": reply_to_message_id}
+            )
+            or [{"ok": True}],
+        ):
+            sink = telegram_inbox.TelegramAnswerStreamSink(
+                token="token",
+                chat_id=42,
+                chat_type="private",
+                reply_to_message_id=99,
+                preview=preview,
+            )
+            self.assertEqual(sink.mode, "draft")
+            self.assertGreater(sink.draft_id, 0)
+            sink.on_answer_delta("Hello")
+            self.assertEqual(draft_calls[0]["text"], "Hello")
+            self.assertEqual(deleted, [123])
+            self.assertTrue(sink.finish("Hello\n\nReceipts 🔗"))
+
+        self.assertEqual(sent_calls[0]["reply_to_message_id"], 99)
+        self.assertEqual(draft_calls[-1]["text"], "")
+
+    def test_telegram_stream_sink_auto_group_uses_edit_and_draft_failure_falls_back(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        group_preview = telegram_inbox.TelegramPreviewMessage("token", -42, 99)
+        with mock.patch.dict(telegram_inbox.os.environ, {"VAULT_TELEGRAM_STREAMING_TRANSPORT": "auto"}, clear=False):
+            group_sink = telegram_inbox.TelegramAnswerStreamSink(
+                token="token",
+                chat_id=-42,
+                chat_type="group",
+                reply_to_message_id=99,
+                preview=group_preview,
+            )
+        self.assertEqual(group_sink.mode, "edit")
+
+        preview = telegram_inbox.TelegramPreviewMessage("token", 42, 99)
+        with mock.patch.dict(
+            telegram_inbox.os.environ,
+            {"VAULT_TELEGRAM_STREAMING_TRANSPORT": "draft"},
+            clear=False,
+        ), mock.patch.object(
+            telegram_inbox, "telegram_send_message_draft", side_effect=RuntimeError("draft unavailable")
+        ), mock.patch.object(preview, "update") as update_mock:
+            sink = telegram_inbox.TelegramAnswerStreamSink(
+                token="token",
+                chat_id=42,
+                chat_type="private",
+                reply_to_message_id=99,
+                preview=preview,
+            )
+            sink.on_answer_delta("Hello")
+
+        self.assertEqual(sink.mode, "edit")
+        update_mock.assert_called_once()
+
+        rate_preview = telegram_inbox.TelegramPreviewMessage("token", 42, 99)
+        rate_error = telegram_inbox.TelegramAPIError("sendMessageDraft", {"parameters": {"retry_after": 2}})
+        with mock.patch.dict(
+            telegram_inbox.os.environ,
+            {"VAULT_TELEGRAM_STREAMING_TRANSPORT": "draft"},
+            clear=False,
+        ), mock.patch.object(
+            telegram_inbox, "telegram_send_message_draft", side_effect=rate_error
+        ), mock.patch.object(rate_preview, "update") as rate_update_mock:
+            rate_sink = telegram_inbox.TelegramAnswerStreamSink(
+                token="token",
+                chat_id=42,
+                chat_type="private",
+                reply_to_message_id=99,
+                preview=rate_preview,
+            )
+            rate_sink.on_answer_delta("Hello")
+
+        self.assertEqual(rate_sink.mode, "edit")
+        self.assertGreater(rate_sink.backoff_until, telegram_inbox.time.time())
+        rate_update_mock.assert_not_called()
+
+    def test_invoke_vault_query_agent_stream_forwards_answer_deltas(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        class RecordingSink:
+            def __init__(self) -> None:
+                self.deltas: list[str] = []
+
+            def on_answer_delta(self, text: str) -> None:
+                self.deltas.append(text)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = root / "fake_runner.py"
+            fake.write_text(
+                """
+import json
+import sys
+sys.stdin.read()
+events = [
+    {"type": "answer.delta", "text": "Hello"},
+    {"type": "answer.delta", "text": " world"},
+    {"type": "item", "phase": "completed", "item": {"type": "agent_message", "text": "trace"}},
+    {"type": "result", "threadId": "thread-1", "answer": {"concise_answer": "Hello world", "answer_markdown": "Hello world", "confidence": "high", "citations": [], "gaps": [], "follow_up_questions": []}, "usage": {}, "billing": {}},
+]
+for event in events:
+    print(json.dumps(event), flush=True)
+""".lstrip(),
+                encoding="utf-8",
+            )
+            sink = RecordingSink()
+            with mock.patch.object(telegram_inbox, "codex_runner_command", return_value=[sys.executable, str(fake)]):
+                result = telegram_inbox.invoke_vault_query_agent_stream(
+                    vault_root=root,
+                    question="hello?",
+                    model="auto",
+                    reasoning_effort="medium",
+                    prior_thread_id=None,
+                    recent_conversation_context="",
+                    stream_sink=sink,  # type: ignore[arg-type]
+                )
+
+        self.assertEqual(sink.deltas, ["Hello", " world"])
+        self.assertEqual(result["threadId"], "thread-1")
+        self.assertEqual(result["answer"]["concise_answer"], "Hello world")
+
+    def test_execute_agent_actions_marks_streamed_query_delivered(self) -> None:
+        import sys
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import telegram_inbox  # type: ignore
+
+        class FakeSink:
+            mode = "edit"
+            draft_id = 7
+
+            def __init__(self) -> None:
+                self.final_text = ""
+
+            def finish(self, text: str) -> bool:
+                self.final_text = text
+                return True
+
+        query_result = {
+            "threadId": "thread-2",
+            "answer": {
+                "concise_answer": "Answer body",
+                "answer_markdown": "Answer body",
+                "confidence": "high",
+                "citations": [],
+                "gaps": [],
+                "follow_up_questions": [],
+            },
+            "usage": {},
+            "billing": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sink = FakeSink()
+            normalized = {
+                "chat_id": 42,
+                "message_id": 1001,
+                "update_id": 1,
+                "raw_text": "what should I read?",
+                "export_line": "[4/28/26, 8:01:00 AM] User: what should I read?",
+            }
+            with mock.patch.object(telegram_inbox, "invoke_vault_query_agent_stream", return_value=query_result):
+                results = telegram_inbox.execute_agent_actions(
+                    vault_root=root,
+                    session_name="telegram-live",
+                    normalized_message=normalized,
+                    decision={"classification": "vault_query"},
+                    actions=[{"tool": "answer_vault_query", "reason": "answer"}],
+                    state={},
+                    agent_model="auto",
+                    agent_reasoning_effort="medium",
+                    query_stream_sink=sink,  # type: ignore[arg-type]
+                )
+
+        self.assertTrue(results[0]["reply_delivered"])
+        self.assertEqual(sink.final_text, "Answer body")
+
     def test_webhook_event_prefixes_are_replayable(self) -> None:
         import sys
         import types
@@ -331,6 +583,7 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
     def test_cloud_template_wires_full_access_browser_worker(self) -> None:
         template = (REPO_ROOT / "cloud" / "template.yaml").read_text(encoding="utf-8")
         self.assertIn("VAULT_CODEX_SANDBOX: full_access", template)
+        self.assertIn("VAULT_TELEGRAM_STREAMING_TRANSPORT: auto", template)
         self.assertIn("BrowserWorkerFunction:", template)
         self.assertIn("cloud/browser-worker.Dockerfile", template)
         self.assertIn("VAULT_BROWSER_WORKER_FUNCTION_NAME", template)

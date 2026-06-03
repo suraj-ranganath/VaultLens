@@ -93,6 +93,11 @@ Globals:
         TELEGRAM_BOT_TOKEN: !Ref TelegramBotToken
         TELEGRAM_ALLOWED_CHAT_IDS: !Ref TelegramAllowedChatIds
         TELEGRAM_WEBHOOK_SECRET: !Ref TelegramWebhookSecret
+        VAULT_TELEGRAM_STREAMING_ENABLED: "true"
+        VAULT_TELEGRAM_STREAMING_TRANSPORT: auto
+        VAULT_TELEGRAM_DRAFT_INTERVAL_MS: "250"
+        VAULT_TELEGRAM_EDIT_INTERVAL_MS: "1000"
+        VAULT_TELEGRAM_STREAMING_MAX_CHARS: "3800"
         GOOGLE_WORKSPACE_CLI_CREDENTIALS_JSON: !Ref GoogleWorkspaceCliCredentialsJson
         VAULT_CODEX_AUTH_S3_KEY: !Ref CodexAuthS3Key
         VAULT_CALENDAR_ID: !Ref VaultCalendarId

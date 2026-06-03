@@ -226,8 +226,8 @@ CALENDAR_SCHEMA: dict[str, Any] = {
 QUERY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "answer_markdown": {"type": "string"},
         "concise_answer": {"type": "string"},
+        "answer_markdown": {"type": "string"},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         "citations": {
             "type": "array",
@@ -247,7 +247,7 @@ QUERY_SCHEMA: dict[str, Any] = {
         "gaps": {"type": "array", "items": {"type": "string"}},
         "follow_up_questions": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["answer_markdown", "concise_answer", "confidence", "citations", "gaps", "follow_up_questions"],
+    "required": ["concise_answer", "answer_markdown", "confidence", "citations", "gaps", "follow_up_questions"],
     "additionalProperties": False,
 }
 
@@ -349,6 +349,100 @@ def write_json(payload: dict[str, Any]) -> None:
 def write_event(payload: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+class StreamingJsonAnswerExtractor:
+    """Extract user-visible answer text from streamed structured JSON."""
+
+    def __init__(self, fields: tuple[str, ...] = ("concise_answer", "answer_markdown")) -> None:
+        self.fields = fields
+        self.buffer = ""
+        self.active_field = ""
+        self.value_start: int | None = None
+        self.emitted = ""
+        self.done = False
+
+    def feed(self, chunk: str) -> str:
+        if self.done:
+            return ""
+        self.buffer += str(chunk or "")
+        if self.value_start is None:
+            selected = self._select_field()
+            if selected is None:
+                return ""
+            self.active_field, self.value_start = selected
+        value, closed = self._decode_partial_string(self.buffer, self.value_start)
+        if closed:
+            self.done = True
+        if len(value) <= len(self.emitted):
+            return ""
+        delta = value[len(self.emitted) :]
+        self.emitted = value
+        return delta
+
+    def _select_field(self) -> tuple[str, int] | None:
+        for field in self.fields:
+            match = re.search(rf'"{re.escape(field)}"\s*:\s*"', self.buffer)
+            if match:
+                return field, match.end()
+        return None
+
+    @staticmethod
+    def _decode_partial_string(text: str, start: int) -> tuple[str, bool]:
+        output: list[str] = []
+        index = start
+        while index < len(text):
+            char = text[index]
+            if char == '"':
+                return "".join(output), True
+            if char != "\\":
+                output.append(char)
+                index += 1
+                continue
+            if index + 1 >= len(text):
+                break
+            escape = text[index + 1]
+            simple_escapes = {
+                '"': '"',
+                "\\": "\\",
+                "/": "/",
+                "b": "\b",
+                "f": "\f",
+                "n": "\n",
+                "r": "\r",
+                "t": "\t",
+            }
+            if escape in simple_escapes:
+                output.append(simple_escapes[escape])
+                index += 2
+                continue
+            if escape == "u":
+                if index + 6 > len(text):
+                    break
+                high_hex = text[index + 2 : index + 6]
+                if not re.fullmatch(r"[0-9a-fA-F]{4}", high_hex):
+                    break
+                codepoint = int(high_hex, 16)
+                if 0xD800 <= codepoint <= 0xDBFF:
+                    if index + 12 > len(text) or text[index + 6 : index + 8] != "\\u":
+                        break
+                    low_hex = text[index + 8 : index + 12]
+                    if not re.fullmatch(r"[0-9a-fA-F]{4}", low_hex):
+                        break
+                    low = int(low_hex, 16)
+                    if not 0xDC00 <= low <= 0xDFFF:
+                        break
+                    combined = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00)
+                    output.append(chr(combined))
+                    index += 12
+                    continue
+                if 0xDC00 <= codepoint <= 0xDFFF:
+                    break
+                output.append(chr(codepoint))
+                index += 6
+                continue
+            break
+        return "".join(output), False
 
 
 def extract_json(text: str | None) -> dict[str, Any]:
@@ -835,6 +929,7 @@ Search discipline:
 Answering rules:
 - treat the local vault as source of truth
 - web search is {"allowed only when the vault is insufficient and external context materially helps" if include_web_search else "disabled for this turn"}
+- put the direct Telegram-ready answer in concise_answer before any extended answer_markdown detail
 - cite vault files in the structured citations array
 - in answer_markdown, put inline markdown citations next to supported claims
 - user-facing citations should prefer external primary source URLs when available
@@ -1052,6 +1147,7 @@ def handle_query(payload: dict[str, Any], *, stream: bool = False) -> None:
     vault_context = str(payload.get("vaultContext") or "") or context_from_helper(vault_root, question, recent_context)
     prompt = build_query_prompt(question, include_web_search, vault_context)
     effort_value = str(payload.get("reasoningEffort") or os.environ.get("VAULT_QUERY_REASONING_EFFORT", "medium")).strip().lower()
+    emit_answer_deltas = bool(payload.get("emitAnswerDeltas"))
     started_at = time.time()
 
     with codex_client() as codex:
@@ -1071,6 +1167,7 @@ def handle_query(payload: dict[str, Any], *, stream: bool = False) -> None:
             final_response = ""
             usage = None
             sent_thread_event = False
+            answer_delta_extractor = StreamingJsonAnswerExtractor() if emit_answer_deltas else None
             for event in turn.stream():
                 method = getattr(event, "method", "")
                 payload_obj = getattr(event, "payload", None)
@@ -1097,6 +1194,10 @@ def handle_query(payload: dict[str, Any], *, stream: bool = False) -> None:
                     delta = str(getattr(payload_obj, "delta", "") or "")
                     if delta:
                         write_event({"type": "item", "phase": "updated", "item": {"type": "agent_message", "text": delta}})
+                        if answer_delta_extractor is not None:
+                            visible_delta = answer_delta_extractor.feed(delta)
+                            if visible_delta:
+                                write_event({"type": "answer.delta", "text": visible_delta})
                 elif method == "item/completed":
                     item = getattr(payload_obj, "item", None)
                     completed_items.append(item)

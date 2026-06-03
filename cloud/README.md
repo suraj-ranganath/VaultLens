@@ -53,6 +53,8 @@ VAULT_CODEX_SANDBOX=full_access
 VAULT_AGENTIC_WORK_AUTO=true
 VAULT_WORK_WEB_SEARCH_ENABLED=true
 VAULT_WORK_REASONING_EFFORT=medium
+VAULT_TELEGRAM_STREAMING_ENABLED=true
+VAULT_TELEGRAM_STREAMING_TRANSPORT=auto
 VAULT_BROWSER_AUTO_TRIGGER=true
 HEARTBEAT_ENABLED=false
 ```
@@ -217,6 +219,7 @@ bun run telegram:webhook:test < /tmp/telegram-update.json
 - CloudWatch Logs for the processor show the Codex and ingest failures if a message fails.
 - Telegram retries failed webhook deliveries, and the local processed-update ledger prevents duplicate processing once state has been synced.
 - The processor image intentionally remains lightweight. Browser-heavy enrichment runs in `BrowserWorkerFunction`, which has Playwright Chromium installed and defaults to a small bounded pass over recent weak notes.
+- Vault Q&A responses stream in Telegram by default. `VAULT_TELEGRAM_STREAMING_TRANSPORT=auto` uses `sendMessageDraft` for private chats when Telegram accepts it, then falls back to edit-message streaming for groups or draft failures. Tune `VAULT_TELEGRAM_DRAFT_INTERVAL_MS`, `VAULT_TELEGRAM_EDIT_INTERVAL_MS`, and `VAULT_TELEGRAM_STREAMING_MAX_CHARS` if you hit API-rate or preview-length limits.
 - Set `VAULT_AGENTIC_WORK_AUTO=false` only if you want saved Telegram items to use deterministic ingest without the full Codex filing/synthesis pass. The default should remain `true` for a personalized, agent-maintained vault.
 - X/Twitter post text does not require Playwright in the common case: the processor first tries the `x_content` adapter through live metadata enrichment. Browser enrichment is the fallback for posts, cards, redirects, and linked targets that oEmbed/live adapters cannot recover.
 - Set `VAULT_BROWSER_AUTO_TRIGGER=false` if you want browser enrichment to be manual only. Tune `VAULT_BROWSER_ENRICH_LIMIT`, `VAULT_BROWSER_ENRICH_CONCURRENCY`, `VAULT_BROWSER_ENRICH_LOOKBACK_DAYS`, and `VAULT_BROWSER_MAX_LINK_HOPS` to control cost and runtime.
