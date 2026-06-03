@@ -479,6 +479,9 @@ Answering rules:
 - only fall back to markdown links like \`[note](/vault/relative/path.md)\` when no external primary source exists for that citation
 - never use Obsidian wiki-link syntax like \`[[...]]\` inside \`answer_markdown\`; use standard markdown links only
 - if the vault does not support part of the answer, say that explicitly in \`gaps\`
+- never list generic tool, shell, file-search, or dashboard-scan availability as a user-facing gap
+- if the guaranteed context pack is sufficient, answer from it without caveating that broader search was not needed or not attempted
+- only put substantive unknowns in \`gaps\`, such as missing facts, unclear dates, weak source evidence, or unavailable primary context
 - keep the answer high-signal and useful, not verbose for its own sake
 
 Return JSON only.

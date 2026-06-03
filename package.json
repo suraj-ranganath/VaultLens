@@ -21,6 +21,7 @@
     "telegram:run": "uv run python tools/telegram_inbox.py run --vault-root .",
     "telegram:webhook:test": "uv run python tools/telegram_inbox.py webhook --vault-root . --session-name telegram-webhook-test",
     "cloud:deploy": "bash cloud/deploy_telegram_webhook.sh",
+    "cloud:browser-enrich": "bash cloud/invoke_browser_worker.sh",
     "cloud:sync-codex-auth": "bash cloud/sync_codex_auth_to_s3.sh",
     "cloud:sync-state": "bash cloud/sync_state_to_s3.sh",
     "test": "bun run test:vault-infra"

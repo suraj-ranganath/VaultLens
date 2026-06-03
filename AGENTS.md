@@ -52,9 +52,11 @@ This vault is an AWS-backed, agent-maintained markdown wiki for personal knowled
 - GitHub is only for code, templates, infra, and documentation. Never commit personal vault data.
 - Local vault files are editable working copies for development, debugging, Obsidian browsing, browser-based enrichment, and repair work.
 - Any local workflow that changes vault content must be designed to sync changes back to the canonical AWS state.
-- Browser automation enrichment may remain local-only when that is materially cheaper or operationally simpler, but any durable metadata or note updates produced from it should be written back into canonical state.
+- Browser automation enrichment is supported by a separate cloud worker when configured, and may also run locally when that is cheaper or easier to debug. Any durable metadata or note updates produced from it should be written back into canonical state.
 - Browser automation should write browser artifact packs under `raw/web-clips/browser-artifacts/` when it gets past blocked or dynamic pages. These packs are durable evidence, not just summaries.
-- Model-backed agent turns should go through `tools/codex_agent_runner.py` and the Codex Python SDK. Local auth uses `codex login --device-auth`; AWS auth uses `CODEX_ACCESS_TOKEN` when available or the private S3-synced Codex `auth.json` fallback for Pro/Plus accounts. Do not reintroduce OpenAI API-key or API-credit-backed calls.
+- Model-backed agent turns should go through `tools/codex_agent_runner.py` and the Codex Python SDK. Local live agent runs require `uv sync --extra codex` and `codex login --device-auth`; default `uv sync` remains CI-safe and non-live. AWS auth uses `CODEX_ACCESS_TOKEN` when available or the private S3-synced Codex `auth.json` fallback for Pro/Plus accounts. Do not reintroduce OpenAI API-key or API-credit-backed calls.
+- Codex cloud turns default to `VAULT_CODEX_SANDBOX=full_access`. This gives full filesystem and shell freedom inside the Lambda or worker runtime, not broad AWS account permissions.
+- Codex may write canonical markdown notes, topics, dashboards, outputs, caches, traces, task state, and browser artifacts inside the restored vault working tree. Deterministic code remains responsible for Telegram sends, S3 sync, Google Calendar mutations, and webhook acknowledgement.
 
 ## Source Handling
 
@@ -238,7 +240,8 @@ When the user provides a new export:
 - New ingestion paths should assume the machine may be offline and should recover cleanly from queued cloud-side events.
 - New interfaces should read from and write to canonical AWS state, either directly or through a sync layer that preserves cloud canon.
 - Prefer designs that expose agent traces, citations, decisions, and retrieval context cleanly across Telegram and web surfaces.
-- Keep browser-based enrichment optional and local when it is too expensive or brittle for cloud execution.
+- Keep the fast Telegram processor lightweight. If a source needs browser extraction, queue or invoke the browser enrichment worker instead of blocking webhook acknowledgement.
+- Browser-heavy enrichment should use the cloud browser worker or local Playwright, capture artifact packs, update canonical notes, rebuild caches/dashboards, and sync back to S3.
 - When adding features, prioritize:
   - better canonical data quality
   - better retrieval and surfacing

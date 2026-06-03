@@ -23,6 +23,7 @@ AGENT_DIGEST = CACHE_DIR / "agent-digest.json"
 CLAIMS_JSONL = CACHE_DIR / "claims.jsonl"
 SOURCE_INDEX_JSONL = CACHE_DIR / "source-index.jsonl"
 BROWSER_QUEUE_JSONL = CACHE_DIR / "browser-enrichment-queue.jsonl"
+BROWSER_QUEUE_ROOT_JSONL = Path(".vault") / "browser-enrichment-queue.jsonl"
 SEARCH_SQLITE = CACHE_DIR / "search.sqlite"
 MANIFEST_JSON = CACHE_DIR / "manifest.json"
 EMBEDDING_CACHE_SQLITE = CACHE_DIR / "embedding-cache.sqlite"
@@ -410,6 +411,7 @@ def write_cache(
     write_jsonl(vault_root / CLAIMS_JSONL, claims)
     write_jsonl(vault_root / SOURCE_INDEX_JSONL, sources)
     write_jsonl(vault_root / BROWSER_QUEUE_JSONL, browser_queue)
+    write_jsonl(vault_root / BROWSER_QUEUE_ROOT_JSONL, browser_queue)
     write_json(cache_dir / "claim-health.json", claim_health)
     write_json(
         vault_root / MANIFEST_JSON,

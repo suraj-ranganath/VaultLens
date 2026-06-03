@@ -305,6 +305,50 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
             self.assertEqual(env["CODEX_ACCESS_TOKEN"], "token")
             self.assertFalse((codex_home / "auth.json").exists())
 
+    def test_codex_runner_defaults_to_full_access_sandbox(self) -> None:
+        import sys
+        from unittest import mock
+
+        sys.path.insert(0, str(REPO_ROOT / "tools"))
+        import codex_agent_runner  # type: ignore
+
+        with mock.patch.dict(codex_agent_runner.os.environ, {}, clear=True):
+            self.assertEqual(codex_agent_runner.sandbox_name_from_payload({}), "full_access")
+        with mock.patch.dict(codex_agent_runner.os.environ, {"VAULT_CODEX_SANDBOX": "read-only"}, clear=True):
+            self.assertEqual(codex_agent_runner.sandbox_name_from_payload({}), "read_only")
+
+        instructions = codex_agent_runner.thread_developer_instructions(
+            include_web_search=True,
+            sandbox_name="full_access",
+        )
+        self.assertIn("Current sandbox profile: full_access", instructions)
+        self.assertIn("You may write canonical vault notes", instructions)
+        self.assertIn("External side effects are controlled by deterministic VaultLens code", instructions)
+
+    def test_cloud_template_wires_full_access_browser_worker(self) -> None:
+        template = (REPO_ROOT / "cloud" / "template.yaml").read_text(encoding="utf-8")
+        self.assertIn("VAULT_CODEX_SANDBOX: full_access", template)
+        self.assertIn("BrowserWorkerFunction:", template)
+        self.assertIn("cloud/browser-worker.Dockerfile", template)
+        self.assertIn("VAULT_BROWSER_WORKER_FUNCTION_NAME", template)
+
+    def test_browser_heavy_updates_trigger_browser_worker(self) -> None:
+        import sys
+        import types
+
+        sys.path.insert(0, str(REPO_ROOT))
+        sys.modules.setdefault("boto3", types.SimpleNamespace(client=lambda *_args, **_kwargs: None))
+        from cloud import telegram_webhook_lambda as webhook  # type: ignore
+
+        x_update = self._telegram_update(601, 1_777_000_120, "save https://x.com/someone/status/123")
+        self.assertTrue(webhook.should_trigger_browser_enrichment([x_update], {}))
+
+        explicit_update = self._telegram_update(602, 1_777_000_121, "fully extract this https://example.com/wrapped")
+        self.assertTrue(webhook.should_trigger_browser_enrichment([explicit_update], {}))
+
+        normal_update = self._telegram_update(603, 1_777_000_122, "save this note for later")
+        self.assertFalse(webhook.should_trigger_browser_enrichment([normal_update], {}))
+
     def test_daily_brief_delegates_final_selection_to_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

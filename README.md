@@ -82,11 +82,12 @@ Most people save useful links into chats, notes apps, bookmarks, or screenshots 
 - Confirmation-first Google Calendar creation for event screenshots, event links, natural-language requests, recurring events, and event edits.
 - Daily Telegram digest that can include today's important events, urgent opportunity deadlines, explicit reminders, high-impact applications, and one recommended reading.
 - Optional AWS Lambda webhook deployment so Telegram ingestion works even when your laptop is off.
+- Optional cloud browser-enrichment worker for X, LinkedIn, dynamic pages, redirects, and "fully extract this" requests.
 - Local web interface for vault Q&A, chat history, citations, traces, and knowledge dashboards.
 - Markdown-first vault structure for `raw/`, `items/`, `topics/`, `projects/`, `dashboards/`, `outputs/`, and `.vault/`.
 - Obsidian-friendly dashboards and templates.
 - Local search/index pipeline using compact agent digests, SQLite FTS/BM25, source indexes, and health reports.
-- Optional Playwright enrichment for dynamic or blocked pages.
+- Optional Playwright enrichment for dynamic, blocked, or link-inside-link pages, locally or through the browser worker.
 
 ## Repository Scope
 
@@ -138,9 +139,10 @@ bun run vault:web
 
 Then open `http://localhost:4318`.
 
-Before using agent-backed flows locally, authenticate Codex once:
+The default `uv sync` install is intentionally CI-safe and does not install the live Codex SDK runtime. Before using agent-backed flows locally, install the Codex extra and authenticate once:
 
 ```bash
+uv sync --extra codex
 codex login --device-auth
 ```
 
@@ -156,6 +158,8 @@ TELEGRAM_ALLOWED_CHAT_IDS=your_numeric_chat_id
 VAULT_QUERY_PORT=4318
 VAULT_CODEX_MODEL=auto
 VAULT_QUERY_DEFAULT_MODEL=auto
+VAULT_CODEX_SANDBOX=full_access
+VAULT_BROWSER_AUTO_TRIGGER=true
 VAULT_PROFILE_HINT_FILES=raw/docs/my-profile.md,raw/docs/preferences.md
 ```
 
@@ -166,6 +170,9 @@ AWS_REGION=us-west-2
 STACK_NAME=vault-lens-telegram
 TELEGRAM_WEBHOOK_SECRET=generated_or_left_blank_for_deploy_script
 VAULT_CODEX_AUTH_S3_KEY=codex-auth/auth.json
+VAULT_BROWSER_ENRICH_LIMIT=24
+VAULT_BROWSER_ENRICH_CONCURRENCY=2
+VAULT_BROWSER_ENRICH_LOOKBACK_DAYS=30
 ```
 
 For ChatGPT Pro/Plus accounts, run `codex login --device-auth` locally and let `bun run cloud:deploy` sync your local `~/.codex/auth.json` into the private S3 state bucket before Telegram webhooks are installed. If you have a Business/Enterprise Codex access token, you can set `CODEX_ACCESS_TOKEN` instead and skip the auth-file fallback.
@@ -248,6 +255,7 @@ See [cloud/README.md](cloud/README.md) for the full AWS setup. The deployment us
 - Lambda Function URL for the Telegram webhook
 - one receiver Lambda
 - one single-concurrency processor Lambda
+- one single-concurrency Playwright browser-worker Lambda for heavy extraction
 - S3 for canonical ignored vault state and raw webhook events
 - optional EventBridge Scheduler for the morning brief
 
@@ -257,7 +265,9 @@ See [cloud/README.md](cloud/README.md) for the full AWS setup. The deployment us
 bun run enrich:browser:recent
 ```
 
-This uses Playwright for recent links that are weak, dynamic, blocked, or social-post-heavy. Browser artifacts should be treated as source evidence and stored under ignored vault state, not Git.
+This uses Playwright for recent links that are weak, dynamic, blocked, social-post-heavy, or need link-inside-link extraction. It writes evidence packs under `raw/web-clips/browser-artifacts/`, follows a bounded number of linked targets, and updates canonical notes with source provenance.
+
+In AWS, browser-heavy domains and explicit requests like "fully extract this" trigger the separate browser worker when `VAULT_BROWSER_AUTO_TRIGGER=true`. The fast Telegram processor still handles ordinary saves and questions without waiting on browser startup.
 
 ### Search From The CLI
 

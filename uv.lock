@@ -499,16 +499,21 @@ source = { virtual = "." }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "boto3" },
-    { name = "openai-codex" },
     { name = "pyyaml" },
     { name = "requests" },
+]
+
+[package.optional-dependencies]
+codex = [
+    { name = "openai-codex" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.14.3,<5" },
     { name = "boto3", specifier = ">=1.43.15,<2" },
-    { name = "openai-codex", specifier = ">=0.1.0b2" },
+    { name = "openai-codex", marker = "extra == 'codex'", specifier = ">=0.1.0b2" },
     { name = "pyyaml", specifier = ">=6.0.3,<7" },
     { name = "requests", specifier = ">=2.34.2,<3" },
 ]
+provides-extras = ["codex"]

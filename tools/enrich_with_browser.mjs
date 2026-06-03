@@ -277,7 +277,15 @@ async function extractGeneric(page) {
       .map((el) => text(el.textContent))
       .filter((line) => line.length >= 40)
       .slice(0, 60);
-    return { title, description, headings, paragraphs };
+    const links = Array.from(document.querySelectorAll("a[href]"))
+      .map((el) => {
+        const href = el.href || "";
+        const label = text(el.textContent) || text(el.getAttribute("aria-label"));
+        return href ? { href, label } : null;
+      })
+      .filter(Boolean)
+      .slice(0, 80);
+    return { title, description, headings, paragraphs, links };
   });
 }
 
@@ -343,7 +351,82 @@ function discoveredOn(frontmatter) {
   return data.discovered_on || "";
 }
 
-async function enrichNote(browser, vaultRoot, filePath) {
+function isHttpUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeTargetUrls(urls, maxCount) {
+  const out = [];
+  const seen = new Set();
+  for (const rawUrl of urls || []) {
+    const value = String(rawUrl || "").trim();
+    if (!isHttpUrl(value)) {
+      continue;
+    }
+    const key = value.replace(/#.*$/, "");
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(value);
+    if (out.length >= maxCount) {
+      break;
+    }
+  }
+  return out;
+}
+
+async function extractLinkedTargets(context, vaultRoot, filePath, urls) {
+  const maxTargets = Math.max(0, Number(process.env.VAULT_BROWSER_MAX_LINK_HOPS || "2"));
+  const targets = normalizeTargetUrls(urls, maxTargets);
+  const results = [];
+  for (const targetUrl of targets) {
+    const page = await context.newPage();
+    try {
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await page.waitForTimeout(1200);
+      const extracted = await extractGeneric(page);
+      const artifact = await saveBrowserArtifactPack({
+        vaultRoot,
+        filePath,
+        url: targetUrl,
+        page,
+        extraction: {
+          kind: "linked_target",
+          title: extracted.title,
+          description: extracted.description,
+          headings: extracted.headings,
+          paragraphs: extracted.paragraphs.slice(0, 20),
+        },
+        xPayload: null,
+      });
+      results.push({
+        url: targetUrl,
+        finalUrl: page.url(),
+        title: extracted.title,
+        description: extracted.description,
+        headings: extracted.headings.slice(0, 5),
+        paragraphs: extracted.paragraphs.slice(0, 4),
+        artifact,
+      });
+    } catch (error) {
+      results.push({
+        url: targetUrl,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      await page.close();
+    }
+  }
+  return results;
+}
+
+async function enrichNote(context, vaultRoot, filePath) {
   const note = loadNote(filePath);
   const data = parseSimpleFrontmatter(note.frontmatter);
   const url = data.url || "";
@@ -354,7 +437,7 @@ async function enrichNote(browser, vaultRoot, filePath) {
     return { changed: false, filePath, reason: "not_targeted" };
   }
 
-  const page = await browser.newPage();
+  const page = await context.newPage();
   try {
     let xPayload = null;
     const captureXPayload = async (response) => {
@@ -379,6 +462,7 @@ async function enrichNote(browser, vaultRoot, filePath) {
     let signals = [];
     let browserLines = [];
     let artifactExtraction = {};
+    let linkedTargets = [];
 
     if (isX) {
       const gql = extractXFromPayload(xPayload, url);
@@ -405,6 +489,25 @@ async function enrichNote(browser, vaultRoot, filePath) {
       for (const expandedUrl of (gql?.expandedUrls || []).slice(0, 3)) {
         signals.push(`Expanded URL: ${expandedUrl}`);
       }
+      linkedTargets = await extractLinkedTargets(context, vaultRoot, filePath, gql?.expandedUrls || []);
+      for (const target of linkedTargets) {
+        if (target.error) {
+          signals.push(`Linked target fetch failed: ${target.url} (${target.error})`);
+          continue;
+        }
+        if (target.title) {
+          summary.push(`Linked target title: ${target.title}`);
+        }
+        if (target.description) {
+          summary.push(`Linked target summary: ${target.description}`);
+        }
+        if (target.finalUrl) {
+          signals.push(`Linked target final URL: ${target.finalUrl}`);
+        }
+        if (target.artifact?.jsonPath) {
+          signals.push(`Linked target artifact: ${target.artifact.jsonPath}`);
+        }
+      }
       if (extracted.title) {
         signals.push(`Page title: ${extracted.title}`);
       }
@@ -418,13 +521,40 @@ async function enrichNote(browser, vaultRoot, filePath) {
         graphqlCaptured: Boolean(xPayload),
         extracted,
         xGraphqlSummary: gql,
+        linkedTargets,
       };
     } else {
       const extracted = await extractGeneric(page);
+      const likelyTargets = extracted.links
+        .filter((link) => {
+          const label = `${link.label || ""} ${link.href || ""}`.toLowerCase();
+          return /\b(read|apply|register|details|source|article|job|event|open|continue)\b/.test(label);
+        })
+        .map((link) => link.href);
+      const shouldFollowTargets = hasThinRetrievedContext(note.body) || isBoilerplate(extracted.description || extracted.paragraphs.join(" "));
+      linkedTargets = shouldFollowTargets ? await extractLinkedTargets(context, vaultRoot, filePath, likelyTargets) : [];
       if (extracted.description) {
         summary.push(extracted.description);
       }
       summary.push(...extracted.paragraphs.slice(0, 4));
+      for (const target of linkedTargets) {
+        if (target.error) {
+          signals.push(`Linked target fetch failed: ${target.url} (${target.error})`);
+          continue;
+        }
+        if (target.title) {
+          signals.push(`Linked target title: ${target.title}`);
+        }
+        if (target.finalUrl) {
+          signals.push(`Linked target final URL: ${target.finalUrl}`);
+        }
+        if (target.description) {
+          summary.push(`Linked target summary: ${target.description}`);
+        }
+        if (target.artifact?.jsonPath) {
+          signals.push(`Linked target artifact: ${target.artifact.jsonPath}`);
+        }
+      }
       signals.push(...extracted.headings.slice(0, 6).map((line) => `Page section: ${line}`));
       if (extracted.title) {
         browserLines = [
@@ -444,6 +574,7 @@ async function enrichNote(browser, vaultRoot, filePath) {
         description: extracted.description,
         headings: extracted.headings,
         paragraphs: extracted.paragraphs.slice(0, 30),
+        linkedTargets,
       };
     }
 
@@ -510,7 +641,12 @@ async function main() {
   const limit = Number(process.argv[3] || "60");
   const concurrency = Math.max(1, Number(process.argv[4] || "4"));
   const lookbackDays = Math.max(0, Number(process.argv[5] || "30"));
-  const browser = await chromium.launch({ headless: true });
+  const headless = String(process.env.VAULT_BROWSER_HEADLESS || "1").toLowerCase() !== "0";
+  const profileDir = process.env.VAULT_BROWSER_PROFILE_DIR
+    ? path.resolve(process.env.VAULT_BROWSER_PROFILE_DIR)
+    : path.join(vaultRoot, ".vault", "browser-profiles", "default");
+  fs.mkdirSync(profileDir, { recursive: true });
+  const context = await chromium.launchPersistentContext(profileDir, { headless });
   const files = candidateFiles(vaultRoot).slice(0, limit);
   const results = new Array(files.length);
   let nextIndex = 0;
@@ -522,12 +658,12 @@ async function main() {
       if (index >= files.length) {
         return;
       }
-      results[index] = await enrichNote(browser, vaultRoot, files[index]);
+      results[index] = await enrichNote(context, vaultRoot, files[index]);
     }
   }
 
   await Promise.all(Array.from({ length: Math.min(concurrency, files.length) }, () => worker()));
-  await browser.close();
+  await context.close();
   const changed = results.filter((result) => result.changed).length;
   process.stdout.write(JSON.stringify({ checked: results.length, changed, lookbackDays, results }, null, 2) + "\n");
 }

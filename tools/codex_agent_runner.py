@@ -18,13 +18,44 @@ import time
 from pathlib import Path
 from typing import Any
 
-from openai_codex import ApprovalMode, Codex, LocalImageInput, Sandbox, TextInput, retry_on_overload
-from openai_codex.client import CodexConfig
-from openai_codex.types import Personality, ReasoningEffort, ReasoningSummary
+try:
+    from openai_codex import ApprovalMode, Codex, LocalImageInput, Sandbox, TextInput, retry_on_overload
+    from openai_codex.client import CodexConfig
+    from openai_codex.types import Personality, ReasoningEffort, ReasoningSummary
+except ModuleNotFoundError as exc:  # pragma: no cover - CI intentionally skips the live Codex extra.
+    ApprovalMode = Codex = CodexConfig = LocalImageInput = Personality = ReasoningEffort = ReasoningSummary = Sandbox = TextInput = None  # type: ignore[assignment]
+    CODEX_SDK_IMPORT_ERROR: ModuleNotFoundError | None = exc
+
+    def retry_on_overload(fn):  # type: ignore[no-redef]
+        return fn()
+
+else:
+    CODEX_SDK_IMPORT_ERROR = None
 
 
 REASONING_RANK = {"none": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5}
 DEFAULT_MODEL = os.environ.get("VAULT_CODEX_MODEL") or os.environ.get("VAULT_AGENT_MODEL") or "auto"
+DEFAULT_SANDBOX = "full_access"
+SANDBOX_ALIASES = {
+    "readonly": "read_only",
+    "read-only": "read_only",
+    "read_only": "read_only",
+    "ro": "read_only",
+    "workspace": "workspace_write",
+    "workspace-write": "workspace_write",
+    "workspace_write": "workspace_write",
+    "write": "workspace_write",
+    "full": "full_access",
+    "full-access": "full_access",
+    "full_access": "full_access",
+    "danger-full-access": "full_access",
+    "danger_full_access": "full_access",
+}
+GENERIC_TOOL_GAP_RE = re.compile(
+    r"\b(shell|file|tool|dashboard)\b.*\b(unavailable|not available|failed|could not|not accessible)|"
+    r"\bguaranteed vault context pack\b|\bfull dashboard scan\b|\bvault is inaccessible\b",
+    re.IGNORECASE,
+)
 
 
 ROUTER_SCHEMA: dict[str, Any] = {
@@ -323,6 +354,7 @@ def billing(usage: Any) -> dict[str, Any]:
 
 
 def reasoning_effort(value: str | None, default: str) -> ReasoningEffort:
+    require_codex_sdk()
     clean = str(value or default).strip().lower()
     if clean not in REASONING_RANK:
         clean = default
@@ -330,13 +362,63 @@ def reasoning_effort(value: str | None, default: str) -> ReasoningEffort:
 
 
 def reasoning_summary(value: str = "concise") -> ReasoningSummary:
+    require_codex_sdk()
     return ReasoningSummary.model_validate(value)
 
 
+def sandbox_name_from_payload(payload: dict[str, Any] | None = None) -> str:
+    payload = payload or {}
+    raw = (
+        payload.get("sandbox")
+        or payload.get("sandboxMode")
+        or os.environ.get("VAULT_CODEX_SANDBOX")
+        or os.environ.get("VAULT_AGENT_SANDBOX")
+        or DEFAULT_SANDBOX
+    )
+    clean = str(raw or "").strip().lower().replace(" ", "_")
+    return SANDBOX_ALIASES.get(clean, DEFAULT_SANDBOX)
+
+
+def codex_sandbox(payload: dict[str, Any] | None = None) -> Sandbox:
+    require_codex_sdk()
+    return getattr(Sandbox, sandbox_name_from_payload(payload))
+
+
+def codex_approval_mode() -> ApprovalMode:
+    require_codex_sdk()
+    raw = str(os.environ.get("VAULT_CODEX_APPROVAL_MODE", "deny_all")).strip().lower().replace("-", "_")
+    if raw == "auto_review":
+        return ApprovalMode.auto_review
+    return ApprovalMode.deny_all
+
+
+def require_codex_sdk() -> None:
+    if CODEX_SDK_IMPORT_ERROR is None:
+        return
+    raise RuntimeError(
+        "The Codex Python SDK is not installed in this environment. "
+        "For local live agent runs, use `uv sync --extra codex` or install `openai-codex`. "
+        "CI and deterministic tests intentionally do not install the live Codex extra."
+    ) from CODEX_SDK_IMPORT_ERROR
+
+
 def codex_client() -> Codex:
+    require_codex_sdk()
     codex_bin = str(os.environ.get("VAULT_CODEX_BIN") or os.environ.get("CODEX_BIN") or "").strip()
+    config_overrides = tuple(
+        item.strip()
+        for item in re.split(r"[\n,]", os.environ.get("VAULT_CODEX_CONFIG_OVERRIDES", ""))
+        if item.strip()
+    )
+    config_kwargs = {
+        "config_overrides": config_overrides,
+        "client_name": "vault_lens",
+        "client_title": "VaultLens",
+    }
     if codex_bin:
-        return Codex(CodexConfig(codex_bin=codex_bin))
+        return Codex(CodexConfig(codex_bin=codex_bin, **config_kwargs))
+    if config_overrides:
+        return Codex(CodexConfig(**config_kwargs))
     return Codex()
 
 
@@ -360,6 +442,7 @@ def pick_model(codex: Codex, requested: str | None = None) -> str:
 
 def thread_for(codex: Codex, payload: dict[str, Any], *, model: str, effort: str, include_web_search: bool = False):
     vault_root = str(Path(payload.get("workingDirectory") or os.getcwd()).resolve())
+    sandbox = codex_sandbox(payload)
     config = {
         "model_reasoning_effort": effort,
         "web_search": "live" if include_web_search else "disabled",
@@ -368,14 +451,38 @@ def thread_for(codex: Codex, payload: dict[str, Any], *, model: str, effort: str
         "model": model,
         "cwd": vault_root,
         "config": config,
-        "approval_mode": ApprovalMode.deny_all,
-        "sandbox": Sandbox.read_only,
+        "approval_mode": codex_approval_mode(),
+        "sandbox": sandbox,
         "personality": Personality.pragmatic,
+        "developer_instructions": thread_developer_instructions(
+            include_web_search=include_web_search,
+            sandbox_name=sandbox.name,
+        ),
     }
     thread_id = str(payload.get("threadId") or "").strip()
     if thread_id:
         return codex.thread_resume(thread_id, **common)
     return codex.thread_start(**common)
+
+
+def thread_developer_instructions(*, include_web_search: bool, sandbox_name: str | None = None) -> str:
+    web_search_policy = "enabled only when vault context is insufficient" if include_web_search else "disabled"
+    sandbox_policy = sandbox_name or DEFAULT_SANDBOX
+    return f"""
+You are the VaultLens retrieval and filing agent.
+
+Harness policy:
+- Work inside the configured vault cwd.
+- Current sandbox profile: {sandbox_policy}.
+- Use the Codex shell/file harness when a task needs more evidence than the supplied context pack.
+- Prefer efficient commands such as rg, rg --files, sed, targeted file reads, small Python/Node helpers, and existing repo scripts.
+- You may write canonical vault notes, topics, dashboards, outputs, traces, task state, cache records, and browser artifact records when that creates durable value.
+- Treat user-provided raw sources and import logs as immutable evidence. Add new artifacts instead of rewriting or deleting raw inputs.
+- External side effects are controlled by deterministic VaultLens code: do not directly send Telegram messages, mutate Google Calendar, or sync S3 unless the caller explicitly invokes that deterministic tool path.
+- For links, follow redirects and nested links when needed. For X/LinkedIn/dynamic pages, prefer lightweight adapters first and enqueue/browser-enrich when browser evidence is required.
+- Web search is {web_search_policy}; use it only for missing public context, never as a replacement for vault memory.
+- If a tool path is unavailable, continue from supplied context and citations; do not expose generic tool availability caveats to the user.
+""".strip()
 
 
 def run_structured(
@@ -401,7 +508,7 @@ def run_structured(
                 input_value,
                 effort=reasoning_effort(effort_value, default_effort),
                 output_schema=schema,
-                sandbox=Sandbox.read_only,
+                sandbox=codex_sandbox(payload),
                 personality=Personality.pragmatic,
                 summary=reasoning_summary("concise"),
             )
@@ -483,7 +590,16 @@ def hydrate_answer(vault_root: Path, answer: dict[str, Any]) -> dict[str, Any]:
         citations.append(hydrated)
     hydrated_answer = dict(answer)
     hydrated_answer["citations"] = citations
+    hydrated_answer["gaps"] = sanitize_gaps(hydrated_answer)
     return hydrated_answer
+
+
+def sanitize_gaps(answer: dict[str, Any]) -> list[str]:
+    gaps = [str(gap).strip() for gap in answer.get("gaps") or [] if str(gap).strip()]
+    has_evidence = bool(answer.get("citations")) or bool(str(answer.get("answer_markdown") or answer.get("concise_answer") or "").strip())
+    if not has_evidence:
+        return gaps
+    return [gap for gap in gaps if not GENERIC_TOOL_GAP_RE.search(gap)]
 
 
 def read_note_url(vault_root: Path, relative_path: str) -> str:
@@ -635,6 +751,9 @@ Answering rules:
 - user-facing citations should prefer external primary source URLs when available
 - only fall back to /vault/... note URLs when no external source exists
 - never use Obsidian wiki links in answer_markdown
+- never list generic tool, shell, file-search, or dashboard-scan availability as a user-facing gap
+- if the guaranteed context pack is sufficient, answer from it without caveating that broader search was not needed or not attempted
+- only put substantive unknowns in gaps, such as missing facts about a person, unclear dates, weak source evidence, or unavailable primary context
 - be direct, helpful, warm, and concise
 - return JSON only
 
@@ -772,7 +891,16 @@ def handle_health(_payload: dict[str, Any]) -> None:
     with codex_client() as codex:
         account = model_dump(codex.account())
         model = pick_model(codex, os.environ.get("VAULT_CODEX_MODEL", "auto"))
-        write_json({"ok": True, "auth": "codex", "billingMode": "codex_subscription", "model": model, "account": account})
+        write_json(
+            {
+                "ok": True,
+                "auth": "codex",
+                "billingMode": "codex_subscription",
+                "model": model,
+                "sandbox": sandbox_name_from_payload(_payload),
+                "account": account,
+            }
+        )
 
 
 def handle_models(_payload: dict[str, Any]) -> None:
@@ -817,13 +945,14 @@ def handle_query(payload: dict[str, Any], *, stream: bool = False) -> None:
 
     with codex_client() as codex:
         selected_model = pick_model(codex, payload.get("model"))
+        sandbox = codex_sandbox(payload)
         thread = thread_for(codex, payload, model=selected_model, effort=effort_value, include_web_search=include_web_search)
         if stream:
             turn = thread.turn(
                 prompt,
                 effort=reasoning_effort(effort_value, "medium"),
                 output_schema=QUERY_SCHEMA,
-                sandbox=Sandbox.read_only,
+                sandbox=sandbox,
                 personality=Personality.pragmatic,
                 summary=reasoning_summary("concise"),
             )
@@ -881,6 +1010,7 @@ def handle_query(payload: dict[str, Any], *, stream: bool = False) -> None:
                     "meta": {
                         "model": selected_model,
                         "reasoningEffort": effort_value,
+                        "sandbox": sandbox.name,
                         "includeWebSearch": include_web_search,
                         "vaultContextBytes": len(vault_context.encode("utf-8")),
                         "durationMs": int((time.time() - started_at) * 1000),
@@ -894,7 +1024,7 @@ def handle_query(payload: dict[str, Any], *, stream: bool = False) -> None:
                 prompt,
                 effort=reasoning_effort(effort_value, "medium"),
                 output_schema=QUERY_SCHEMA,
-                sandbox=Sandbox.read_only,
+                sandbox=sandbox,
                 personality=Personality.pragmatic,
                 summary=reasoning_summary("concise"),
             )
@@ -910,6 +1040,7 @@ def handle_query(payload: dict[str, Any], *, stream: bool = False) -> None:
                 "meta": {
                     "model": selected_model,
                     "reasoningEffort": effort_value,
+                    "sandbox": sandbox.name,
                     "includeWebSearch": include_web_search,
                     "vaultContextBytes": len(vault_context.encode("utf-8")),
                     "durationMs": int((time.time() - started_at) * 1000),

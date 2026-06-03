@@ -1965,6 +1965,8 @@ def format_telegram_query_response(query_result: dict[str, Any]) -> str:
             lines.append(url)
 
     gaps = [str(gap).strip() for gap in answer.get("gaps") or [] if str(gap).strip()]
+    if body or citations:
+        gaps = [gap for gap in gaps if not is_generic_tool_gap(gap)]
     if gaps:
         lines.append("")
         lines.append("Caveats / gaps 🕳️")
@@ -1977,6 +1979,17 @@ def format_telegram_query_response(query_result: dict[str, Any]) -> str:
         lines.append(f"If useful, ask me: {follow_ups[0]}")
 
     return "\n".join(lines).strip()
+
+
+GENERIC_TOOL_GAP_RE = re.compile(
+    r"\b(shell|file|tool|dashboard)\b.*\b(unavailable|not available|failed|could not|not accessible)|"
+    r"\bguaranteed vault context pack\b|\bfull dashboard scan\b|\bvault is inaccessible\b",
+    re.IGNORECASE,
+)
+
+
+def is_generic_tool_gap(text: str) -> bool:
+    return bool(GENERIC_TOOL_GAP_RE.search(str(text or "")))
 
 
 def strip_markdown_for_telegram(text: str) -> str:

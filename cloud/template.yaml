@@ -50,6 +50,11 @@ Parameters:
     Default: 1024
     MinValue: 512
     MaxValue: 4096
+  BrowserWorkerMemoryMb:
+    Type: Number
+    Default: 3072
+    MinValue: 1024
+    MaxValue: 8192
   ReceiverMemoryMb:
     Type: Number
     Default: 512
@@ -94,6 +99,7 @@ Globals:
         VAULT_CODEX_MODEL: !Ref VaultCodexModel
         VAULT_AGENT_MODEL: !Ref VaultCodexModel
         VAULT_AGENT_REASONING_EFFORT: !Ref VaultAgentReasoningEffort
+        VAULT_CODEX_SANDBOX: full_access
         VAULT_STATE_BUCKET: !Ref VaultStateBucket
         VAULT_STATE_PREFIX: state
         VAULT_WEBHOOK_EVENTS_PREFIX: webhook-events
@@ -156,6 +162,31 @@ Resources:
       Environment:
         Variables:
           VAULT_LAMBDA_MODE: processor
+          VAULT_BROWSER_WORKER_FUNCTION_NAME: !Ref BrowserWorkerFunction
+          VAULT_BROWSER_AUTO_TRIGGER: "true"
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref VaultStateBucket
+        - LambdaInvokePolicy:
+            FunctionName: !Ref BrowserWorkerFunction
+
+  BrowserWorkerFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      Dockerfile: cloud/browser-worker.Dockerfile
+      DockerContext: ..
+      DockerTag: vault-browser-worker
+    Properties:
+      PackageType: Image
+      Timeout: 900
+      MemorySize: !Ref BrowserWorkerMemoryMb
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          VAULT_LAMBDA_MODE: browser-worker
+          VAULT_BROWSER_ENRICH_LIMIT: "24"
+          VAULT_BROWSER_ENRICH_CONCURRENCY: "2"
+          VAULT_BROWSER_ENRICH_LOOKBACK_DAYS: "30"
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref VaultStateBucket
@@ -227,3 +258,6 @@ Outputs:
   ProcessorFunctionName:
     Description: Single-concurrency worker that runs the Codex-backed vault pipeline.
     Value: !Ref ProcessorFunction
+  BrowserWorkerFunctionName:
+    Description: Browser-capable worker that enriches dynamic or blocked links against the canonical vault state.
+    Value: !Ref BrowserWorkerFunction
