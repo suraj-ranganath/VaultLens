@@ -738,6 +738,7 @@ Incoming message:
 
 
 def build_vault_work_prompt(payload: dict[str, Any]) -> str:
+    user_name = os.environ.get("VAULT_USER_NAME", "").strip() or "the user"
     return f"""
 You are the full-power VaultLens filing and enrichment agent.
 
@@ -747,7 +748,7 @@ Mission:
 - Inspect the current Telegram message, attachments, recent conversation context, and existing vault.
 - Decide the best durable representation for what the user sent or implied.
 - Create or update the right markdown notes, topics, projects, decisions, systems, memories, dashboards, outputs, backlinks, and artifact references.
-- Preserve context about Suraj: preferences, recurring interests, relationships, taste, priorities, decisions, operating systems, and task state when the message reveals durable signal.
+- Preserve context about {user_name}: preferences, recurring interests, relationships, taste, priorities, decisions, operating systems, and task state when the message reveals durable signal.
 - Improve the vault's retrieval structure if the current taxonomy is insufficient. It is acceptable to add or update templates, indexes, topic pages, dashboards, memory-review artifacts, and canonical note organization when that helps future agents.
 
 Tool freedom:
@@ -854,8 +855,9 @@ User question:
 
 
 def build_brief_prompt(payload: dict[str, Any], context_pack: str) -> str:
+    user_name = os.environ.get("VAULT_USER_NAME", "").strip() or "the user"
     return f"""
-You are Suraj's morning brief agent.
+You are {user_name}'s morning brief agent.
 
 Goal:
 - Create a smart, personalized, high-signal morning Telegram brief for {payload.get("today")}.

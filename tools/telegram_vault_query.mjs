@@ -472,7 +472,7 @@ function scoreCandidate(relativePath, text, terms, question) {
     }
   }
   if (/\bdating|relationship|partner|girlfriend|boyfriend|compatible|compatibility\b/i.test(question)) {
-    if (/\bdating|girlfriend|boyfriend|compatible|compatibility|arunima\b/i.test(haystack)) {
+    if (/\bdating|relationship|partner|girlfriend|boyfriend|compatible|compatibility\b/i.test(haystack)) {
       score += 20;
     }
   }

@@ -136,8 +136,8 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
             session_name = "telegram-live"
             stream_file = telegram_inbox.stream_path(inbox_dir, session_name)
             stream_file.write_text(
-                "[4/28/26, 8:01:00 AM] Suraj: Anthropic role https://anthropic.com/jobs/mts\n"
-                "[4/28/26, 8:03:00 AM] Suraj: screenshot of event\n",
+                "[4/28/26, 8:01:00 AM] User: Anthropic role https://anthropic.com/jobs/mts\n"
+                "[4/28/26, 8:03:00 AM] User: screenshot of event\n",
                 encoding="utf-8",
             )
             telegram_inbox.append_jsonl(
@@ -171,7 +171,7 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
                 "message_id": 1302,
                 "chat_id": 42,
                 "timestamp_iso": "2026-04-28T08:04:00+00:00",
-                "sender": "Suraj",
+                "sender": "User",
                 "raw_text": "what do you think about that link and screenshot?",
                 "attachments": [],
             }
@@ -691,7 +691,7 @@ print(json.dumps({
             {
                 "type": "service_account",
                 "client_email": "vault-calendar-worker@example.iam.gserviceaccount.com",
-                "private_key": "-----BEGIN PRIVATE KEY-----\\nabc123\\n-----END PRIVATE KEY-----\\n",
+                "private_key": "FAKE_SERVICE_ACCOUNT_KEY\\nabc123\\nEND_FAKE_SERVICE_ACCOUNT_KEY\\n",
             }
         )
 
@@ -699,7 +699,7 @@ print(json.dumps({
             normalized = json.loads(module.normalize_gws_credentials_json(raw))
             self.assertEqual(
                 normalized["private_key"],
-                "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----\n",
+                "FAKE_SERVICE_ACCOUNT_KEY\nabc123\nEND_FAKE_SERVICE_ACCOUNT_KEY\n",
             )
             self.assertNotIn("\\n", normalized["private_key"])
 
@@ -1052,7 +1052,7 @@ application_status: to_apply
                     "date": 1777248000,
                     "text": "/today",
                     "chat": {"id": 123, "type": "private"},
-                    "from": {"first_name": "Suraj"},
+                    "from": {"first_name": "User"},
                 },
             }
             with mock.patch.object(telegram_inbox, "telegram_send_message", side_effect=fake_send_message), mock.patch.object(
@@ -1119,7 +1119,7 @@ application_status: to_apply
                     "date": 1777248000,
                     "text": "/queue",
                     "chat": {"id": 123, "type": "private"},
-                    "from": {"first_name": "Suraj"},
+                    "from": {"first_name": "User"},
                 },
             }
             with mock.patch.object(telegram_inbox, "telegram_send_message", side_effect=lambda *args, **kwargs: sent.append(kwargs) or {"ok": True}), mock.patch.object(
@@ -1190,7 +1190,7 @@ application_status: to_apply
                     "id": "cb-1",
                     "data": details_callback_data,
                     "message": {"message_id": 30, "chat": {"id": 123, "type": "private"}},
-                    "from": {"first_name": "Suraj"},
+                    "from": {"first_name": "User"},
                 },
             }
             sent: list[dict[str, object]] = []
@@ -1220,7 +1220,7 @@ application_status: to_apply
                     "id": "cb-2",
                     "data": applied_callback_data,
                     "message": {"message_id": 31, "chat": {"id": 123, "type": "private"}},
-                    "from": {"first_name": "Suraj"},
+                    "from": {"first_name": "User"},
                 },
             }
             with mock.patch.object(telegram_inbox, "telegram_answer_callback_query", return_value={"ok": True}), mock.patch.object(
@@ -1275,7 +1275,7 @@ application_status: to_apply
             tools.mkdir()
             (tools / "vault_events.py").write_text((REPO_ROOT / "tools" / "vault_events.py").read_text(), encoding="utf-8")
             mock_result = {
-                "durable_facts": ["Suraj wants the vault to be agent-first."],
+                "durable_facts": ["The user wants the vault to be agent-first."],
                 "preferences": ["Keep responses direct and useful."],
                 "decisions_or_systems": ["Use Telegram as always-on ingestion."],
                 "task_implications": [],
@@ -1297,7 +1297,7 @@ application_status: to_apply
                 "date": timestamp,
                 "text": text,
                 "chat": {"id": 42, "type": "private", "title": ""},
-                "from": {"id": 1, "first_name": "Suraj"},
+                "from": {"id": 1, "first_name": "User"},
             },
         }
 
