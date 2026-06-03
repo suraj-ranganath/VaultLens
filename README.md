@@ -4,6 +4,8 @@ VaultLens is a self-hosted, Telegram-first personal agent for the things you do 
 
 Send something to your Telegram bot, and VaultLens decides what to do with it: save it to your knowledge base, extract a deadline, create a job/opportunity note, ask a clarifying question, add an event to Google Calendar after confirmation, or answer from your existing vault.
 
+The agent runtime is built around the **Codex Python SDK**, not OpenAI API-key-backed calls. Local runs reuse your Codex login, and cloud runs can use either a Codex access token or a private S3-synced Codex `auth.json` fallback for Pro/Plus accounts. The result is that VaultLens can run against your Codex subscription instead of spending OpenAI API credits.
+
 ## Start Here: The Daily Utility Loop
 
 VaultLens is most useful when Telegram becomes your capture surface and the agent becomes your daily filter.
@@ -62,6 +64,38 @@ The brief is agentic, not just a deterministic reminder list. Cheap code builds 
 
 VaultLens is also an agent-maintained markdown knowledge base for everything you want to revisit later. The core idea is simple: keep your long-term memory as explicit files, then let agents maintain, search, and surface those files. No opaque app memory. No provider lock-in. The vault is just markdown, images, JSONL logs, SQLite indexes, and portable source artifacts.
 
+## Current Architecture
+
+VaultLens has one shared agent brain and several thin surfaces around it:
+
+```mermaid
+flowchart LR
+  Telegram["Telegram bot\nlinks, notes, images, questions"] --> Receiver["AWS Lambda receiver\nfast ack + raw update capture"]
+  Receiver --> S3["S3 canonical vault state\nstate bundle + webhook events + Codex auth fallback"]
+  Receiver --> Processor["AWS Lambda processor\nsingle concurrency + state lock"]
+  Processor --> Runner["Codex Python SDK runner\ntools/codex_agent_runner.py"]
+  Runner --> VaultWork["Full-access vault-work\nwrite notes, topics, decisions, dashboards"]
+  Processor --> Calendar["Google Workspace CLI\nconfirmed calendar writes"]
+  Processor --> BrowserWorker["Playwright browser worker\nX, LinkedIn, dynamic pages, nested links"]
+  BrowserWorker --> Artifacts["raw/web-clips/browser-artifacts/"]
+  VaultWork --> S3
+  Artifacts --> S3
+  S3 --> Local["Local working copy\nObsidian + CLI + web UI"]
+  Local --> Web["Bun web chat\nstreams traces + citations"]
+  Web --> Runner
+  Local --> Cache["SQLite FTS/BM25 cache\nagent digest + health reports"]
+  Cache --> Runner
+```
+
+The important pieces:
+
+- **Codex Python SDK runner**: `tools/codex_agent_runner.py` is the shared model runtime for Telegram routing, vault-work, vault Q&A, streaming web chat, image extraction, calendar planning, dreams, and morning briefs.
+- **No OpenAI API credits**: VaultLens does not require `OPENAI_API_KEY`, raw Responses API calls, or OpenAI embeddings. Search is local SQLite FTS/BM25, and agent turns use Codex auth.
+- **AWS is canonical**: the cloud S3 state bundle is the source of truth for ignored vault data so Telegram ingestion keeps working when your laptop is off.
+- **Full-access agent, controlled side effects**: Codex can read/write the restored vault working tree, run shell workflows, follow links, and synthesize markdown. Deterministic code still owns Telegram sends, S3 sync, Google Calendar mutation, and webhook acknowledgement.
+- **Fast path plus browser path**: ordinary messages run through the processor; X/LinkedIn/dynamic or explicit "fully extract this" requests can trigger the separate Playwright browser worker.
+- **Inspectable memory**: durable knowledge lives in markdown, source artifacts, JSONL traces, dashboards, and SQLite indexes that can be opened in Obsidian or queried from the web UI.
+
 ## Why VaultLens Exists
 
 Most people save useful links into chats, notes apps, bookmarks, or screenshots and never see them again. VaultLens turns that messy capture stream into a personal wiki that agents can actually use:
@@ -88,6 +122,7 @@ Most people save useful links into chats, notes apps, bookmarks, or screenshots 
 - Obsidian-friendly dashboards and templates.
 - Local search/index pipeline using compact agent digests, SQLite FTS/BM25, source indexes, and health reports.
 - Optional Playwright enrichment for dynamic, blocked, or link-inside-link pages, locally or through the browser worker.
+- Codex Python SDK agent runtime that can use a Codex subscription instead of OpenAI API credits.
 
 ## Repository Scope
 
@@ -119,6 +154,7 @@ Your personal vault data should never be committed.
 - Optional: Node.js 22 or newer for direct `node --check` syntax validation
 - Optional: Python 3.10 or newer if you prefer a system Python instead of uv-managed Python
 - Optional: Obsidian for browsing the markdown vault
+- Optional: Codex CLI login for live agent-backed flows
 - Optional: Telegram bot token from BotFather
 - Optional: AWS CLI, AWS SAM CLI, and Docker for always-on cloud ingestion
 - Optional: Google Workspace CLI auth for Google Calendar actions
@@ -283,20 +319,7 @@ bun run x:fetch -- https://x.com/example/status/123
 bun run vault:heartbeat -- --dry-run
 ```
 
-## Architecture
-
-```mermaid
-flowchart LR
-  Capture["Telegram, chat exports, URLs, images, docs"] --> Raw["raw/ and imports/"]
-  Raw --> Agent["Ingest and enrichment agents"]
-  Agent --> Notes["items/, topics/, projects/"]
-  Notes --> Cache[".vault/cache, search.sqlite, source index"]
-  Cache --> Surfaces["Web chat, Obsidian, Telegram, dashboards"]
-  Surfaces --> Outputs["outputs/ and decisions"]
-  Outputs --> Notes
-```
-
-Design principles:
+## Design Principles
 
 - Files over app databases.
 - Explicit memory over hidden personalization.
