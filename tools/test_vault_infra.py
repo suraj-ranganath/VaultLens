@@ -845,6 +845,58 @@ tags: [misc]
             self.assertNotIn("Already Applied Role", payload["text"])
             self.assertNotIn("Low Signal Reading", payload["text"])
 
+    def test_daily_brief_delivery_guard_forces_scheduled_send(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "items" / "jobs").mkdir(parents=True)
+            (root / "items" / "jobs" / "2026-04-25 ai lab - research engineer.md").write_text(
+                """---
+type: job
+title: AI Lab - Research Engineer
+url: https://example.com/job
+discovered_on: 2026-04-25
+posted_on: 2026-04-25
+status: open
+priority: high
+application_status: to_review
+tags: [ai, research]
+why_saved: Strong fit and applying early matters.
+---
+""",
+                encoding="utf-8",
+            )
+            mock_agent_result = {
+                "should_send": False,
+                "telegram_text": "",
+                "selected_actions": [],
+                "recommended_reading": None,
+                "rationale": "Mistakenly decided not to send.",
+            }
+            env = os.environ.copy()
+            env["VAULT_MORNING_BRIEF_AGENT_MOCK_JSON"] = json.dumps(mock_agent_result)
+            env["VAULT_BRIEF_INCLUDE_CALENDAR"] = "false"
+            env["VAULT_BRIEF_ALWAYS_SEND"] = "true"
+            proc = subprocess.run(
+                [
+                    "python3",
+                    str(REPO_ROOT / "tools" / "vault_heartbeat.py"),
+                    "--vault-root",
+                    str(root),
+                    "--today",
+                    "2026-04-26",
+                    "--dry-run",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertTrue(payload["should_send"])
+            self.assertIn("AI Lab - Research Engineer", payload["text"])
+            self.assertIn("Delivery guard forced", payload["agent_rationale"])
+
     def test_daily_brief_collects_today_calendar_events_for_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

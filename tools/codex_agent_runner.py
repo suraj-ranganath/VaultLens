@@ -965,10 +965,14 @@ Selection principles:
 - Include important Google Calendar events today; omit filler/low-signal holds.
 - Treat explicit high/critical priority as a strong signal.
 - Include at most one recommended reading.
-- Send no brief if there is no meaningful signal.
+- If forceSend is true, this is a scheduled daily delivery: set should_send true and write a compact telegram_text even when the message is simply "no urgent/high-signal vault actions surfaced today."
+- If forceSend is false, send no brief only when there is no meaningful signal.
 - Keep telegram_text compact, direct, warm, and ready to send as plain Telegram text.
 - Use raw source URLs when available.
 - Return JSON only.
+
+forceSend:
+{json.dumps(bool(payload.get("forceSend")), indent=2)}
 
 Candidate action shortlist:
 {json.dumps(payload.get("candidateActions") or [], indent=2)}

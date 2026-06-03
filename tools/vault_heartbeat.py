@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -110,6 +111,7 @@ def main() -> None:
             )
         except Exception as exc:
             calendar_error = str(exc)
+    always_send = env_flag("VAULT_BRIEF_ALWAYS_SEND", default=True)
     agent_result = run_morning_brief_agent(
         vault_root=vault_root,
         today=today,
@@ -118,6 +120,17 @@ def main() -> None:
         candidate_calendar_events=candidate_calendar_events,
         calendar_error=calendar_error,
         max_actions=args.max_actions,
+        force_send=always_send,
+    )
+    agent_result = enforce_morning_brief_delivery(
+        agent_result,
+        today=today,
+        candidate_actions=candidate_actions,
+        candidate_readings=candidate_readings,
+        candidate_calendar_events=candidate_calendar_events,
+        calendar_error=calendar_error,
+        max_actions=args.max_actions,
+        always_send=always_send,
     )
     should_send = bool(agent_result.get("should_send"))
     text = clean_scalar(agent_result.get("telegram_text"))
@@ -466,9 +479,18 @@ def safe_zoneinfo(timezone_label: str) -> ZoneInfo:
 
 
 def gws_command(vault_root: Path) -> list[str]:
-    local = vault_root / "node_modules" / ".bin" / "gws"
-    if local.exists():
-        return [str(local)]
+    override = os.environ.get("VAULT_GWS_BIN", "").strip()
+    candidates = [
+        Path(override) if override else None,
+        vault_root / "node_modules" / "@googleworkspace" / "cli" / "bin" / "gws",
+        vault_root / "node_modules" / ".bin" / "gws",
+    ]
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return [str(candidate)]
+    discovered = shutil.which("gws")
+    if discovered:
+        return [discovered]
     return ["gws"]
 
 
@@ -556,6 +578,7 @@ def run_morning_brief_agent(
     candidate_calendar_events: list[dict[str, Any]],
     calendar_error: str,
     max_actions: int,
+    force_send: bool = False,
 ) -> dict[str, Any]:
     mock_json = os.environ.get("VAULT_MORNING_BRIEF_AGENT_MOCK_JSON", "").strip()
     if mock_json:
@@ -572,6 +595,7 @@ def run_morning_brief_agent(
         "candidateReadings": candidate_readings,
         "candidateCalendarEvents": candidate_calendar_events,
         "calendarError": calendar_error,
+        "forceSend": force_send,
         "model": os.environ.get("VAULT_MORNING_BRIEF_MODEL") or os.environ.get("VAULT_CODEX_MODEL") or os.environ.get("VAULT_AGENT_MODEL") or "auto",
         "reasoningEffort": os.environ.get("VAULT_MORNING_BRIEF_REASONING_EFFORT")
         or os.environ.get("VAULT_AGENT_REASONING_EFFORT")
@@ -596,6 +620,100 @@ def run_morning_brief_agent(
     if not isinstance(parsed, dict):
         raise RuntimeError("morning brief agent returned a non-object JSON payload")
     return parsed
+
+
+def enforce_morning_brief_delivery(
+    agent_result: dict[str, Any],
+    *,
+    today: date,
+    candidate_actions: list[dict[str, Any]],
+    candidate_readings: list[dict[str, Any]],
+    candidate_calendar_events: list[dict[str, Any]],
+    calendar_error: str,
+    max_actions: int,
+    always_send: bool,
+) -> dict[str, Any]:
+    if not always_send:
+        return agent_result
+
+    result = dict(agent_result)
+    text = clean_scalar(result.get("telegram_text"))
+    should_send = bool(result.get("should_send"))
+    if should_send and text:
+        return result
+
+    selected_actions = result.get("selected_actions")
+    if not isinstance(selected_actions, list) or not selected_actions:
+        selected_actions = candidate_actions[: max(1, max_actions)]
+    selected_reading = result.get("recommended_reading")
+    if not isinstance(selected_reading, dict):
+        selected_reading = candidate_readings[0] if candidate_readings else None
+
+    result["should_send"] = True
+    result["selected_actions"] = selected_actions
+    result["recommended_reading"] = selected_reading
+    if not text:
+        result["telegram_text"] = render_fallback_morning_brief(
+            today=today,
+            actions=selected_actions,
+            reading=selected_reading,
+            calendar_events=candidate_calendar_events,
+            calendar_error=calendar_error,
+        )
+    prior_rationale = clean_scalar(result.get("rationale"))
+    guard_note = "Delivery guard forced a scheduled daily brief because VAULT_BRIEF_ALWAYS_SEND is enabled."
+    result["rationale"] = f"{prior_rationale} {guard_note}".strip()
+    return result
+
+
+def render_fallback_morning_brief(
+    *,
+    today: date,
+    actions: list[dict[str, Any]],
+    reading: dict[str, Any] | None,
+    calendar_events: list[dict[str, Any]],
+    calendar_error: str,
+) -> str:
+    title = today.strftime("%b %-d") if os.name != "nt" else today.strftime("%b %#d")
+    lines = [f"Morning brief — {title}"]
+    if calendar_events:
+        lines.append("")
+        lines.append("Today:")
+        for event in calendar_events[:3]:
+            when = clean_scalar(event.get("time_label") or event.get("start") or event.get("date"))
+            source = clean_scalar(event.get("url") or event.get("source"))
+            lines.append(f"- {brief_title(event.get('title'))}{f' at {when}' if when else ''}")
+            if source:
+                lines.append(source)
+    elif calendar_error:
+        lines.append("")
+        lines.append("Calendar did not load, so this brief is based on vault tasks/opportunities only.")
+
+    if actions:
+        lines.append("")
+        lines.append("Highest-signal actions:")
+        for index, item in enumerate(actions[:5], start=1):
+            source = clean_scalar(item.get("url") or item.get("source") or item.get("path"))
+            reason = clean_scalar(item.get("why_today") or item.get("reason"))
+            lines.append(f"{index}. {brief_title(item.get('title'))}")
+            if reason:
+                lines.append(f"Why: {reason}")
+            if source:
+                lines.append(source)
+    elif not calendar_events:
+        lines.append("")
+        lines.append("No urgent/high-signal vault actions surfaced today.")
+
+    if reading:
+        source = clean_scalar(reading.get("source") or reading.get("url") or reading.get("path"))
+        why = clean_scalar(reading.get("why_this_matters") or reading.get("reason"))
+        lines.append("")
+        lines.append(f"Recommended read: {brief_title(reading.get('title'))}")
+        if why:
+            lines.append(f"Why: {why}")
+        if source:
+            lines.append(source)
+    return "\n".join(lines).strip()
 
 
 def action_payload(note: Note, *, kind: str, date_value: date, score: int, reason: str) -> dict[str, Any]:

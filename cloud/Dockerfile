@@ -21,7 +21,10 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 ENV VAULT_CODEX_BIN=/usr/local/bin/codex
 
 COPY package.json bun.lock ./
-RUN bun install --production --frozen-lockfile
+RUN bun install --production --frozen-lockfile \
+    && ./node_modules/.bin/gws --version \
+    && test -x node_modules/@googleworkspace/cli/bin/gws \
+    && chmod -R a+rX node_modules
 
 COPY pyproject.toml uv.lock ./
 RUN mkdir -p /opt/uv-python \

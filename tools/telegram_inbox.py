@@ -8,6 +8,7 @@ import mimetypes
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -1919,9 +1920,18 @@ def invoke_calendar_agent(
 
 
 def gws_command(vault_root: Path) -> list[str]:
-    local = vault_root / "node_modules" / ".bin" / "gws"
-    if local.exists():
-        return [str(local)]
+    override = os.environ.get("VAULT_GWS_BIN", "").strip()
+    candidates = [
+        Path(override) if override else None,
+        vault_root / "node_modules" / "@googleworkspace" / "cli" / "bin" / "gws",
+        vault_root / "node_modules" / ".bin" / "gws",
+    ]
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return [str(candidate)]
+    discovered = shutil.which("gws")
+    if discovered:
+        return [discovered]
     return ["gws"]
 
 
