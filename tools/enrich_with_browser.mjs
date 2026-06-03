@@ -622,8 +622,10 @@ function candidateFiles(vaultRoot) {
     const dir = path.join(vaultRoot, folder);
     if (!fs.existsSync(dir)) continue;
     for (const name of fs.readdirSync(dir)) {
+      if (name.startsWith(".")) continue;
       if (!name.endsWith(".md")) continue;
       const filePath = path.join(dir, name);
+      if (!fs.statSync(filePath).isFile()) continue;
       const note = loadNote(filePath);
       const data = parseSimpleFrontmatter(note.frontmatter);
       if (!needsBrowserPass(note, data)) continue;
@@ -641,13 +643,17 @@ async function main() {
   const limit = Number(process.argv[3] || "60");
   const concurrency = Math.max(1, Number(process.argv[4] || "4"));
   const lookbackDays = Math.max(0, Number(process.argv[5] || "30"));
+  const files = candidateFiles(vaultRoot).slice(0, limit);
+  if (files.length === 0) {
+    process.stdout.write(JSON.stringify({ checked: 0, changed: 0, lookbackDays, results: [] }, null, 2) + "\n");
+    return;
+  }
   const headless = String(process.env.VAULT_BROWSER_HEADLESS || "1").toLowerCase() !== "0";
   const profileDir = process.env.VAULT_BROWSER_PROFILE_DIR
     ? path.resolve(process.env.VAULT_BROWSER_PROFILE_DIR)
     : path.join(vaultRoot, ".vault", "browser-profiles", "default");
   fs.mkdirSync(profileDir, { recursive: true });
   const context = await chromium.launchPersistentContext(profileDir, { headless });
-  const files = candidateFiles(vaultRoot).slice(0, limit);
   const results = new Array(files.length);
   let nextIndex = 0;
 

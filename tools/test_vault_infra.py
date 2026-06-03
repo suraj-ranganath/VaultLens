@@ -349,6 +349,24 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
         normal_update = self._telegram_update(603, 1_777_000_122, "save this note for later")
         self.assertFalse(webhook.should_trigger_browser_enrichment([normal_update], {}))
 
+    def test_browser_enricher_skips_hidden_appledouble_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tweet_dir = root / "items" / "tweets"
+            tweet_dir.mkdir(parents=True)
+            (tweet_dir / "._2026-02-17 tweet-from-dejavucoder.md").write_text("not markdown frontmatter", encoding="utf-8")
+
+            proc = subprocess.run(
+                ["bun", str(REPO_ROOT / "tools" / "enrich_with_browser.mjs"), str(root), "0", "1", "30"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["checked"], 0)
+
     def test_daily_brief_delegates_final_selection_to_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
