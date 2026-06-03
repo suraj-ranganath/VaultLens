@@ -21,10 +21,7 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
 ENV VAULT_CODEX_BIN=/usr/local/bin/codex
 
 COPY package.json bun.lock ./
-RUN bun install --production --frozen-lockfile \
-    && ./node_modules/.bin/gws --version \
-    && test -x node_modules/@googleworkspace/cli/bin/gws \
-    && chmod -R a+rX node_modules
+RUN bun install --production --frozen-lockfile
 
 COPY pyproject.toml uv.lock ./
 RUN mkdir -p /opt/uv-python \
@@ -37,6 +34,9 @@ RUN mkdir -p /opt/uv-python \
       pydantic==2.13.4 \
     && uv pip install --python .venv/bin/python --no-deps openai-codex==0.1.0b2 \
     && chmod -R a+rX /opt/uv-python .venv
+RUN ./node_modules/.bin/gws --version \
+    && test -x node_modules/@googleworkspace/cli/bin/gws \
+    && chmod -R a+rX node_modules
 
 COPY AGENTS.md CLAUDE.md GEMINI.md README.md WIKI.md ./
 COPY bin ./bin
