@@ -27,7 +27,7 @@ from vault_health import build_health_report
 
 
 def load_note(path: Path) -> tuple[dict, str]:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
         raise ValueError(f"{path} does not start with frontmatter")
     _, rest = text.split("---\n", 1)
@@ -68,6 +68,10 @@ def item_from_note(data: dict) -> Item:
     )
 
 
+def is_markdown_note(path: Path) -> bool:
+    return path.is_file() and path.suffix == ".md" and not path.name.startswith(".")
+
+
 def write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     safe = content.encode("utf-8", "ignore").decode("utf-8", "ignore")
@@ -89,10 +93,12 @@ def rebuild(vault_root: Path) -> dict:
         "items/tweets",
     ]:
         for path in sorted((vault_root / folder).glob("*.md")):
+            if not is_markdown_note(path):
+                continue
             data, _ = load_note(path)
             items.append((item_from_note(data), path))
 
-    project_pages = sorted((vault_root / "projects").glob("*.md"))
+    project_pages = sorted(path for path in (vault_root / "projects").glob("*.md") if is_markdown_note(path))
     write(vault_root / "dashboards" / "relevant-now.md", render_relevant_now(items))
     write(vault_root / "dashboards" / "jobs-urgent.md", render_jobs_urgent(items))
     write(vault_root / "dashboards" / "jobs-ledger.md", render_jobs_ledger(items))

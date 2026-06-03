@@ -367,6 +367,25 @@ Hybrid search combines lexical matching, recency, and diverse snippets for cheap
             payload = json.loads(proc.stdout)
             self.assertEqual(payload["checked"], 0)
 
+    def test_rebuild_dashboards_skips_hidden_appledouble_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tweet_dir = root / "items" / "tweets"
+            tweet_dir.mkdir(parents=True)
+            (tweet_dir / "._2026-02-17 tweet-from-dejavucoder.md").write_bytes(b"\x00\x05\x16\x07\x00\xa3")
+
+            proc = subprocess.run(
+                ["python3", str(REPO_ROOT / "tools" / "rebuild_dashboards.py")],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertEqual(payload["items"], 0)
+
     def test_daily_brief_delegates_final_selection_to_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
